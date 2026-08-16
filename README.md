@@ -2,7 +2,7 @@
 
 A browser app for driving agent coding sessions - "I don't prompt a terminal directly, I use an app to prompt a specific session" - plus a live cost/token readout, borrowed from `claude-realtime-usage`.
 
-The cockpit drives Claude Code sessions through `@anthropic-ai/claude-agent-sdk` and Grok sessions through the Grok CLI's JSON-RPC stdio interface, rendering the message stream itself. It does not wrap a pty and pipe raw bytes to `xterm.js` - see the full plan for why.
+The cockpit drives Claude Code sessions through `@anthropic-ai/claude-agent-sdk` and Grok sessions through the Grok CLI's JSON-RPC stdio interface, rendering the message stream itself. It does not wrap a pty and pipe raw bytes to `xterm.js`.
 
 ## Run
 
@@ -29,10 +29,6 @@ The cockpit does not manage auth itself - it just drives CLIs that are already l
 - MVP5-MVP7 (Windows-hosted sessions, cross-session messaging, phone approvals) not started.
 
 See `tests/README.md` for what is covered by automated tests versus hand-verified only.
-
-## Plan
-
-Full design doc, decisions, spikes, and roadmap: `~/.claude/plans/claude-prompt-cockpit.md`
 
 ## License
 
