@@ -1,0 +1,17 @@
+{
+  "_comment": "USD per MILLION tokens. Short-context rates (< 200k prompt tokens) from https://docs.x.ai/developers/pricing (checked 2026-08-16). Long-context (2x) is not modeled here. Grok has no 5m/1h cache-write tiers: cache creation is billed as regular input, so cache_write_* matches input. Re-check the pricing page if these look stale.",
+  "_rate_shape": {
+    "input": "cost per 1M uncached input tokens",
+    "output": "cost per 1M output tokens",
+    "cache_write_5m": "unused on Grok; set equal to input so cache_creation tokens price as uncached input",
+    "cache_write_1h": "unused on Grok; set equal to input so cache_creation tokens price as uncached input",
+    "cache_read": "cost per 1M cached input tokens"
+  },
+  "models": {
+    "grok-4.6":       { "input": 2, "output": 6, "cache_write_5m": 2, "cache_write_1h": 2, "cache_read": 0.5, "confidence": "docs.x.ai 2026-08-16 - short context < 200k" },
+    "grok-4.6-build": { "input": 2, "output": 6, "cache_write_5m": 2, "cache_write_1h": 2, "cache_read": 0.5, "confidence": "alias for grok-4.6 - modelUsage key on turn_completed" },
+    "grok-4.5":       { "input": 2, "output": 6, "cache_write_5m": 2, "cache_write_1h": 2, "cache_read": 0.3, "confidence": "docs.x.ai 2026-08-16 - short context < 200k" },
+    "grok-build-0.1": { "input": 1, "output": 2, "cache_write_5m": 1, "cache_write_1h": 1, "cache_read": 0.2, "confidence": "docs.x.ai 2026-08-16 - short context < 200k" },
+    "grok-build":     { "input": 1, "output": 2, "cache_write_5m": 1, "cache_write_1h": 1, "cache_read": 0.2, "confidence": "alias for grok-build-0.1" }
+  }
+}

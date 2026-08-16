@@ -1,0 +1,498 @@
+// Exercises the auth surface from plan Decisions and the MVP1 verification
+// checklist: Origin validation and per-session token, both on the ws
+// upgrade path. Does not create a real session (that would spawn the CLI) -
+// see tests/integration.manual.mjs for the spawn-a-real-session path.
+import { test, before, after } from 'node:test';
+import assert from 'node:assert/strict';
+import { WebSocket } from 'ws';
+import http from 'node:http';
+import { mkdtemp, rm, readFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import * as registry from '../src/session-registry.js';
+import { setSessionDefaults } from '../src/session-defaults.js';
+import { settingsPath } from '../src/settings-file.js';
+
+process.env.PORT = process.env.PORT || '4319';
+const { server, PORT, HOST, seedSessionDefaults } = await import('../src/server.js');
+const ORIGIN = `http://${HOST}:${PORT}`;
+
+before(() => new Promise((resolve) => server.listen(PORT, HOST, resolve)));
+after(() => new Promise((resolve) => server.close(resolve)));
+
+// The thinking/auto-continue/reload-plugins/plugin-enabled routes each
+// persist to <cwd>/.claude/settings.local.json (session-defaults.js/
+// plugin-settings.js) as a side effect of a successful call - unlike every
+// other route test in this file, those can't share the plain '/tmp' cwd the
+// rest of this file uses, or they'd write real files into a shared temp dir
+// across test runs (same tradeoff plugin-settings.test.mjs already solved
+// for its own tests). Each test that touches one of those routes gets its
+// own throwaway directory instead.
+async function makeTmpCwd() {
+  return mkdtemp(path.join(tmpdir(), 'cockpit-server-route-'));
+}
+
+// Minimal stub, same shape as session-registry.test.mjs's own fakeStartSession
+// - doesn't spawn a real CLI process, just enough surface for the session
+// routes under test to have something to call. `query` covers the model/
+// thinking/mcp/plugin routes added after this stub was first written
+// (backlog: those routes had zero test coverage) - each method just records
+// its last call so a test can assert the route actually reached it, same as
+// how setMode/resolveApproval above are asserted on indirectly via status.
+function fakeStartSession() {
+  return {
+    pushInput: () => {},
+    close: () => {},
+    setMode: async (m) => m,
+    getMode: () => 'default',
+    resolveApproval: () => false,
+    query: {
+      setModel: async () => {},
+      setEffort: async () => {},
+      supportedModels: async () => [],
+      supportedCommands: async () => [{ name: 'help', description: 'help' }],
+      supportedAgents: async () => [],
+      setMaxThinkingTokens: async () => {},
+      mcpServerStatus: async () => [{ name: 'example', status: 'connected' }],
+      toggleMcpServer: async () => {},
+      reconnectMcpServer: async () => {},
+      reloadPlugins: async () => ({ plugins: [{ name: 'formatter', source: 'anthropic-tools' }] }),
+      setPluginEnabled: async (pluginKey, enabled) => {
+        lastPluginEnabled = { pluginKey, enabled };
+      },
+    },
+  };
+}
+
+let lastPluginEnabled = null;
+
+test('GET / serves the launcher page', async () => {
+  const res = await fetch(`${ORIGIN}/`);
+  assert.equal(res.status, 200);
+  const body = await res.text();
+  assert.match(body, /Prompt Cockpit/);
+});
+
+test('GET /api/resumable returns an array without needing auth (loopback-only, not internet-exposed)', async () => {
+  const res = await fetch(`${ORIGIN}/api/resumable`);
+  assert.equal(res.status, 200);
+  assert.ok(Array.isArray(await res.json()));
+});
+
+test('POST /api/sessions rejects a cwd that is not a directory', async () => {
+  const res = await fetch(`${ORIGIN}/api/sessions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ cwd: '/definitely/not/a/real/directory' }),
+  });
+  assert.equal(res.status, 400);
+});
+
+test('POST /api/sessions rejects a model or grok effort that is not a safe token', async () => {
+  const cwd = process.cwd();
+  const badModel = await fetch(`${ORIGIN}/api/sessions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ cwd, provider: 'grok', model: 'grok-4.5 & calc' }),
+  });
+  assert.equal(badModel.status, 400);
+  assert.match((await badModel.json()).error, /invalid model/);
+
+  const badEffort = await fetch(`${ORIGIN}/api/sessions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ cwd, provider: 'grok', effort: 'low&whoami' }),
+  });
+  assert.equal(badEffort.status, 400);
+  assert.match((await badEffort.json()).error, /invalid effort/);
+});
+
+test('a request with a foreign Host is rejected, even with the right Origin', async () => {
+  // `fetch` treats Host as a forbidden header and silently overrides it
+  // from the URL - can't use it to test this. A raw http.request can
+  // actually send a spoofed Host, which is exactly the DNS-rebinding shape
+  // isSpoofedRequest is defending against.
+  const status = await new Promise((resolve, reject) => {
+    const req = http.request({ host: HOST, port: PORT, path: '/api/resumable', headers: { host: 'evil.example', origin: ORIGIN } }, (res) => {
+      res.resume();
+      resolve(res.statusCode);
+    });
+    req.on('error', reject);
+    req.end();
+  });
+  assert.equal(status, 403);
+});
+
+test('a request with a foreign Origin is rejected, even with the right Host', async () => {
+  const res = await fetch(`${ORIGIN}/api/resumable`, {
+    headers: { origin: 'http://evil.example' },
+  });
+  assert.equal(res.status, 403);
+});
+
+test('a session-scoped route rejects a missing or wrong token, and accepts the right one', async () => {
+  registry._reset();
+  const row = registry.createSession({ cwd: '/tmp', startSessionImpl: fakeStartSession });
+
+  const noToken = await fetch(`${ORIGIN}/api/sessions/${row.id}/mode`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ mode: 'plan' }),
+  });
+  assert.equal(noToken.status, 401);
+
+  const wrongToken = await fetch(`${ORIGIN}/api/sessions/${row.id}/mode`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: 'Bearer definitely-wrong' },
+    body: JSON.stringify({ mode: 'plan' }),
+  });
+  assert.equal(wrongToken.status, 401);
+
+  const rightToken = await fetch(`${ORIGIN}/api/sessions/${row.id}/mode`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${row.token}` },
+    body: JSON.stringify({ mode: 'plan' }),
+  });
+  assert.equal(rightToken.status, 200);
+});
+
+test('GET /api/sessions/:id requires the session token and returns the summary (MVP3 reload-rejoin check)', async () => {
+  registry._reset();
+  const row = registry.createSession({ cwd: '/tmp', startSessionImpl: fakeStartSession });
+
+  const noToken = await fetch(`${ORIGIN}/api/sessions/${row.id}`);
+  assert.equal(noToken.status, 401);
+
+  const res = await fetch(`${ORIGIN}/api/sessions/${row.id}`, {
+    headers: { authorization: `Bearer ${row.token}` },
+  });
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.id, row.id);
+  assert.equal(body.cwd, '/tmp');
+});
+
+test('GET /api/sessions/:id on an unknown id returns 404', async () => {
+  registry._reset();
+  const res = await fetch(`${ORIGIN}/api/sessions/does-not-exist`, {
+    headers: { authorization: 'Bearer whatever' },
+  });
+  assert.equal(res.status, 404);
+});
+
+test('DELETE /api/sessions/:id closes the session and it stops resolving', async () => {
+  registry._reset();
+  const row = registry.createSession({ cwd: '/tmp', startSessionImpl: fakeStartSession });
+
+  const res = await fetch(`${ORIGIN}/api/sessions/${row.id}`, {
+    method: 'DELETE',
+    headers: { authorization: `Bearer ${row.token}` },
+  });
+  assert.equal(res.status, 200);
+  assert.equal(registry.get(row.id), undefined);
+});
+
+// The model/thinking/mcp/plugin routes below were added after this file was
+// first written and had no coverage at all (backlog item) - each gets one
+// happy-path test through handleSessionRoute's real dispatch (auth already
+// covered generically above via the 'mode' route) plus the validation edges
+// that are actually route-specific logic, not just auth boilerplate.
+
+test('POST /api/sessions/:id/model sets the model and returns it', async () => {
+  registry._reset();
+  const row = registry.createSession({ cwd: '/tmp', startSessionImpl: fakeStartSession });
+  const res = await fetch(`${ORIGIN}/api/sessions/${row.id}/model`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${row.token}` },
+    body: JSON.stringify({ model: 'claude-opus-4' }),
+  });
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), { model: 'claude-opus-4' });
+});
+
+test('POST /api/sessions/:id/thinking accepts a valid budget/display and rejects invalid ones', async () => {
+  registry._reset();
+  const cwd = await makeTmpCwd();
+  try {
+    const row = registry.createSession({ cwd, startSessionImpl: fakeStartSession });
+    const auth = { 'content-type': 'application/json', authorization: `Bearer ${row.token}` };
+
+    const ok = await fetch(`${ORIGIN}/api/sessions/${row.id}/thinking`, {
+      method: 'POST',
+      headers: auth,
+      body: JSON.stringify({ maxThinkingTokens: 4096, thinkingDisplay: 'summarized' }),
+    });
+    assert.equal(ok.status, 200);
+    assert.deepEqual(await ok.json(), { maxThinkingTokens: 4096, thinkingDisplay: 'summarized' });
+
+    const negativeTokens = await fetch(`${ORIGIN}/api/sessions/${row.id}/thinking`, {
+      method: 'POST',
+      headers: auth,
+      body: JSON.stringify({ maxThinkingTokens: -1 }),
+    });
+    assert.equal(negativeTokens.status, 400);
+
+    const badDisplay = await fetch(`${ORIGIN}/api/sessions/${row.id}/thinking`, {
+      method: 'POST',
+      headers: auth,
+      body: JSON.stringify({ thinkingDisplay: 'verbose' }),
+    });
+    assert.equal(badDisplay.status, 400);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test('POST /api/sessions/:id/auto-continue toggles the flag', async () => {
+  registry._reset();
+  const cwd = await makeTmpCwd();
+  try {
+    const row = registry.createSession({ cwd, startSessionImpl: fakeStartSession });
+    const res = await fetch(`${ORIGIN}/api/sessions/${row.id}/auto-continue`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${row.token}` },
+      body: JSON.stringify({ enabled: true }),
+    });
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), { enabled: true });
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test('GET /api/sessions/:id/commands returns the handle command list', async () => {
+  registry._reset();
+  const row = registry.createSession({ cwd: '/tmp', provider: 'grok', startSessionImpl: fakeStartSession });
+  const res = await fetch(`${ORIGIN}/api/sessions/${row.id}/commands`, {
+    headers: { authorization: `Bearer ${row.token}` },
+  });
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), [{ name: 'help', description: 'help' }]);
+});
+
+test('GET /api/sessions/:id/mcp returns the server status list', async () => {
+  registry._reset();
+  const row = registry.createSession({ cwd: '/tmp', startSessionImpl: fakeStartSession });
+  const res = await fetch(`${ORIGIN}/api/sessions/${row.id}/mcp`, {
+    headers: { authorization: `Bearer ${row.token}` },
+  });
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), [{ name: 'example', status: 'connected' }]);
+});
+
+test('POST /api/sessions/:id/mcp-toggle and mcp-reconnect require a name and otherwise succeed', async () => {
+  registry._reset();
+  const row = registry.createSession({ cwd: '/tmp', startSessionImpl: fakeStartSession });
+  const auth = { 'content-type': 'application/json', authorization: `Bearer ${row.token}` };
+
+  const missingName = await fetch(`${ORIGIN}/api/sessions/${row.id}/mcp-toggle`, {
+    method: 'POST',
+    headers: auth,
+    body: JSON.stringify({ enabled: true }),
+  });
+  assert.equal(missingName.status, 400);
+
+  const toggled = await fetch(`${ORIGIN}/api/sessions/${row.id}/mcp-toggle`, {
+    method: 'POST',
+    headers: auth,
+    body: JSON.stringify({ name: 'example', enabled: false }),
+  });
+  assert.equal(toggled.status, 200);
+  assert.deepEqual(await toggled.json(), { enabled: false });
+
+  const reconnected = await fetch(`${ORIGIN}/api/sessions/${row.id}/mcp-reconnect`, {
+    method: 'POST',
+    headers: auth,
+    body: JSON.stringify({ name: 'example' }),
+  });
+  assert.equal(reconnected.status, 200);
+  assert.deepEqual(await reconnected.json(), { reconnected: true });
+});
+
+test('POST /api/sessions/:id/reload-plugins merges the on-disk enabledPlugins map into the SDK plugin list', async () => {
+  registry._reset();
+  const cwd = await makeTmpCwd();
+  try {
+    const row = registry.createSession({ cwd, startSessionImpl: fakeStartSession });
+    const res = await fetch(`${ORIGIN}/api/sessions/${row.id}/reload-plugins`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${row.token}` },
+    });
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    // No settings.local.json for this fresh tmp cwd, so readEnabledPlugins()
+    // falls back to {} and every plugin with a `source` defaults to
+    // enabled: true - see plugin-settings.js's readEnabledPlugins/server.js's
+    // merge comment.
+    assert.deepEqual(body.plugins, [{ name: 'formatter', source: 'anthropic-tools', enabled: true }]);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test('POST /api/sessions/:id/plugin-enabled on a grok session uses grok plugin, not settings.local.json', async () => {
+  registry._reset();
+  lastPluginEnabled = null;
+  const cwd = await makeTmpCwd();
+  try {
+    const row = registry.createSession({ cwd, provider: 'grok', startSessionImpl: fakeStartSession });
+    const res = await fetch(`${ORIGIN}/api/sessions/${row.id}/plugin-enabled`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${row.token}` },
+      body: JSON.stringify({ pluginKey: 'playwright@user', enabled: false }),
+    });
+    assert.equal(res.status, 200);
+    assert.deepEqual(lastPluginEnabled, { pluginKey: 'playwright@user', enabled: false });
+    const settingsFile = settingsPath(cwd);
+    await assert.rejects(readFile(settingsFile), /ENOENT/);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test('POST /api/sessions/:id/plugin-enabled requires pluginKey and persists the toggle', async () => {
+  registry._reset();
+  const cwd = await makeTmpCwd();
+  try {
+    const row = registry.createSession({ cwd, startSessionImpl: fakeStartSession });
+    const auth = { 'content-type': 'application/json', authorization: `Bearer ${row.token}` };
+
+    const missingKey = await fetch(`${ORIGIN}/api/sessions/${row.id}/plugin-enabled`, {
+      method: 'POST',
+      headers: auth,
+      body: JSON.stringify({ enabled: true }),
+    });
+    assert.equal(missingKey.status, 400);
+
+    const res = await fetch(`${ORIGIN}/api/sessions/${row.id}/plugin-enabled`, {
+      method: 'POST',
+      headers: auth,
+      body: JSON.stringify({ pluginKey: 'formatter@anthropic-tools', enabled: true }),
+    });
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), { enabled: true });
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test('ws upgrade from a foreign Origin is rejected', async () => {
+  const ws = new WebSocket(`ws://${HOST}:${PORT}/ws?id=x&token=y`, {
+    headers: { Origin: 'http://evil.example' },
+  });
+  await assertRejectedUpgrade(ws);
+});
+
+test('ws upgrade with the right Origin but no token is rejected', async () => {
+  const ws = new WebSocket(`ws://${HOST}:${PORT}/ws?id=x`, {
+    headers: { Origin: ORIGIN },
+  });
+  await assertRejectedUpgrade(ws);
+});
+
+test('ws upgrade with the right Origin but a wrong token is rejected', async () => {
+  const ws = new WebSocket(`ws://${HOST}:${PORT}/ws?id=x&token=definitely-wrong`, {
+    headers: { Origin: ORIGIN },
+  });
+  await assertRejectedUpgrade(ws);
+});
+
+// seedSessionDefaults regression coverage (backlog: previously untested
+// despite two commits dedicated to this exact logic - see session-registry
+// test suite's own note on the same gap). Also covers the fix for the
+// cross-session cwd-carry-forward bug: a fork used to always re-read the
+// cwd-level persisted store, so if another session sharing the same cwd had
+// written to it more recently, the fork silently inherited *that* session's
+// values instead of its own origin session's.
+
+test('seedSessionDefaults applies explicit defaults when passed, ignoring what is on disk for the cwd', async () => {
+  registry._reset();
+  const cwd = await makeTmpCwd();
+  try {
+    // Simulate "session B" (a different session sharing this cwd) having
+    // most recently written its own settings to the shared cwd-level store.
+    await setSessionDefaults(cwd, { maxThinkingTokens: 9999, thinkingDisplay: 'omitted', autoContinue: true });
+
+    // "session A" - the one actually being forked - has different live
+    // values, passed explicitly rather than read back from the cwd store.
+    const row = registry.createSession({ cwd, startSessionImpl: fakeStartSession });
+    await seedSessionDefaults(row, { maxThinkingTokens: 111, thinkingDisplay: null, autoContinue: false });
+
+    const seeded = registry.get(row.id);
+    assert.equal(seeded.maxThinkingTokens, 111);
+    assert.equal(seeded.autoContinue, false);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test('seedSessionDefaults falls back to the cwd-level persisted store when no explicit defaults are passed', async () => {
+  registry._reset();
+  const cwd = await makeTmpCwd();
+  try {
+    await setSessionDefaults(cwd, { maxThinkingTokens: 555, thinkingDisplay: 'summarized', autoContinue: true });
+
+    const row = registry.createSession({ cwd, startSessionImpl: fakeStartSession });
+    await seedSessionDefaults(row);
+
+    const seeded = registry.get(row.id);
+    assert.equal(seeded.maxThinkingTokens, 555);
+    assert.equal(seeded.autoContinue, true);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+// Regression test for the unawaited-write race (backlog H item): the
+// thinking/auto-continue routes used to fire setSessionDefaults(...) without
+// awaiting it before responding 200, so a client that read the settings
+// file immediately after the response could still see the pre-write
+// content. Now awaited, so the write is guaranteed done by response time.
+
+test('POST /api/sessions/:id/thinking has already persisted to disk by the time it responds (no post-response write race)', async () => {
+  registry._reset();
+  const cwd = await makeTmpCwd();
+  try {
+    const row = registry.createSession({ cwd, startSessionImpl: fakeStartSession });
+    const res = await fetch(`${ORIGIN}/api/sessions/${row.id}/thinking`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${row.token}` },
+      body: JSON.stringify({ maxThinkingTokens: 2048, thinkingDisplay: 'summarized' }),
+    });
+    assert.equal(res.status, 200);
+    // No delay, no retry loop - reading immediately is the whole point.
+    const onDisk = JSON.parse(await readFile(settingsPath(cwd), 'utf-8'));
+    assert.equal(onDisk.sessionDefaults.maxThinkingTokens, 2048);
+    assert.equal(onDisk.sessionDefaults.thinkingDisplay, 'summarized');
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test('POST /api/sessions/:id/auto-continue has already persisted to disk by the time it responds', async () => {
+  registry._reset();
+  const cwd = await makeTmpCwd();
+  try {
+    const row = registry.createSession({ cwd, startSessionImpl: fakeStartSession });
+    const res = await fetch(`${ORIGIN}/api/sessions/${row.id}/auto-continue`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${row.token}` },
+      body: JSON.stringify({ enabled: true }),
+    });
+    assert.equal(res.status, 200);
+    const onDisk = JSON.parse(await readFile(settingsPath(cwd), 'utf-8'));
+    assert.equal(onDisk.sessionDefaults.autoContinue, true);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+function assertRejectedUpgrade(ws) {
+  return new Promise((resolve, reject) => {
+    ws.on('open', () => {
+      ws.close();
+      reject(new Error('expected the upgrade to be rejected, but it succeeded'));
+    });
+    ws.on('error', () => resolve()); // unexpected-response -> ws surfaces this as an error event
+  });
+}

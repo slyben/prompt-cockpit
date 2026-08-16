@@ -1,0 +1,19 @@
+{
+  "name": "claude-prompt-cockpit",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "description": "Browser cockpit for driving Claude Code sessions via the Claude Agent SDK.",
+  "type": "module",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test tests/*.test.mjs"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "0.3.231",
+    "ws": "^8.18.0"
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "_comment": "USD per MILLION tokens. Verified 2026-08-06 against platform.claude.com/docs/en/about-claude/pricing. Re-check at https://www.anthropic.com/pricing if these ever look stale; the parser re-reads this file every run.",
+  "_rate_shape": {
+    "input": "cost per 1M standard input tokens",
+    "output": "cost per 1M output tokens",
+    "cache_write_5m": "cost per 1M tokens written to the 5-minute ephemeral cache",
+    "cache_write_1h": "cost per 1M tokens written to the 1-hour ephemeral cache",
+    "cache_read": "cost per 1M tokens read from cache"
+  },
+  "models": {
+    "anthropic.claude-opus-5":  { "input": 5,   "output": 25, "cache_write_5m": 6.25,  "cache_write_1h": 10,  "cache_read": 0.5,  "confidence": "alias for claude-opus-5 - Bedrock/Vertex-style prefixed model id seen in logs" },
+    "anthropic.claude-sonnet-5":{ "input": 2,   "output": 10, "cache_write_5m": 2.5,   "cache_write_1h": 4,   "cache_read": 0.2,  "confidence": "alias for claude-sonnet-5 - Bedrock/Vertex-style prefixed model id seen in logs" },
+    "claude-fable-5":           { "input": 10,  "output": 50, "cache_write_5m": 12.5,  "cache_write_1h": 20,  "cache_read": 1.0,  "confidence": "confirmed via official pricing page 2026-08-06 - Fable is Anthropic's top tier, priced above Opus" },
+    "claude-haiku-4-5-20251001":{ "input": 1,   "output": 5,  "cache_write_5m": 1.25,  "cache_write_1h": 2,   "cache_read": 0.1,  "confidence": "confirmed via official pricing page 2026-08-06" },
+    "claude-opus-4-8":          { "input": 5,   "output": 25, "cache_write_5m": 6.25,  "cache_write_1h": 10,  "cache_read": 0.5,  "confidence": "confirmed via official pricing page 2026-08-06" },
+    "claude-opus-5":            { "input": 5,   "output": 25, "cache_write_5m": 6.25,  "cache_write_1h": 10,  "cache_read": 0.5,  "confidence": "confirmed via official pricing page 2026-08-06" },
+    "claude-sonnet-4-6":        { "input": 3,   "output": 15, "cache_write_5m": 3.75,  "cache_write_1h": 6,   "cache_read": 0.3,  "confidence": "confirmed via official pricing page 2026-08-09 - standard rate for the previous Sonnet generation" },
+    "claude-sonnet-5":          { "input": 2,   "output": 10, "cache_write_5m": 2.5,   "cache_write_1h": 4,   "cache_read": 0.2,  "confidence": "confirmed via official pricing page 2026-08-06 - Anthropic has confirmed this stays the permanent rate, not a reverting intro price" },
+    "<synthetic>":              { "input": 0,   "output": 0,  "cache_write_5m": 0,     "cache_write_1h": 0,   "cache_read": 0,    "confidence": "synthetic/no-cost entries (e.g. compaction), not billed" }
+  }
+}

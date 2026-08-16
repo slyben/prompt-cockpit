@@ -1,0 +1,1359 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Prompt Cockpit</title>
+<link id="favicon" rel="icon" href="" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #1e1f22;
+    --panel: #26282c;
+    --border: #3a3d42;
+    --text: #e6e6e6;
+    --muted: #8a8f98;
+    --accent: #5b8cff;
+    --error: #ff6b6b;
+    --ok: #5ec98d;
+    --screenshot: #c792ea; /* @-picker: distinguishes the screenshots-folder
+                               virtual namespace/entries from real project
+                               files (file-picker.js) */
+  }
+  * { box-sizing: border-box; }
+  /* Claude vs Grok resume lists are different lengths. Without a reserved
+     gutter, the vertical scrollbar appearing/disappearing shifts the
+     centered launcher sideways. Height change is fine; this only pins x. */
+  html { scrollbar-gutter: stable; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
+  header {
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 14px;
+  }
+  #sessionLabel { cursor: pointer; }
+  #sessionLabel:hover { text-decoration: underline dotted; }
+  /* Activity dot (stateIcon) + live cost/token/context/quota strip
+     (stats-panel.js) - docked directly above #compose, same spot/pattern as
+     taskPanel/turnChartPanel above it. Moved down from the header so it
+     sits right where you're about to type the next message; the folder/tab
+     name (#sessionLabel) stays up top. Hides in lockstep with #compose
+     (app.js) rather than floating alone on the launcher screen. */
+  #activityBar {
+    display: none;
+    align-items: center;
+    gap: 8px;
+    border-top: 1px solid var(--border);
+    padding: 6px 16px;
+    font-size: 14px;
+  }
+  #activityBar .state { color: var(--muted); }
+  #activityBar .state.reconnecting { color: #e0b34d; }
+  #activityBar .state.running { color: var(--accent); }
+  #activityBar .state.error { color: var(--error); }
+  #rateLimitBanner { color: #e0b34d; }
+  #autoContinueLabel { display: flex; align-items: center; gap: 4px; cursor: pointer; color: var(--muted); }
+  #autoContinueLabel input { cursor: pointer; }
+  /* The state label is just this icon now - no "idle"/"running" text next
+     to it (app.js leaves stateLabelEl.textContent empty, sets .title
+     instead for a hover tooltip with the word). Lives in #activityBar,
+     right above the compose box, alongside the cost/token stats it keeps
+     company with - not up in the header anymore.
+     Idle/error/closed show a static dot. running/reconnecting instead cycle
+     through a classic ASCII spinner (| / - \) - actual motion, not just a
+     color or an opacity toggle, so it reads as "busy" even to someone who
+     can't distinguish the state colors. Driven by a JS setInterval
+     (app.js's setState/startSpinner) advancing stateIcon's textContent at a
+     fixed wall-clock cadence, deliberately ignoring
+     prefers-reduced-motion: this one small icon is the cockpit's only
+     "something is happening" signal, and its owner has decided the spinner
+     beats a steady color even with reduced-motion on system-wide (their
+     OS/browser-wide setting is left untouched - this is a single-purpose,
+     single-user override, not a statement that motion preferences don't
+     matter generally). */
+  #stateIcon {
+    display: inline-block;
+    width: 8px;
+    text-align: center;
+    font-family: ui-monospace, monospace;
+    font-weight: 700;
+    line-height: 1;
+  }
+  header .spacer { flex: 1; }
+  #statsPanel {
+    display: none;
+    align-items: center;
+    gap: 8px;
+    font-size: 11.5px;
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+  }
+  #statsPanel .stat-cost { color: var(--ok); font-weight: 600; }
+  #statsPanel .stat-warn { color: #e0b34d; }
+  #statsPanel .stat-sep { opacity: 0.5; }
+  /* Terminal-style "select with the mouse, released = copied" feedback -
+     see app.js's mouseup listener on #stream. Positioned at the cursor,
+     fades out on its own; never intercepts clicks (pointer-events: none). */
+  #copyToast {
+    position: fixed;
+    pointer-events: none;
+    background: var(--accent);
+    color: white;
+    padding: 3px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    opacity: 0;
+    transform: translateY(-4px);
+    transition: opacity 0.15s ease, transform 0.15s ease;
+    z-index: 50;
+  }
+  #copyToast.show { opacity: 1; transform: translateY(-10px); }
+  /* Context bar - same color thresholds as statusline-command.py: green
+     >50% remaining, yellow 20-50%, red <20%. */
+  #statsPanel .ctx-green, #statsPanel .ctx-yellow, #statsPanel .ctx-red { font-family: ui-monospace, monospace; }
+  #statsPanel .ctx-green { color: var(--ok); }
+  #statsPanel .ctx-yellow { color: #e0b34d; }
+  #statsPanel .ctx-red { color: var(--error); }
+  #diffBtn, #collapseAllBtn {
+    padding: 5px 10px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 12px;
+  }
+  #diffBtn:hover { border-color: var(--accent); }
+  /* Deliberately just an icon, same footprint as the other header buttons
+     but nothing about it reads "click me to end the session" - that action
+     now lives a step further in, behind the modal it opens. */
+  #settingsBtn {
+    padding: 4px 8px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    color: var(--muted);
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 14px;
+    line-height: 1;
+  }
+  #settingsBtn:hover { border-color: var(--accent); color: var(--text); }
+
+  .settings-body { display: flex; flex-direction: column; gap: 16px; }
+  /* Settings modal tabs (General / MCP / Plugins) - settings.js's
+     initSettings() wires the click-to-switch behavior; this is just the
+     visual state (.active on the button, .settings-tab-panel display
+     toggled inline by the same code). */
+  .settings-tabs { display: flex; gap: 6px; border-bottom: 1px solid var(--border); padding-bottom: 10px; }
+  .settings-tab {
+    background: none;
+    border: 1px solid transparent;
+    color: var(--muted);
+    border-radius: 6px;
+    padding: 5px 10px;
+    cursor: pointer;
+    font-size: 12.5px;
+  }
+  .settings-tab:hover { color: var(--text); }
+  .settings-tab.active { color: var(--text); background: var(--panel); border-color: var(--border); }
+  .settings-tab-panel { display: flex; flex-direction: column; gap: 16px; }
+  .settings-row { display: flex; align-items: center; gap: 10px; font-size: 13px; }
+  .settings-row-col { flex-direction: column; align-items: stretch; gap: 6px; }
+  /* Small "?" affordance for inline parameter explanations - native title
+     tooltip on hover, no JS needed. Used in the settings modal and next to
+     the thinking controls in the compose row. */
+  .hint {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 15px;
+    height: 15px;
+    border-radius: 50%;
+    border: 1px solid var(--border);
+    color: var(--muted);
+    font-size: 10px;
+    line-height: 1;
+    cursor: help;
+    flex: 0 0 auto;
+  }
+  .hint:hover { border-color: var(--accent); color: var(--text); }
+  /* Thinking controls (budget/display selects) live only in the Settings
+     modal now - no toolbar clutter, see thinkingBudgetBtn/thinkingDisplayBtn
+     in app.js. */
+  #thinkingControlsGroup { display: flex; flex-direction: column; gap: 10px; }
+  #thinkingControlsGroup select {
+    padding: 6px 10px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 6px;
+    font-size: 13px;
+  }
+  .settings-row-col input[type="text"] {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 6px;
+    padding: 6px 8px;
+    font-size: 12.5px;
+    font-family: ui-monospace, monospace;
+  }
+  .settings-danger {
+    justify-content: space-between;
+    padding-top: 12px;
+    border-top: 1px solid var(--border);
+  }
+  .settings-danger p { margin: 2px 0 0; color: var(--muted); font-size: 12px; max-width: 380px; }
+  #closeSessionBtn.danger {
+    background: transparent;
+    border-color: var(--error);
+    color: var(--error);
+    white-space: nowrap;
+  }
+  #closeSessionBtn.danger:hover { background: var(--error); color: white; }
+
+  .settings-section { display: flex; flex-direction: column; gap: 6px; }
+  .settings-section-header { display: flex; align-items: center; justify-content: space-between; }
+  .settings-section-header strong { font-size: 13px; }
+  .settings-section-header button {
+    background: none;
+    border: 1px solid var(--border);
+    color: var(--muted);
+    border-radius: 6px;
+    padding: 3px 8px;
+    cursor: pointer;
+    font-size: 11.5px;
+  }
+  .settings-section-header button:hover { color: var(--text); border-color: var(--accent); }
+  .settings-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    max-height: 160px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .settings-list .cmd-desc { color: var(--muted); font-size: 11.5px; }
+  .mcp-server-row {
+    padding: 5px 8px;
+    border-radius: 4px;
+    background: var(--bg);
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+  .mcp-server-top { display: flex; align-items: center; gap: 8px; }
+  .mcp-server-top .cmd-name { font-family: ui-monospace, monospace; }
+  .mcp-server-top .mcp-status { flex: 1; font-size: 11px; text-transform: uppercase; letter-spacing: 0.02em; }
+  .mcp-status-connected { color: var(--success, #3fb950); }
+  .mcp-status-failed { color: var(--error); }
+
+  /* Settings > "Extra folders searchable in @" - same row shape as
+     .mcp-server-row, just a label + path + remove button instead of a
+     status badge. */
+  .custom-folder-row { padding: 5px 8px; border-radius: 4px; background: var(--bg); display: flex; align-items: center; gap: 8px; }
+  .custom-folder-row .cmd-name { flex: none; }
+  .custom-folder-row .cmd-desc { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .custom-folder-remove {
+    background: none;
+    border: 1px solid var(--border);
+    color: var(--muted);
+    border-radius: 6px;
+    width: 22px;
+    height: 22px;
+    line-height: 1;
+    cursor: pointer;
+    flex: none;
+  }
+  .custom-folder-remove:hover { color: var(--error); border-color: var(--error); }
+  #customFoldersList:empty::after {
+    content: 'No extra folders added.';
+    color: var(--muted);
+    font-size: 12px;
+    padding: 4px 8px;
+  }
+  .mcp-status-needs-auth { color: var(--warning, #d29922); }
+  .mcp-status-pending { color: var(--muted); }
+  .mcp-status-disabled { color: var(--muted); }
+  .mcp-reconnect-btn {
+    background: none;
+    border: 1px solid var(--border);
+    color: var(--muted);
+    border-radius: 6px;
+    padding: 2px 7px;
+    cursor: pointer;
+    font-size: 11px;
+  }
+  .mcp-reconnect-btn:hover { color: var(--text); border-color: var(--accent); }
+  .mcp-reconnect-btn:disabled { opacity: 0.6; cursor: default; }
+  .mcp-error { color: var(--error); font-size: 11px; }
+  .mcp-note { color: var(--muted); font-size: 11px; }
+  .settings-warning { color: var(--warning, #d29922); font-size: 11.5px; display: none; }
+
+  #launcher {
+    width: 100%;
+    max-width: 640px;
+    margin: 40px auto;
+    padding: 0 16px;
+  }
+  #launcher h2 { font-size: 15px; color: var(--muted); font-weight: 600; margin: 24px 0 8px; }
+  #launcher .cwd-row { display: flex; gap: 8px; }
+  #launcher input[type=text] {
+    flex: 1;
+    padding: 8px 10px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 6px;
+    font-size: 14px;
+  }
+  #launcher button, #browseBtn {
+    margin-top: 8px;
+    padding: 8px 14px;
+    background: var(--accent);
+    border: none;
+    color: white;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 14px;
+  }
+  #browseBtn { background: var(--panel); border: 1px solid var(--border); color: var(--text); }
+  /* Browse and Start are the two "commit" actions on this screen (pick a
+     folder / launch the session) - give them matching widths so they read
+     as a pair even though "Browse" and "Start" aren't the same text length. */
+  #browseBtn, #startBtn { width: 96px; text-align: center; }
+  /* Start row: compact model select on the left, Start on the right, open
+     space between. Width is pinned to the longest label (Default model /
+     Grok Build) so switching provider does not slide Start sideways. */
+  #launcher .start-row { display: flex; flex-direction: row; align-items: center; justify-content: space-between; gap: 6px; }
+  #launcher .start-row button { margin-top: 8px; }
+  #startProviderSelect {
+    width: 100%;
+    margin: 0 0 16px;
+    padding: 10px 12px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 6px;
+    font-size: 15px;
+  }
+  #startModelSelect {
+    width: 12rem;
+    flex: none;
+    margin-top: 8px;
+    padding: 6px 10px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 6px;
+    font-size: 13px;
+  }
+  /* Recent-folders dropdown next to the cwd input - picks from the last 3
+     unique folders a session was started in (tracked client-side in
+     localStorage; see RECENT_FOLDERS_KEY in app.js). Selecting an option
+     just pre-fills the text input, it doesn't start a session by itself,
+     so Browse/typing still work exactly as before. Collapsed to a "…"
+     button sitting between the input and Browse, so Browse stays the
+     rightmost ("primary") action in the folder row. */
+  #recentFoldersSelect {
+    flex: 0 0 auto;
+    width: 40px;
+    padding: 8px 4px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 6px;
+    font-size: 13px;
+    text-align: center;
+    text-align-last: center;
+  }
+  /* text-align-last above is only meant to center the closed "…" glyph;
+     Chromium also applies it to the open dropdown's option list, so force
+     those back to left-aligned. */
+  #recentFoldersSelect option {
+    text-align: left;
+  }
+  #recentFoldersSelect:not([data-has-options]) { display: none; }
+  #resumeList { list-style: none; padding: 0; margin: 0; }
+  #resumeList li {
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    margin-bottom: 6px;
+    cursor: pointer;
+    font-size: 13px;
+  }
+  #resumeList li:hover { border-color: var(--accent); }
+  #resumeList li { display: flex; align-items: center; gap: 8px; }
+  #resumeList .resume-info { flex: 1; min-width: 0; }
+  #resumeList .cwd { color: var(--muted); font-size: 12px; }
+  #resumeList .resume-time { color: var(--muted); font-size: 11px; }
+  #resumeList .viewHistoryBtn {
+    flex: none;
+    margin: 0;
+    padding: 4px 8px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--muted);
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 11px;
+  }
+  #resumeList .viewHistoryBtn:hover { color: var(--text); border-color: var(--accent); }
+
+  #approvalBanner {
+    display: none;
+    padding: 10px 16px;
+    background: #3a2f12;
+    border-top: 1px solid #6a5320;
+    font-size: 13px;
+  }
+  #approvalPlain {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+  }
+  #approvalPlain pre {
+    flex: 1;
+    max-height: 120px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    margin: 0;
+    font-size: 12px;
+  }
+  #approvalBanner button {
+    padding: 6px 12px;
+    border-radius: 6px;
+    border: none;
+    cursor: pointer;
+    font-size: 13px;
+  }
+  #approveBtn { background: var(--ok); color: #10281c; }
+  #rejectBtn { background: var(--error); color: #2b0d0d; }
+
+  /* AskUserQuestion's own form - see index.html's module comment on
+     #questionForm. One block per question, options as toggleable pills
+     (radio behavior for single-select, checkbox behavior for multiSelect),
+     an "Other" free-text fallback, then a single Submit for the whole set. */
+  #questionForm { display: none; flex-direction: column; gap: 10px; max-height: 50vh; overflow-y: auto; }
+  #questionForm .q-block { display: flex; flex-direction: column; gap: 6px; }
+  #questionForm .q-text { font-weight: 600; }
+  #questionForm .q-options { display: flex; flex-wrap: wrap; gap: 6px; }
+  #questionForm .q-option {
+    padding: 5px 10px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--panel);
+    color: var(--text);
+    cursor: pointer;
+    font-size: 12.5px;
+  }
+  #questionForm .q-option:hover { border-color: var(--accent); }
+  #questionForm .q-option.selected { background: var(--accent); border-color: var(--accent); color: white; }
+  #questionForm .q-option-desc { display: block; font-size: 11px; color: var(--muted); margin-top: 1px; }
+  #questionForm .q-option.selected .q-option-desc { color: rgba(255,255,255,0.8); }
+  #questionForm .q-other {
+    padding: 5px 8px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--text);
+    font-size: 12.5px;
+    font-family: inherit;
+    min-width: 160px;
+  }
+  #questionForm .q-actions { display: flex; gap: 10px; }
+  #questionForm .q-submit { background: var(--ok); color: #10281c; }
+  #questionForm .q-skip { background: var(--error); color: #2b0d0d; }
+
+  #loadHistoryBar {
+    display: none;
+    justify-content: center;
+    padding: 8px;
+    border-bottom: 1px solid var(--border);
+  }
+  #loadHistoryBar button {
+    padding: 5px 12px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    color: var(--muted);
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 12px;
+  }
+  #loadHistoryBar button:hover { color: var(--text); border-color: var(--accent); }
+  #loadHistoryBar button:disabled { cursor: default; opacity: 0.6; }
+
+  #agentsBar {
+    display: none;
+    flex-direction: column;
+    border-top: 1px solid var(--border);
+    padding: 6px 16px;
+    gap: 6px;
+  }
+  /* First row: turn-chart toggle leads (leftmost), then the task-list
+     toggle, then the Agents button pinned to the right (margin-left: auto
+     on #agentsBtn, the last item in DOM) - agentsBar itself stays a column
+     (the agents list drops in below it), this row is just the three
+     buttons. */
+  #agentsBarRow { display: flex; align-items: center; }
+  #agentsBtn {
+    margin-left: auto;
+    background: none;
+    border: 1px solid var(--border);
+    color: var(--muted);
+    border-radius: 6px;
+    padding: 3px 10px;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  #agentsBtn:hover { color: var(--text); border-color: var(--accent); }
+  #agentsBtn.open { color: var(--text); border-color: var(--accent); }
+  /* A sticky agent is armed (selectedAgentName in app.js) - every plain-text
+     send gets prefixed with a Task-tool instruction while this is showing,
+     so it needs to stay visible even with the roster collapsed. */
+  #agentsBtn.armed { color: var(--bg); background: var(--accent); border-color: var(--accent); }
+  #taskPanelToggleBtn, #turnChartToggleBtn {
+    background: none;
+    border: 1px solid var(--border);
+    color: var(--muted);
+    border-radius: 6px;
+    padding: 3px 10px;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  /* Turn-chart toggle is first in DOM (see agentsBarRow markup); task-list
+     toggle just needs a small gap after it, not its own auto margin - the
+     auto margin that pins the right-aligned group now lives on #agentsBtn. */
+  #taskPanelToggleBtn { margin-left: 6px; }
+  #taskPanelToggleBtn:hover, #turnChartToggleBtn:hover { color: var(--text); border-color: var(--accent); }
+  #taskPanelToggleBtn.on, #turnChartToggleBtn.on { color: var(--text); border-color: var(--accent); }
+  #agentsList {
+    display: none;
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    max-height: 200px;
+    overflow-y: auto;
+  }
+  #agentsList li {
+    padding: 5px 8px;
+    border-radius: 4px;
+    display: flex;
+    gap: 10px;
+    align-items: baseline;
+    cursor: pointer;
+  }
+  #agentsList li:hover { background: var(--accent); }
+  #agentsList li:hover .cmd-desc { color: white; }
+  #agentsList .cmd-name { font-family: ui-monospace, monospace; white-space: nowrap; }
+  #agentsList .cmd-desc { color: var(--muted); font-size: 11.5px; }
+  /* Marks the sticky "default agent" - clicking a roster entry tags every
+     send until cleared (click again, or click a different entry). */
+  #agentsList .cmd-name.selected::after { content: ' ✓'; }
+
+  #stream {
+    flex: 1;
+    overflow-y: auto;
+    padding: 12px 16px;
+    display: none;
+    flex-direction: column;
+    gap: 6px;
+    position: relative;
+  }
+  .msg { max-width: 100%; } /* candidate for a user-configurable setting later, not now */
+  .msg .role {
+    font-size: 11px;
+    color: var(--muted);
+    margin-bottom: 2px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  /* Per-line cost/tokens ("$0.0X, N in, M out") - dim, small, same spot on
+     every role row a label can carry one: assistant text, thinking, and
+     each tool call inside a group (stream-view.js's formatUsageInline).
+     Not the collapse hint (.hint, further down) - different information,
+     same "quiet, out of the way" treatment. */
+  .usage-meta {
+    color: var(--muted);
+    opacity: 0.6;
+    font-size: 10px;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+  .msg .body {
+    white-space: pre-wrap;
+    word-break: break-word;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 6px 10px;
+    font-size: 13.5px;
+    line-height: 1.4;
+  }
+  /* Collapsed-with-hint row: content on the left, .expand-hint pinned to
+     the right edge of the same line - collapsed content is always capped
+     to one line (stream-view.js's COLLAPSE_LINES), so it never has to wrap
+     around the hint. */
+  .msg .body.with-hint { display: flex; align-items: baseline; gap: 10px; white-space: normal; }
+  /* flex: 0 1 auto (not 1 1 auto) - the hint should trail right behind the
+     preview text, not get shoved out to the row's far edge by a
+     flex-grown box when the preview itself is short. It still shrinks
+     (and pre-wrap still lets it wrap) if a long preview and the hint
+     can't both fit on one line. */
+  .msg .body.with-hint .body-content { flex: 0 1 auto; min-width: 0; white-space: pre-wrap; word-break: break-word; }
+  /* Overrides .expand-hint's own margin-left: auto (which pins the
+     group-summary row's hint to the far right, which stays as-is) - here
+     it would undo the flex: 0 1 auto above by pulling the hint back out
+     to the edge. */
+  .msg .body.with-hint .expand-hint { margin-left: 0; }
+  /* group summary's own text (stream-view.js's openGroup) - flex-grow: 0
+     so it sits at its own content width with the cost (.usage-meta)
+     immediately after it on the left, instead of stretching to shove the
+     cost out to the right edge next to .expand-hint. Still flex-shrink: 1
+     and ellipsizes under pressure, so a long chain of tool names (e.g.
+     "Edit → Edit → TaskUpdate → ...") can't push .expand-hint off the
+     right edge of the row and force the whole stream to scroll
+     horizontally. */
+  .msg .role .role-text { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* Shared by both spots a "ctrl+o to expand"/"click to collapse" hint can
+     appear (a group's role row, or a collapsed block's body row) - dim and
+     small always, regardless of the row's own hover/expanded color (an
+     element's own `color` wins over an inherited one no matter which rule
+     is more specific), and never wraps onto a second line.
+     Deliberately its own class, NOT .hint - .hint is already taken by the
+     settings modal's circular "?" tooltip icon (width/height/border-radius/
+     display:inline-flex above), and same-specificity same-name rules don't
+     fully override each other: the icon's box-shape properties were
+     leaking through and squeezing this text into an invisible 15px circle,
+     which is what caused it to visually overlap the cost text next to it. */
+  .expand-hint {
+    flex: none;
+    margin-left: auto; /* pins it to the row's right edge - .role-text/.usage-meta sit together on the left instead of being pushed apart */
+    color: var(--muted);
+    opacity: 0.6;
+    font-size: 10.5px;
+    white-space: nowrap;
+  }
+  .msg.user .body { background: #22314f; border-color: #2f4670; }
+  .msg.tool .body { font-family: ui-monospace, monospace; font-size: 12.5px; }
+  .msg.system .body { color: var(--muted); font-size: 12px; padding: 2px 10px; }
+  .msg.error .body { color: var(--error); }
+
+  /* Thinking: no card, no border - a single dim italic line, terminal-style,
+     not a boxed block competing for attention with the actual reply. */
+  .msg.thinking .role { margin-bottom: 0; opacity: 0.75; }
+  .msg.thinking .body {
+    background: none;
+    border: none;
+    padding: 0 0 0 2px;
+    color: var(--muted);
+    font-style: italic;
+    font-size: 12.5px;
+  }
+
+  /* Role/tool color coding, terminal-style - each kind gets its own label
+     color so the transcript is scannable at a glance instead of one shade
+     of gray for everything but errors. */
+  .msg.assistant .role { color: #d97757; } /* Anthropic orange, "claude" */
+  .msg.user .role { color: var(--accent); } /* "you" */
+  .msg.tool[data-tool-kind="read"] .role { color: #56c2d6; }
+  .msg.tool[data-tool-kind="edit"] .role { color: var(--ok); }
+  .msg.tool[data-tool-kind="bash"] .role { color: #e0b34d; }
+  .msg.tool[data-tool-kind="search"] .role { color: #b585f0; }
+  .msg.tool[data-tool-kind="other"] .role { color: var(--accent); }
+  .group-tool-name[data-tool-kind="read"] { color: #56c2d6; }
+  .group-tool-name[data-tool-kind="edit"] { color: var(--ok); }
+  .group-tool-name[data-tool-kind="bash"] { color: #e0b34d; }
+  .group-tool-name[data-tool-kind="search"] { color: #b585f0; }
+  .group-tool-name[data-tool-kind="other"] { color: var(--accent); }
+  .diff-ctx { color: var(--muted); }
+
+  /* Foldable sign: a triangle before the role label on anything that can be
+     expanded/collapsed - right when folded, down when open. */
+  .msg.collapsible .role::before {
+    content: '▶';
+    display: inline-block;
+    font-size: 15px;
+    line-height: 1;
+    color: var(--muted);
+    opacity: 1;
+    margin-right: 2px;
+    transform: scale(0.85, 1.1);
+  }
+  .msg.collapsible.expanded .role::before { content: '▼'; transform: scale(1.1, 0.85); }
+
+  /* A run of tool call/result pairs, collapsed to one summary row - see
+     stream-view.js's module comment. */
+  .msg.group {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 5px 10px;
+  }
+  .msg.group .role { margin-bottom: 0; }
+  .msg.group:not(.expanded):hover .role { color: var(--text); }
+  .msg.group .group-body {
+    display: none;
+    flex-direction: column;
+    gap: 4px;
+    margin-top: 6px;
+    padding-left: 10px;
+    border-left: 2px solid var(--border);
+  }
+  .msg.group.expanded .group-body { display: flex; }
+  .msg.group.expanded .role { color: var(--text); }
+
+  .msg.collapsible { cursor: pointer; }
+  .msg.collapsible:not(.expanded):hover .body { border-color: var(--accent); }
+  .msg.collapsible:not(.expanded) .body { color: var(--muted); }
+  .msg.collapsible.expanded .body { cursor: default; }
+  .msg-action {
+    text-transform: none;
+    letter-spacing: 0;
+    background: none;
+    border: 1px solid var(--border);
+    color: var(--muted);
+    border-radius: 4px;
+    padding: 1px 6px;
+    font-size: 11px;
+    cursor: pointer;
+  }
+  .msg-action:hover { color: var(--text); border-color: var(--accent); }
+
+  /* Task list (task-panel.js) - docked directly above #compose, off by
+     default (settings.js's taskPanelEnabled). Same status color scheme as
+     .mcp-status-* above (success/warning/muted), not a new palette. */
+  #taskPanel {
+    display: none;
+    border-top: 1px solid var(--border);
+    padding: 6px 16px;
+  }
+  #taskPanel .controls {
+    font-size: 11px;
+    color: var(--muted);
+    margin-bottom: 4px;
+  }
+  #taskList {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    max-height: 160px;
+    overflow-y: auto;
+  }
+  .task-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 2px 0;
+    font-size: 12px;
+  }
+  .task-status {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    background: var(--muted);
+  }
+  .task-status-in_progress { background: var(--warning, #d29922); }
+  .task-status-completed { background: var(--success, #3fb950); }
+  .task-subject { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .task-subject-done { color: var(--muted); text-decoration: line-through; }
+  .task-owner {
+    font-size: 10px;
+    color: var(--muted);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 0 4px;
+  }
+  .task-blocked { font-size: 10px; color: var(--error); }
+  .task-empty { font-size: 11px; color: var(--muted); }
+
+  /* Per-turn cost graph (turn-chart.js) - docked directly above #compose,
+     off by default (settings.js's turnChartEnabled). */
+  #turnChartPanel {
+    display: none;
+    border-top: 1px solid var(--border);
+    padding: 6px 16px;
+  }
+  #turnChartPanel .controls {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 4px;
+    font-size: 11px;
+    color: var(--muted);
+  }
+  #turnChartMetric {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 4px;
+    padding: 2px 6px;
+    font-size: 11px;
+  }
+  #turnChart { display: block; width: 100%; cursor: pointer; user-select: none; }
+  /* Viewport-position slider (turn-chart.js) - a separate track below the
+     bars, not drawn over them (see backlog: the old approach was a
+     semi-transparent SVG rect on top of the bars, which silently ate any
+     bar click that landed under it). Same drag-to-scrub gesture as before,
+     just relocated - dragging directly on the bars still scrubs too
+     (unchanged), this is an additional grab handle, not the only way. */
+  #turnChartSlider {
+    position: relative;
+    height: 8px;
+    margin-top: 4px;
+    background: rgba(255,255,255,0.06);
+    border-radius: 4px;
+    cursor: pointer;
+    user-select: none;
+  }
+  #turnChartSliderThumb {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    background: rgba(255,255,255,0.28);
+    border: 1px solid var(--text);
+    border-radius: 4px;
+    cursor: grab;
+  }
+  #turnChartSliderThumb:active { cursor: grabbing; }
+  #turnChartExcludeCacheMissLabel { display: flex; align-items: center; gap: 4px; cursor: pointer; }
+  /* Click highlight (turn-chart.js's selectIndex) - one of these per tool
+     block matching the clicked bar, positioned in JS via fixed coordinates
+     from getBoundingClientRect() so it tracks the transcript regardless of
+     #stream's own scroll position. Not a child of the highlighted element -
+     it's appended to <body> so it isn't clipped by the block's own layout,
+     then clipped in JS instead to #stream's visible rect (see
+     selectIndex's comment). */
+  .turn-chart-select-highlight {
+    position: fixed;
+    background: rgba(240, 185, 11, 0.22);
+    border: 1px solid rgba(240, 185, 11, 0.65);
+    border-radius: 6px;
+    pointer-events: none;
+    z-index: 500;
+  }
+
+  #compose {
+    display: none;
+    position: relative;
+    border-top: 1px solid var(--border);
+    padding: 10px 16px;
+    gap: 8px;
+    align-items: flex-end;
+  }
+  #compose textarea {
+    flex: 1;
+    /* Not the native `resize` handle: that one lives at an element's own
+       bottom-right corner, and this box is pinned to the viewport bottom -
+       there's no room below it to drag into. #composeResizeHandle above it
+       (compose.js) grows it upward instead, which is the direction that
+       actually has room. Range (min two lines, max half the viewport)
+       matches compose.js's autosize()/MIN_HEIGHT_PX. */
+    resize: none;
+    line-height: 1.4;
+    min-height: 60px;
+    max-height: 50vh;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 8px;
+    padding: 10px 12px;
+    font-size: 14px;
+    font-family: inherit;
+  }
+  #composeResizeHandle {
+    position: absolute;
+    left: 16px;
+    right: 16px;
+    top: -6px;
+    height: 10px;
+    cursor: ns-resize;
+  }
+  #composeResizeHandle::after {
+    content: '';
+    display: block;
+    width: 32px;
+    height: 3px;
+    margin: 3.5px auto 0;
+    border-radius: 2px;
+    background: var(--muted);
+  }
+  #composeResizeHandle:hover::after { background: var(--accent); }
+  /* Drag-over feedback for drop-target.js - dropping a file from Finder
+     inserts its name (resolved to a real path when it's found under cwd,
+     see the module comment for why that's best-effort only). */
+  #compose textarea.drag-over { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+  #compose button {
+    padding: 10px 16px;
+    background: var(--accent);
+    border: none;
+    color: white;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 14px;
+    height: 42px;
+  }
+  #compose button:disabled { opacity: 0.5; cursor: default; }
+  /* Stacks the mode picker directly above Send, using the vertical room
+     that's otherwise empty there since the textarea can grow taller than
+     the button - keeps the mode one click away without spending header
+     width on it. */
+  #composeSendGroup {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    align-items: stretch;
+  }
+  #modeBtn {
+    font-family: inherit;
+    padding: 5px 8px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 12px;
+  }
+  #modeBtn:hover { border-color: var(--accent); }
+
+  /* Two-pane @ picker (file-picker.js) - left pane always lists the two
+     virtual folders (Local folder / Screenshots); right pane shows
+     whichever one is currently highlighted on the left, live, no typing
+     required to "enter" it. Both panes stay in the same dropdown box the
+     single-list version used (position/bottom/left/border unchanged). */
+  #fileSuggestions {
+    display: none;
+    position: absolute;
+    bottom: 60px;
+    left: 16px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    font-size: 12.5px;
+    font-family: ui-monospace, monospace;
+    z-index: 5;
+    overflow: hidden; /* clips each pane's own scrollbar to the rounded box */
+  }
+  #fileSuggestions.show { display: flex; }
+  #fileSuggestionsFolders, #fileSuggestionsFiles {
+    list-style: none;
+    margin: 0;
+    padding: 4px;
+    max-height: 220px;
+    overflow-y: auto;
+  }
+  #fileSuggestionsFolders { width: 150px; border-right: 1px solid var(--border); flex: none; }
+  #fileSuggestionsFiles { width: 300px; flex: none; }
+  #fileSuggestions li { padding: 4px 8px; border-radius: 4px; cursor: pointer; }
+  #fileSuggestions li.active, #fileSuggestions li:hover { background: var(--accent); color: white; }
+  /* Left-pane folder entries - distinct color so the pane itself reads as
+     navigation, not a result you're about to insert. */
+  #fileSuggestionsFolders li { color: var(--screenshot); }
+  #fileSuggestionsFolders li.active, #fileSuggestionsFolders li:hover { background: var(--screenshot); color: var(--bg); }
+  /* Right-pane screenshot files keep the same hue as the folder they came
+     from (only relevant while that folder is selected, but keeps the
+     association obvious at a glance). */
+  #fileSuggestionsFiles li.suggestion-screenshot { color: var(--screenshot); }
+  #fileSuggestionsFiles li.suggestion-screenshot.active,
+  #fileSuggestionsFiles li.suggestion-screenshot:hover { background: var(--screenshot); color: var(--bg); }
+  #fileSuggestionsFiles li.suggestion-empty { color: var(--muted); cursor: default; }
+  #fileSuggestionsFiles li.suggestion-empty:hover { background: none; color: var(--muted); }
+
+  #commandSuggestions, #modelSuggestions {
+    display: none;
+    position: absolute;
+    bottom: 60px;
+    left: 16px;
+    width: min(480px, calc(100% - 32px));
+    max-height: 240px;
+    overflow-y: auto;
+    list-style: none;
+    margin: 0;
+    padding: 4px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    font-size: 12.5px;
+    z-index: 5;
+  }
+  #commandSuggestions li, #modelSuggestions li {
+    padding: 5px 8px;
+    border-radius: 4px;
+    cursor: pointer;
+    display: flex;
+    gap: 10px;
+    align-items: baseline;
+  }
+  #commandSuggestions li.active, #commandSuggestions li:hover,
+  #modelSuggestions li.active, #modelSuggestions li:hover { background: var(--accent); }
+  #commandSuggestions li.active .cmd-desc, #commandSuggestions li:hover .cmd-desc,
+  #modelSuggestions li.active .cmd-desc, #modelSuggestions li:hover .cmd-desc { color: white; }
+  #commandSuggestions .cmd-name, #modelSuggestions .cmd-name { font-family: ui-monospace, monospace; white-space: nowrap; }
+  #commandSuggestions .cmd-desc, #modelSuggestions .cmd-desc { color: var(--muted); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #modelSuggestions .cmd-name.current::after { content: ' ✓'; }
+
+  .modal {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.5);
+    align-items: center;
+    justify-content: center;
+    z-index: 10;
+  }
+  /* dirBrowserModal is the one modal that can now open on top of another
+     (settings.js's "+ Add folder" opens it while settingsModal is still
+     showing) - same z-index as every other .modal would leave stacking to
+     DOM order, and settingsModal comes later in the markup, so it would
+     paint over the browse dialog instead of under it. */
+  #dirBrowserModal { z-index: 20; }
+  .modal-box {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    width: min(640px, 90vw);
+    max-height: 80vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .modal-box header {
+    border-bottom: 1px solid var(--border);
+    font-size: 13px;
+  }
+  .modal-box .modal-body { padding: 12px 16px; overflow-y: auto; }
+  .modal-box footer {
+    padding: 10px 16px;
+    border-top: 1px solid var(--border);
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+  }
+  .modal-box button {
+    padding: 6px 12px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--text);
+    cursor: pointer;
+    font-size: 13px;
+  }
+  .modal-box button.primary { background: var(--accent); border-color: var(--accent); color: white; }
+
+  #dirPath { font-family: ui-monospace, monospace; font-size: 12px; color: var(--muted); word-break: break-all; }
+  #dirList { list-style: none; padding: 0; margin: 8px 0 0; }
+  #dirList li {
+    padding: 6px 10px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 13px;
+  }
+  #dirList li:hover { background: var(--bg); }
+
+  #diffBody {
+    font-family: ui-monospace, monospace;
+    font-size: 12px;
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
+  .diff-add { color: var(--ok); }
+  .diff-del { color: var(--error); }
+  .diff-hunk { color: var(--accent); }
+  .diff-meta { color: var(--muted); }
+</style>
+</head>
+<body>
+  <header>
+    <strong id="appTitle">Prompt Cockpit</strong>
+    <span id="sessionLabel"></span>
+    <span id="rateLimitBanner" class="rate-limit-banner" style="display:none"></span>
+    <div class="spacer"></div>
+    <label id="autoContinueLabel" style="display:none" title="Same as the desktop app's checkbox: when the plan usage limit rejects a turn, automatically send Continue once it resets">
+      <input type="checkbox" id="autoContinueBtn" /> Auto-continue
+    </label>
+    <button id="collapseAllBtn" style="display:none" title="Fold every expanded tool call/result and group back down">Collapse all</button>
+    <button id="diffBtn" style="display:none">Diff</button>
+    <button id="settingsBtn" style="display:none" title="Settings">⚙</button>
+  </header>
+
+  <div id="launcher">
+    <select id="startProviderSelect" title="Which coding agent to use">
+      <option value="claude">Claude</option>
+      <option value="grok">Grok</option>
+    </select>
+    <h2>Start a session</h2>
+    <div class="cwd-row">
+      <input id="cwdInput" type="text" placeholder="/path/to/project" />
+      <select id="recentFoldersSelect" title="Pre-fill from a recently used folder">
+        <option value="">…</option>
+      </select>
+      <button id="browseBtn">Browse</button>
+    </div>
+    <div class="start-row">
+      <select id="startModelSelect">
+        <option value="">Default model</option>
+        <option value="sonnet">Sonnet</option>
+        <option value="opus">Opus</option>
+        <option value="haiku">Haiku</option>
+      </select>
+      <button id="startBtn">Start</button>
+    </div>
+
+    <h2>Resume</h2>
+    <ul id="resumeList"></ul>
+  </div>
+
+  <div id="loadHistoryBar">
+    <button id="loadHistoryBtn">Load earlier history</button>
+  </div>
+
+  <div id="stream"></div>
+  <div id="copyToast">Copied</div>
+  <!-- Sits directly above the compose box, not under the header - a
+       decision needing your eyes belongs where your eyes already are
+       (about to type), not somewhere you have to look away to find. -->
+  <div id="approvalBanner">
+    <div id="approvalPlain">
+      <strong id="approvalHeading"></strong>
+      <pre id="approvalDetail"></pre>
+      <button id="approveBtn">Accept this</button>
+      <button id="rejectBtn">No</button>
+    </div>
+    <!-- AskUserQuestion gets its own real form instead of the generic
+         allow/deny above - built dynamically in app.js's renderQuestionForm,
+         since the question/option set is different every time. This is the
+         fix for the tool "not working at all": previously it rendered here
+         as a plain allow/deny with no questions or options visible at all,
+         so a click sent back an empty answer and the model read that as
+         "the user did not answer the questions". -->
+    <div id="questionForm"></div>
+  </div>
+  <!-- Subagent roster (Query.supportedAgents()) - shown only when the
+       session actually has any. Click an entry to set it as the sticky
+       "default agent": every message you send afterward gets prefixed with
+       an instruction to delegate via the Task tool to that subagent_type
+       (see app.js's selectedAgentName/onSend), until you click it again (or
+       a different entry) to change/clear it. Sits directly above the
+       compose box for the same reason approvalBanner does (see its own
+       comment above). -->
+  <div id="agentsBar">
+    <div id="agentsBarRow">
+      <!-- Per-turn cost graph toggle (turn-chart.js) - leftmost of the row;
+           also mirrored as a checkbox in the settings modal (see
+           #turnChartEnabledBtn below). -->
+      <button id="turnChartToggleBtn" title="Toggle per-turn cost graph">📊 Cost graph</button>
+      <!-- Task list toggle (task-panel.js) - sits between the cost graph
+           toggle and the Agents button; also mirrored as a checkbox in the
+           settings modal (see #taskPanelEnabledBtn below).
+           session-registry.js reconstructs the list server-side from
+           TaskCreate/TaskUpdate/TaskList tool calls and pushes it live, so
+           there's nothing to fetch here on open. -->
+      <button id="taskPanelToggleBtn" title="Toggle task list">📋 Tasks</button>
+      <!-- Agents roster toggle - now right-aligned (margin-left: auto in
+           CSS) instead of leading the row. -->
+      <button id="agentsBtn">Agents</button>
+    </div>
+    <ul id="agentsList"></ul>
+  </div>
+  <!-- Task list (task-panel.js) - docked just above the compose box, same
+       spot/pattern as turnChartPanel below. Off by default; toggled by
+       taskPanelToggleBtn above or the settings checkbox. -->
+  <div id="taskPanel">
+    <div class="controls"><span>Tasks:</span></div>
+    <ul id="taskList"></ul>
+  </div>
+  <!-- Per-turn cost graph (turn-chart.js) - docked just above the compose
+       box per plan, not in the header stats strip: it's a "how did I get
+       here" view of the transcript you're about to keep typing into, not a
+       glanceable summary. Off by default; toggled by turnChartToggleBtn
+       above or the settings checkbox. -->
+  <div id="turnChartPanel">
+    <div class="controls">
+      <span>Per-turn usage:</span>
+      <select id="turnChartMetric"></select>
+      <label id="turnChartExcludeCacheMissLabel" title="Cache-miss turns run far more tokens than a normal turn - leave them in the bars but drop them from the y-axis scale, so they don't squash everything else flat">
+        <input type="checkbox" id="turnChartExcludeCacheMissBtn" /> Exclude cache misses from scale
+      </label>
+    </div>
+    <svg id="turnChart" width="900" height="60"></svg>
+    <div id="turnChartSlider"><div id="turnChartSliderThumb"></div></div>
+  </div>
+  <!-- Activity dot (stateIcon) + live cost/token/cache/context/quota strip
+       (stats-panel.js) - moved down here from the header so they sit right
+       above the compose box, the "what's this run costing me right now"
+       view closest to where you're about to type the next message. The
+       folder/tab name (sessionLabel) stays up in the header. Pure markup
+       move - both elements are only ever referenced by getElementById in
+       app.js, so nothing else needed to change. -->
+  <div id="activityBar">
+    <span id="stateLabel" class="state"><span id="stateIcon"></span></span>
+    <span id="statsPanel"></span>
+  </div>
+  <div id="compose">
+    <div id="composeResizeHandle" title="Drag to resize"></div>
+    <!-- Two-pane @ picker (file-picker.js): left lists the two virtual
+         folders (Local folder / Screenshots), right shows that folder's
+         files - switching which folder is highlighted on the left updates
+         the right pane live, no typing required. -->
+    <div id="fileSuggestions">
+      <ul id="fileSuggestionsFolders"></ul>
+      <ul id="fileSuggestionsFiles"></ul>
+    </div>
+    <ul id="commandSuggestions"></ul>
+    <ul id="modelSuggestions"></ul>
+    <textarea id="composeInput" placeholder="Message Claude... (Enter to send, Shift+Enter for newline, @ for files, / for commands)"></textarea>
+    <div id="composeSendGroup">
+      <select id="modeBtn" style="display:none" title="Pick a mode directly, or press Shift+Tab to cycle"></select>
+      <!-- Query.setMaxThinkingTokens(tokens, display) moved entirely into the
+           Settings modal (thinkingControlsGroup) - not surfaced here at all,
+           see settingsModal below. -->
+      <button id="sendBtn">Send</button>
+    </div>
+  </div>
+
+  <div id="dirBrowserModal" class="modal">
+    <div class="modal-box">
+      <header class="modal-body" id="dirPath"></header>
+      <div class="modal-body">
+        <button id="dirUpBtn">.. up</button>
+        <ul id="dirList"></ul>
+      </div>
+      <footer>
+        <button id="dirCancelBtn">Cancel</button>
+        <button id="dirSelectBtn" class="primary">Select this folder</button>
+      </footer>
+    </div>
+  </div>
+
+  <div id="diffModal" class="modal">
+    <div class="modal-box">
+      <header class="modal-body"><strong>Workspace diff</strong></header>
+      <div class="modal-body"><div id="diffBody"></div></div>
+      <footer>
+        <button id="diffCloseBtn">Close</button>
+      </footer>
+    </div>
+  </div>
+
+  <div id="historyModal" class="modal">
+    <div class="modal-box">
+      <header class="modal-body"><strong id="historyTitle"></strong></header>
+      <div class="modal-body" id="historyBody" style="display:flex;flex-direction:column;gap:6px;"></div>
+      <footer>
+        <button id="historyCloseBtn">Close</button>
+      </footer>
+    </div>
+  </div>
+
+  <div id="settingsModal" class="modal">
+    <div class="modal-box">
+      <header class="modal-body"><strong>Settings</strong></header>
+      <div class="modal-body settings-body">
+        <!-- Three tabs so the modal isn't one long scroll: General prefs,
+             MCP server status/toggles, and the plugin list/toggles - each
+             was already its own self-contained block, this just gives each
+             its own pane instead of stacking them. settings.js wires the
+             click-to-switch (toggles .active + each panel's display). -->
+        <div class="settings-tabs">
+          <button type="button" class="settings-tab active" data-settings-tab="general">Settings</button>
+          <button type="button" class="settings-tab" data-settings-tab="mcp">MCP</button>
+          <button type="button" class="settings-tab" data-settings-tab="plugins">Plugins</button>
+        </div>
+
+        <div class="settings-tab-panel" data-settings-tab-panel="general">
+          <label class="settings-row">
+            <input type="checkbox" id="autoCollapsePreviousGroupBtn" />
+            <span>Auto-collapse the previous tool call group when a new one starts</span>
+          </label>
+          <div class="settings-section">
+            <div class="settings-section-header">
+              <strong>Extra folders searchable in @</strong>
+              <button type="button" id="addCustomFolderBtn">+ Add folder</button>
+            </div>
+            <ul id="customFoldersList" class="settings-list"></ul>
+          </div>
+          <label class="settings-row">
+            <input type="checkbox" id="turnChartEnabledBtn" />
+            <span>Show the per-turn cost graph above the compose box</span>
+          </label>
+          <label class="settings-row">
+            <input type="checkbox" id="taskPanelEnabledBtn" />
+            <span>Show the task list above the compose box</span>
+          </label>
+          <div id="thinkingControlsGroup">
+            <label class="settings-row">
+              <span>Thinking budget</span>
+              <select id="thinkingBudgetBtn"></select>
+              <span class="hint" title="How many tokens Claude can spend reasoning before answering. Off = no extended thinking. Higher budgets can help on hard turns, but cost more and are slower.">?</span>
+            </label>
+            <label class="settings-row">
+              <span>Thinking display</span>
+              <select id="thinkingDisplayBtn"></select>
+              <span class="hint" title="Default = thinking shown as-is. Summarized = a condensed version. Omitted = thinking still happens but isn't displayed. Only matters once a budget is set.">?</span>
+            </label>
+            <div id="thinkingError" class="mcp-error" style="display: none;"></div>
+          </div>
+          <div id="effortControlsGroup" style="display:none">
+            <label class="settings-row">
+              <span>Effort</span>
+              <select id="effortBtn"></select>
+              <span class="hint" title="Grok reasoning effort. Low is cheaper and faster. High / Extra high spend more on reasoning.">?</span>
+            </label>
+            <div id="effortError" class="mcp-error" style="display: none;"></div>
+          </div>
+          <div class="settings-row settings-danger">
+            <div>
+              <strong>Close session</strong>
+              <p>Ends this session's live process - it stops being resumable from here, though it stays on disk like any other transcript.</p>
+            </div>
+            <button id="closeSessionBtn" class="danger" style="display:none">Close session</button>
+          </div>
+        </div>
+
+        <div class="settings-tab-panel" data-settings-tab-panel="mcp" style="display:none">
+          <div class="settings-section">
+            <div class="settings-section-header">
+              <strong>MCP Servers</strong>
+              <button id="mcpRefreshBtn" type="button">Refresh</button>
+            </div>
+            <p id="mcpProviderNote" class="mcp-note" style="display:none">Grok MCP servers from <code>grok inspect</code> for this directory (~/.grok/config.toml plus Claude/Cursor compat). Toggle runs <code>grok mcp enable/disable</code>. There is no live reconnect; start a new session to be sure the agent picks up a change.</p>
+            <ul id="mcpServerList" class="settings-list"></ul>
+          </div>
+        </div>
+
+        <div class="settings-tab-panel" data-settings-tab-panel="plugins" style="display:none">
+          <div class="settings-section">
+            <div class="settings-section-header">
+              <strong>Plugins</strong>
+              <button id="pluginReloadBtn" type="button">Reload plugins</button>
+            </div>
+            <p id="pluginProviderNote" class="mcp-note" style="display:none">Grok plugins from <code>grok inspect</code> (including Claude-compat plugins Grok loads). Toggle runs <code>grok plugin enable/disable</code>. Reload only refreshes this list; the live agent picks up plugin changes on the next session start.</p>
+            <p id="pluginWarning" class="settings-warning"></p>
+            <ul id="pluginList" class="settings-list"></ul>
+          </div>
+        </div>
+      </div>
+      <footer>
+        <button id="settingsCloseBtn">Done</button>
+      </footer>
+    </div>
+  </div>
+
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
