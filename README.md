@@ -4,6 +4,8 @@ A browser app for driving agent coding sessions - "I don't prompt a terminal dir
 
 The cockpit drives Claude Code sessions through `@anthropic-ai/claude-agent-sdk` and Grok sessions through the Grok CLI's JSON-RPC stdio interface, rendering the message stream itself. It does not wrap a pty and pipe raw bytes to `xterm.js`.
 
+![Prompt Cockpit session view with live cost graph](docs/screenshot.jpg)
+
 ## Run
 
 ```
