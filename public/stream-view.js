@@ -1,34 +1,43 @@
 // Renders the SDK message stream: assistant text, tool calls, tool
 // results, thinking blocks. Whole-message rendering (no token-level
-// partials - see plan MVP1 scope). Modeled on the terminal, not a web
-// chat: tool calls/results and thinking are collapsed to a one-line
-// summary by default, same as the CLI's own transcript. Ctrl+O reveals
-// everything currently collapsed - one-way, like the real CLI (confirmed
-// against the actual terminal: pressing it again does not re-fold).
-// Clicking a block individually still toggles just that one, both ways -
-// mouse-driven fine control, not a claim about terminal parity.
-// Hook/thinking-token/rate-limit chatter and repeat init messages are
-// dropped entirely rather than dumped as raw JSON. Per-tool approval
-// (accept-this-once / no) is a banner driven by cockpit:approval-request,
-// handled in app.js - not part of this module.
+// partials - see plan MVP1 scope). Hook/thinking-token/rate-limit chatter
+// and repeat init messages are dropped entirely rather than dumped as raw
+// JSON. Per-tool approval (accept-this-once / no) is a banner driven by
+// cockpit:approval-request, handled in app.js - not part of this module.
 //
-// Consecutive tool call/result pairs are folded into one "group" block (e.g.
-// "3 tool calls: Bash → Read → Edit") rather than each pair getting its own
-// row - that's what actually made a multi-tool turn noisy, more than any
-// single block's verbosity. A group stays open across tool calls and their
+// Tool calls render Trajectory-style (docs/deepseek.jpg): each tool_use gets
+// one fixed-height one-line row (name + brief args + inline usage/duration),
+// not a click-to-expand block - see appendToolCallRow. Its matching
+// tool_result patches that same row in place (duration, status glyph)
+// instead of appending a second block, so a call/result pair merges into one
+// line. Full payload/result/timing for a row lives in tool-call-store.js and
+// is surfaced by the docked detail pane (detail-pane.js, wired in app.js via
+// the onSelectToolCall/onToolCallStarted/onToolResultArrived callbacks
+// threaded through renderMessage) - click a row to pin it there, or leave it
+// on "follow the most recent call" by default. Thinking blocks always render
+// fully expanded now too (plain appendBlock, no collapse state) - the whole
+// click-to-collapse/Ctrl+O-to-expand interaction this app used to have is
+// gone, not just narrowed to tool calls.
+//
+// Consecutive tool calls are still folded into one "group" block (e.g.
+// "3 tool calls: Bash → Read → Edit") rather than each getting its own
+// top-level row - that's what actually made a multi-tool turn noisy, more
+// than any single row's verbosity, and is a deliberately-kept exception to
+// the no-collapse rule above (a locked-in design decision, not an oversight -
+// folding a long tool-call run to one line is worth keeping even though
+// per-block collapse wasn't). A group stays open across tool calls and their
 // results and closes the moment real Claude text or a thinking block
 // appears, or the turn ends - see closeGroup call sites. Groups render
 // expanded as they accumulate; by default (settings-panel toggle,
 // autoCollapsePreviousGroup below) the previous group auto-folds the moment
-// the next one opens, so only the run currently in flight stays open. The
-// header's Collapse all button (or Ctrl+O to expand) still works on top of
-// that for whatever's still expanded. The individual tool calls/results
-// inside a group stay independently collapsed to one-liners regardless
-// (click each, or Ctrl+O).
+// the next one opens, so only the run currently in flight stays open. Only a
+// direct click toggles a group now (no keyboard shortcut, no "expand/collapse
+// all" button - both were removed along with the rest of the old interaction).
+
+import { resetToolCallStore, createToolCallRecord, completeToolCallRecord, mergeToolCallStore, recordOrphanResult, popOrphanResult } from '/tool-call-store.js';
 
 const seenInitByContainer = new WeakMap();
-const collapsibleBlocksByContainer = new WeakMap();
-const groupsByContainer = new WeakMap(); // container -> group[], for Ctrl+O
+const groupsByContainer = new WeakMap(); // container -> group[], for the group-collapse hint handoff (updateCollapsedHints)
 const openGroupByContainer = new WeakMap(); // container -> the currently-accumulating group, if any
 
 // Settings-panel toggle (default on - see settings.js). When true, the
@@ -36,7 +45,7 @@ const openGroupByContainer = new WeakMap(); // container -> the currently-accumu
 // one auto-folds to its one-line summary instead of sitting there expanded
 // forever - a long turn's tool history reads like a list of past runs, not
 // a wall of them all still open. Off just restores the old always-expanded
-// behavior; either way a click (or Ctrl+O) still re-expands any of them.
+// behavior; either way a click on the group's own header still re-expands it.
 let autoCollapsePreviousGroup = true;
 export function setAutoCollapsePreviousGroup(enabled) {
   autoCollapsePreviousGroup = enabled;
@@ -55,54 +64,19 @@ const SILENT_SYSTEM_SUBTYPES = new Set([
   'thinking_tokens',
 ]);
 
-// Collapsed preview is capped at one literal line - no embedded line feed -
-// so a collapsed tool result/thinking block is always exactly 2 lines on
-// screen: the first line, then the "... +N more lines" hint.
-const COLLAPSE_LINES = 1;
-const COLLAPSE_CHARS = 240;
-
-// Monotonic creation order across both collapsible blocks and groups
-// (they're two separate lists/types - see collapsibleBlocksByContainer /
-// groupsByContainer - so a plain array index can't compare "which is
-// newer" across the two). Stamped once per item at creation, read by
-// updateCollapsedHints to find the single most-recently-collapsed one.
+// Creation-order counter for groups (groupsByContainer), stamped once per
+// group at creation and re-stamped on manual collapse (setGroupExpanded) so
+// updateCollapsedHints can find the single most-recently-collapsed one.
 let nextHintSeq = 0;
 
 // Call once per fresh session view (app.js does this on connect(), right
 // after clearing the container) so stale block references from a previous
 // session don't linger.
 export function resetStreamView(container) {
-  collapsibleBlocksByContainer.set(container, []);
   groupsByContainer.set(container, []);
   openGroupByContainer.delete(container);
   seenInitByContainer.delete(container);
-}
-
-// Bound to Ctrl+O in app.js. Expands every currently-collapsed block and
-// group. One-way: blocks/groups already expanded (globally or by an
-// individual click) are left alone, and this has no effect on blocks
-// rendered afterward.
-export function expandAllCollapsed(container) {
-  for (const block of collapsibleBlocksByContainer.get(container) || []) {
-    if (!block.expanded) setBlockExpanded(block, true);
-  }
-  for (const group of groupsByContainer.get(container) || []) {
-    if (!group.expanded) setGroupExpanded(group, true);
-  }
-}
-
-// Bound to the "Collapse all" button in app.js. The inverse of
-// expandAllCollapsed above - folds every currently-expanded block and group
-// back down, both those opened by Ctrl+O and those toggled individually by
-// click. Unlike Ctrl+O this is two-way in practice: expand and collapse can
-// be pressed repeatedly in either order with no dead state.
-export function collapseAllExpanded(container) {
-  for (const block of collapsibleBlocksByContainer.get(container) || []) {
-    if (block.expanded) setBlockExpanded(block, false);
-  }
-  for (const group of groupsByContainer.get(container) || []) {
-    if (group.expanded) setGroupExpanded(group, false);
-  }
+  resetToolCallStore(container);
 }
 
 // Renders `messages` (oldest-first) into a detached fragment, then inserts
@@ -113,55 +87,74 @@ export function collapseAllExpanded(container) {
 // this session's own live pushInput calls - see session.js), so their
 // rewind buttons don't appear; a real limitation, not an oversight.
 export function prependHistory(container, messages, options = {}) {
-  if (!collapsibleBlocksByContainer.has(container)) resetStreamView(container);
+  if (!groupsByContainer.has(container)) resetStreamView(container);
 
   const fragment = document.createDocumentFragment();
   for (const message of messages) {
-    renderMessage(fragment, message, options);
+    // Forced true regardless of what the caller passed - this whole function
+    // is by definition a batch of already-past messages rendered in one
+    // synchronous loop, so Date.now()-based tool-call timing would be
+    // meaningless here (see appendToolCallRow's historical branch).
+    renderMessage(fragment, message, { ...options, historical: true });
   }
 
-  // Collapsible blocks/groups built into the fragment registered themselves
-  // under the fragment's own WeakMap entry (renderMessage's container param)
-  // - merge them into the real container's list so Ctrl+O still reaches
-  // them. The fragment's own dangling open group (if the history slice ends
-  // mid-run) is discarded, not merged - it belongs to a different DOM
-  // subtree and can never accept another tool call now that it's sealed.
-  const fragmentBlocks = collapsibleBlocksByContainer.get(fragment) || [];
-  const containerBlocks = collapsibleBlocksByContainer.get(container) || [];
+  // Groups built into the fragment registered themselves under the
+  // fragment's own WeakMap entry (renderMessage's container param) - merge
+  // them into the real container's list so the group-collapse hint handoff
+  // still reaches them. The fragment's own dangling open group (if the
+  // history slice ends mid-run) is discarded, not merged - it belongs to a
+  // different DOM subtree and can never accept another tool call now that
+  // it's sealed.
   const fragmentGroups = groupsByContainer.get(fragment) || [];
   const containerGroups = groupsByContainer.get(container) || [];
 
-  // Historical items got their updateCollapsedHints `seq` stamped while
+  // Historical groups got their updateCollapsedHints `seq` stamped while
   // rendering into `fragment`, which happens after the live container's own
   // entries already exist - so their seq would otherwise sort *after* the
   // live tail's, exactly backwards from where they land in the DOM (always
   // above it, never below). Shift the whole batch below the container's
   // current minimum seq, preserving order within the batch, so the live
   // tail still reads as "newest collapsed" once everything's merged. Each
-  // item's `container` field also gets re-pointed at the real container -
+  // group's `container` field also gets re-pointed at the real container -
   // it was stamped `fragment` during creation, and fragment is discarded
   // below, so anything still referencing it would look up an empty list.
-  const fragItems = [...fragmentBlocks, ...fragmentGroups];
-  const existing = [...containerBlocks, ...containerGroups];
-  if (existing.length && fragItems.length) {
-    const containerMin = Math.min(...existing.map((x) => x.seq));
-    const fragMax = Math.max(...fragItems.map((x) => x.seq));
+  if (containerGroups.length && fragmentGroups.length) {
+    const containerMin = Math.min(...containerGroups.map((g) => g.seq));
+    const fragMax = Math.max(...fragmentGroups.map((g) => g.seq));
     if (fragMax >= containerMin) {
       const offset = fragMax - containerMin + 1;
-      fragItems.forEach((x) => { x.seq -= offset; });
+      fragmentGroups.forEach((g) => { g.seq -= offset; });
     }
   }
-  fragItems.forEach((x) => { x.container = container; });
-
-  collapsibleBlocksByContainer.set(container, [...fragmentBlocks, ...containerBlocks]);
-  collapsibleBlocksByContainer.delete(fragment);
+  fragmentGroups.forEach((g) => { g.container = container; });
 
   groupsByContainer.set(container, [...fragmentGroups, ...containerGroups]);
   groupsByContainer.delete(fragment);
   openGroupByContainer.delete(fragment);
 
+  // Tool-call records built during the fragment render (see tool-call-store.js's
+  // mergeToolCallStore doc comment) need the same fold-in, so a click on a
+  // just-prepended historical row still resolves to its record.
+  const mergedIds = mergeToolCallStore(fragment, container);
+
   container.prepend(fragment);
   updateCollapsedHints(container); // finalize hint ownership now that everything's merged in true document order
+
+  // A tool_use that just arrived via this merge might be the match an
+  // earlier orphan result (rendered before this history page ever loaded -
+  // see appendOrphanResultRow/renderUser's tool_result handling) has been
+  // waiting for. Resolve it now instead of leaving that row pending forever:
+  // complete the record and patch its row exactly like a live result
+  // arriving would, then drop the now-redundant orphan placeholder row.
+  for (const id of mergedIds) {
+    const orphan = popOrphanResult(container, id);
+    if (!orphan) continue;
+    const record = completeToolCallRecord(container, id, { resultText: orphan.resultText, isError: orphan.isError, resultAtMs: orphan.resultAtMs });
+    if (record) {
+      updateToolCallRow(record);
+      orphan.rowEl?.remove();
+    }
+  }
 }
 
 // receivedAtMs: the cockpit's own receive-time (Date.now() at the moment
@@ -172,19 +165,31 @@ export function prependHistory(container, messages, options = {}) {
 // doc comment, which is exactly the use made of it here. history-pane.js
 // passes no receivedAtMs, so a transcript with no recorded timestamp simply
 // shows none rather than a fabricated "just now".
-export function renderMessage(container, message, { onRewindClick, hasFileCheckpointing = true, turnIndexUnreliable = false, turnPointIndex = null, assistantLabel = 'Claude', rewindLabel, receivedAtMs = null } = {}) {
-  if (!collapsibleBlocksByContainer.has(container)) resetStreamView(container);
+export function renderMessage(container, message, { onRewindClick, hasFileCheckpointing = true, turnIndexUnreliable = false, turnPointIndex = null, assistantLabel = 'Claude', rewindLabel, receivedAtMs = null, historical = false, onSelectToolCall, onToolCallStarted, onToolResultArrived } = {}) {
+  if (!groupsByContainer.has(container)) resetStreamView(container);
 
   const parsed = message.timestamp ? Date.parse(message.timestamp) : NaN;
   const timestampMs = Number.isFinite(parsed) ? parsed : receivedAtMs;
+  // Detail-pane hooks (all optional, default no-ops via `?.()` at every call
+  // site below) - threaded through the same way onRewindClick already is,
+  // rather than a global event bus, so app.js stays the only place that
+  // knows the detail-pane instance exists. `historical` (forced true by
+  // prependHistory/history-pane.js, false for the one live-streaming call
+  // site in app.js) tells appendToolCallRow/renderUser's tool_result handler
+  // whether Date.now() is a real per-block timestamp (live) or would just be
+  // "whenever this synchronous render loop happened to run" (a batch of
+  // already-past messages, rendered in one tick with no real elapsed time
+  // between them) - see the Timing-tab honesty note this drives in
+  // detail-pane.js.
+  const toolOpts = { historical, onSelectToolCall, onToolCallStarted, onToolResultArrived };
 
   switch (message.type) {
     case 'system':
       return renderSystem(container, message, timestampMs);
     case 'assistant':
-      return renderAssistant(container, message, turnPointIndex, assistantLabel, timestampMs);
+      return renderAssistant(container, message, turnPointIndex, assistantLabel, timestampMs, toolOpts);
     case 'user':
-      return renderUser(container, message, turnIndexUnreliable ? null : onRewindClick, hasFileCheckpointing, rewindLabel, timestampMs);
+      return renderUser(container, message, turnIndexUnreliable ? null : onRewindClick, hasFileCheckpointing, rewindLabel, timestampMs, toolOpts);
     case 'result':
       return renderResult(container, message, timestampMs);
     case 'rate_limit_event':
@@ -201,19 +206,19 @@ function renderSystem(container, message, timestampMs = null) {
     if (seenInitByContainer.get(container)) return; // priming sentinel causes a harmless second init
     seenInitByContainer.set(container, true);
     closeGroup(container);
-    appendBlock(container, 'system', 'Session', `model: ${message.model}  ·  cwd: ${message.cwd}  ·  mode: ${message.permissionMode}`, [], {}, container, null, null, timestampMs);
+    appendBlock(container, 'system', 'Session', `model: ${message.model}  ·  cwd: ${message.cwd}  ·  mode: ${message.permissionMode}`, [], container, null, null, timestampMs);
     return;
   }
 
   if (message.subtype === 'permission_denied') {
     closeGroup(container); // a denial interrupts whatever tool run was in progress
-    appendBlock(container, 'error', `${message.tool_name} Denied`, message.decision_reason || message.message || 'permission denied', [], {}, container, null, null, timestampMs);
+    appendBlock(container, 'error', `${message.tool_name} Denied`, message.decision_reason || message.message || 'permission denied', [], container, null, null, timestampMs);
     return;
   }
   // other system subtypes: silent by default, see module comment
 }
 
-function renderAssistant(container, message, turnPointIndex = null, assistantLabel = 'Claude', timestampMs = null) {
+function renderAssistant(container, message, turnPointIndex = null, assistantLabel = 'Claude', timestampMs = null, toolOpts = {}) {
   const blocks = message.message && message.message.content;
   if (!Array.isArray(blocks)) return;
   // One API call produced every block below - the SDK doesn't sub-divide
@@ -225,7 +230,7 @@ function renderAssistant(container, message, turnPointIndex = null, assistantLab
   for (const block of blocks) {
     if (block.type === 'text') {
       closeGroup(container); // real reply - whatever tool run preceded it is done
-      const wrap = appendBlock(container, 'assistant', assistantLabel, block.text, [], {}, container, null, usage, timestampMs); // the actual reply - never collapsed
+      const wrap = appendBlock(container, 'assistant', assistantLabel, block.text, [], container, null, usage, timestampMs); // the actual reply - never collapsed
       // Text-only turns (no tool_use blocks) otherwise never get tagged, so
       // clicking their bar in turn-chart.js just clears whatever highlight
       // was showing and does nothing (B7) - tag this one too. It's not
@@ -235,22 +240,142 @@ function renderAssistant(container, message, turnPointIndex = null, assistantLab
     } else if (block.type === 'thinking') {
       closeGroup(container); // keeps DOM order honest: thinking always precedes the calls that follow it
       if (!block.thinking || !block.thinking.trim()) continue; // signature-only/empty thinking blocks - nothing to show
-      appendCollapsibleBlock(container, 'thinking', 'Thinking', block.thinking, null, container, usage);
+      appendBlock(container, 'thinking', 'Thinking', block.thinking, [], container, null, usage, timestampMs); // always fully rendered now, no collapse/expand affordance (see module comment)
     } else if (block.type === 'tool_use') {
       const parent = addToolCallToGroup(container, block.name, message._usageInfo);
-      const wrap = appendCollapsibleBlock(
-        container, 'tool', `Tool: ${block.name}`,
-        formatToolInput(block.name, block.input),
-        summarizeToolInput(block.name, block.input),
-        parent, usage,
-      );
-      wrap.dataset.toolKind = classifyTool(block.name);
-      // Ties this block back to its bar in turn-chart.js's per-turn graph
-      // (same index the point gets there - see app.js's nextPointIndex()
-      // call) so hovering the bar can find and highlight it.
-      if (turnPointIndex != null) wrap.dataset.turnPoint = String(turnPointIndex);
+      appendToolCallRow(container, block, message._usageInfo, parent, turnPointIndex, toolOpts, timestampMs);
     }
   }
+}
+
+// Trajectory-style fixed one-liner per tool call - verb + brief args (reuses
+// summarizeToolInput, unchanged) + inline usage + a duration placeholder
+// filled in by updateToolCallRow once the matching tool_result arrives. This
+// is the *only* DOM node for the tool call: the tool_result handler below
+// patches it in place rather than appending a second block, so the run
+// merges into one line per group entry instead of a call/result pair.
+function appendToolCallRow(container, block, usageInfo, parent, turnPointIndex, toolOpts = {}, messageTimestampMs = null) {
+  // Live: Date.now() is a real per-block stamp, the whole point of this
+  // instrumentation. Historical (prependHistory/history-pane.js force
+  // toolOpts.historical = true): every message in the batch renders in one
+  // synchronous loop with no real elapsed time between iterations, so
+  // Date.now() here would just be "whenever this loop happened to run," not
+  // when the tool call actually started - that's what produced the
+  // misleading "0ms" on every historical row. Use the assistant message's
+  // own timestamp instead (still a real, if coarser, signal); if it's
+  // missing too (older emitters, Grok), leave it null and let the Timing tab
+  // / duration cell show "-" rather than a fabricated number.
+  const startedAtMs = toolOpts.historical ? messageTimestampMs : Date.now();
+
+
+  // Same pin-to-bottom the old appendBlock/openGroup path did - checked
+  // against `container` (the real scroll region: #stream/#historyBody), not
+  // `parent` (a group's .inner, which never scrolls on its own). Without
+  // this, every tool call after a group's first one grows the group with no
+  // re-pin, so a long in-flight Bash -> Read -> Edit run walks off the
+  // bottom of the transcript. (On a detached prependHistory fragment,
+  // isScrolledToBottom reads undefined dimensions and returns false, so this
+  // is a harmless no-op there, same as it already is for appendBlock.)
+  const wasAtBottom = isScrolledToBottom(container);
+
+  const wrap = document.createElement('div');
+  wrap.className = 'msg tool-row tool-row-pending';
+  wrap.dataset.toolKind = classifyTool(block.name);
+  wrap.dataset.toolCallId = block.id;
+  if (turnPointIndex != null) wrap.dataset.turnPoint = String(turnPointIndex);
+
+  const nameEl = document.createElement('span');
+  nameEl.className = 'tool-row-name';
+  nameEl.textContent = block.name;
+
+  const argsEl = document.createElement('span');
+  argsEl.className = 'tool-row-args';
+  argsEl.textContent = summarizeToolInput(block.name, block.input);
+
+  const metaEl = document.createElement('span');
+  metaEl.className = 'tool-row-meta usage-meta';
+  metaEl.textContent = formatUsageInline(usageInfo) || '';
+
+  const durationEl = document.createElement('span');
+  durationEl.className = 'tool-row-duration';
+  durationEl.textContent = '…';
+  durationEl.title = 'Client-observed wall time (includes network + render lag), not the tool\'s server-side execution time';
+
+  const statusEl = document.createElement('span');
+  statusEl.className = 'tool-row-status';
+  statusEl.textContent = '●';
+
+  wrap.append(nameEl, argsEl, metaEl, durationEl, statusEl);
+  parent.append(wrap);
+  if (wasAtBottom) container.scrollTop = container.scrollHeight;
+
+  // Resolve the *real* container at click time, not the one closed over at
+  // creation - prependHistory renders into a detached fragment first, then
+  // merges its records into the real container's map and discards the
+  // fragment's own entry (tool-call-store.js's mergeToolCallStore), so by
+  // the time this ever fires, `container` (the fragment) is stale and would
+  // resolve to nothing. The two ids below are this app's only two real
+  // renderMessage containers (live #stream, history modal's #historyBody) -
+  // `wrap` is a genuine DOM descendant of whichever one it ended up in by
+  // the time a user can click it, fragment or not.
+  wrap.addEventListener('click', (e) => {
+    e.stopPropagation(); // don't also toggle the enclosing group
+    const liveContainer = wrap.closest('#stream') || wrap.closest('#historyBody');
+    toolOpts.onSelectToolCall?.(liveContainer || container, block.id);
+  });
+
+  const record = createToolCallRecord(container, {
+    id: block.id, name: block.name, kind: classifyTool(block.name),
+    input: block.input, payload: formatToolInput(block.name, block.input),
+    usage: usageInfo, rowEl: wrap, startedAtMs,
+  });
+
+  toolOpts.onToolCallStarted?.(container, record);
+
+  return wrap;
+}
+
+// null when either stamp is missing (no real timestamp available for a
+// historical row - see tool-call-store.js) - an em dash beats a fabricated
+// "0ms" that implies a measurement never actually happened.
+function formatToolRowDuration(startedAtMs, resultAtMs) {
+  if (startedAtMs == null || resultAtMs == null) return '–';
+  const ms = resultAtMs - startedAtMs;
+  return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(2)}s`;
+}
+
+// Patches the row appendToolCallRow already built - duration + status glyph -
+// instead of appending a second block for the result, so a tool call reads
+// as one line, not a call/result pair.
+function updateToolCallRow(record) {
+  record.rowEl.querySelector('.tool-row-duration').textContent = formatToolRowDuration(record.startedAtMs, record.resultAtMs);
+  record.rowEl.querySelector('.tool-row-status').textContent = record.status === 'error' ? '✗' : '✓';
+  record.rowEl.classList.toggle('tool-row-error', record.status === 'error');
+  record.rowEl.classList.remove('tool-row-pending');
+}
+
+// A tool_result with no matching tool_use record - real case, not a bug: a
+// "Load earlier history" fetch can start mid-run, landing a result whose
+// call lived on an earlier, unfetched page (see tool-call-store.js). Render
+// an honest orphan row rather than silently dropping the result, same
+// "flag the real limitation" spirit as renderUser's rewind-button omission.
+function appendOrphanResultRow(container, block, parent) {
+  const wasAtBottom = isScrolledToBottom(container); // same reasoning as appendToolCallRow's own wasAtBottom
+
+  const wrap = document.createElement('div');
+  wrap.className = 'msg tool-row tool-row-orphan';
+  wrap.dataset.toolKind = 'other';
+  wrap.dataset.orphanToolUseId = block.tool_use_id; // for inspection only - resolution is driven by tool-call-store.js's orphan map, not this attribute
+  const nameEl = document.createElement('span');
+  nameEl.className = 'tool-row-name';
+  nameEl.textContent = 'Result';
+  const argsEl = document.createElement('span');
+  argsEl.className = 'tool-row-args';
+  argsEl.textContent = '(tool call not loaded - result from an earlier, unfetched history page)';
+  wrap.append(nameEl, argsEl);
+  parent.append(wrap);
+  if (wasAtBottom) container.scrollTop = container.scrollHeight;
+  return wrap;
 }
 
 // "$0.0X, N in, M out" - dim/small (index.html's .usage-meta), on the same
@@ -259,7 +384,7 @@ function renderAssistant(container, message, turnPointIndex = null, assistantLab
 // like it was free. Returns null (nothing rendered) when there's no figure
 // to show - an unpriced model, or a message this repo never attached one to
 // (system/user/result messages, or an assistant message with none).
-function formatUsageInline(info) {
+export function formatUsageInline(info) {
   if (!info) return null;
   const usd = info.costUsd > 0 && info.costUsd < 0.01 ? `$${info.costUsd.toFixed(4)}` : `$${info.costUsd.toFixed(2)}`;
   return `${usd}, ${info.inputTokens} in, ${info.outputTokens} out`;
@@ -352,18 +477,22 @@ function diffLines(oldText, newText) {
   return lines;
 }
 
-// Terminal-style one-liner for the collapsed state, e.g. Write(file_path: "...").
+// The row's "brief args" cell, e.g. file_path: "package.json" - just the key:
+// value fragment, not wrapped in `name(...)`, since .tool-row-name already
+// prints the tool name right before this in the same row (used to be
+// combined into one string back when this fed a "Write(file_path: ...)"-style
+// collapsed block label with no separate name element next to it).
 function summarizeToolInput(name, input) {
-  if (!input || typeof input !== 'object') return `${name}()`;
+  if (!input || typeof input !== 'object') return '';
   const preferredKeys = ['file_path', 'path', 'command', 'pattern', 'query', 'url', 'prompt'];
   const key = preferredKeys.find((k) => k in input) || Object.keys(input)[0];
-  if (!key) return `${name}()`;
+  if (!key) return '';
   const value = typeof input[key] === 'string' ? input[key] : JSON.stringify(input[key]);
   const truncated = value.length > 80 ? `${value.slice(0, 80)}…` : value;
-  return `${name}(${key}: ${JSON.stringify(truncated)})`;
+  return `${key}: ${JSON.stringify(truncated)}`;
 }
 
-function renderUser(container, message, onRewindClick, hasFileCheckpointing, rewindLabel, timestampMs = null) {
+function renderUser(container, message, onRewindClick, hasFileCheckpointing, rewindLabel, timestampMs = null, toolOpts = {}) {
   const content = message.message && message.message.content;
   if (message.isSynthetic) return; // priming sentinel, not a real turn
 
@@ -384,19 +513,40 @@ function renderUser(container, message, onRewindClick, hasFileCheckpointing, rew
     const actions = onRewindClick && message.turnIndex
       ? [{ label, onClick: () => onRewindClick(message.turnIndex) }]
       : [];
-    appendBlock(container, 'user', 'You', content, actions, {}, container, null, null, timestampMs);
+    appendBlock(container, 'user', 'You', content, actions, container, null, null, timestampMs);
     return;
   }
   if (Array.isArray(content)) {
     for (const block of content) {
       if (block.type === 'tool_result') {
-        // Reuses (or opens) the group its matching tool_use started - see
-        // module comment. "Tool: Result" to match the "Tool: <Name>" label.
-        const parent = getOrOpenGroup(container).inner;
-        appendCollapsibleBlock(container, 'tool', 'Tool: Result', flattenToolResult(block.content), undefined, parent);
+        // Patches the row appendToolCallRow already built for the matching
+        // tool_use (correlated via the Anthropic tool_use_id join key) -
+        // merges into one line instead of appending a second "Tool: Result"
+        // block, per the Trajectory-style redesign.
+        const resultText = flattenToolResult(block.content);
+        const isError = Boolean(block.is_error);
+        // Same live-vs-historical reasoning as appendToolCallRow's
+        // startedAtMs - Date.now() only means something for a result that's
+        // really arriving right now.
+        const resultAtMs = toolOpts.historical ? timestampMs : Date.now();
+        const record = completeToolCallRecord(container, block.tool_use_id, { resultText, isError, resultAtMs });
+        if (record) {
+          updateToolCallRow(record);
+        } else {
+          // No matching tool_use in this container - real limitation, not a
+          // bug: see appendOrphanResultRow's own comment. Retain the result
+          // text/error (not just render a placeholder) so that if "Load
+          // earlier history" later pulls in the missing tool_use, the merge
+          // step below can retroactively complete this record instead of
+          // leaving a permanently-pending orphan.
+          const parent = getOrOpenGroup(container).inner;
+          const orphanRow = appendOrphanResultRow(container, block, parent);
+          recordOrphanResult(container, block.tool_use_id, { resultText, isError, resultAtMs, rowEl: orphanRow });
+        }
+        toolOpts.onToolResultArrived?.(container, block.tool_use_id);
       } else if (block.type === 'text') {
         closeGroup(container);
-        appendBlock(container, 'user', 'You', block.text, [], {}, container, null, null, timestampMs);
+        appendBlock(container, 'user', 'You', block.text, [], container, null, null, timestampMs);
       }
     }
   }
@@ -415,7 +565,7 @@ function flattenToolResult(content) {
 function renderResult(container, message, timestampMs = null) {
   closeGroup(container); // the turn is over - nothing can extend the run anymore
   if (message.subtype === 'success') return; // state pill already shows idle/running
-  appendBlock(container, 'error', 'Turn Error', message.error || 'unknown error', [], {}, container, null, null, timestampMs);
+  appendBlock(container, 'error', 'Turn Error', message.error || 'unknown error', [], container, null, null, timestampMs);
 }
 
 // A run of consecutive tool call/result pairs, collapsed to one summary row
@@ -465,8 +615,7 @@ function openGroup(container) {
     countedUsageInfos: new Set(),
     container, seq: nextHintSeq++,
   };
-  wrap.classList.add('expanded'); // groups open by default - it's the individual tool
-  // calls/results inside that stay collapsed to one-liners (see appendCollapsibleBlock)
+  wrap.classList.add('expanded'); // groups open by default
   wrap.addEventListener('click', () => setGroupExpanded(group, !group.expanded));
 
   openGroupByContainer.set(container, group);
@@ -482,8 +631,8 @@ function closeGroup(container) {
 
 // Opens (or reuses) the container's current group, records the tool call
 // (and its originating message's usage, if any - see openGroup's comment)
-// in its summary, and returns the DOM node its collapsible block should
-// render into (instead of the top-level container).
+// in its summary, and returns the DOM node its one-line row (appendToolCallRow)
+// should render into (instead of the top-level container).
 function addToolCallToGroup(container, name, usageInfo) {
   const group = getOrOpenGroup(container);
   group.toolNames.push(name);
@@ -525,104 +674,35 @@ function renderGroupSummary(group) {
   // actually gets to keep that text or goes blank because a newer collapsed
   // item took over. 'click to collapse' isn't deduped: normally only the
   // one currently-open group shows it, so there's nothing to repeat.
-  group.hintText.textContent = group.expanded ? 'click to collapse' : 'ctrl+o to expand';
+  group.hintText.textContent = group.expanded ? 'click to collapse' : 'click to expand';
 }
 
 function setGroupExpanded(group, expanded) {
   group.expanded = expanded;
-  if (!expanded) group.seq = nextHintSeq++; // see setBlockExpanded's matching comment
+  // Re-stamp on manual re-collapse (not just at creation) so re-collapsing an
+  // old group correctly reclaims the hint from whatever's currently showing
+  // it - "most recently collapsed", not just "most recently created".
+  if (!expanded) group.seq = nextHintSeq++;
   group.wrap.classList.toggle('expanded', expanded);
-  renderGroupSummary(group); // updates the "click to collapse" / "ctrl+o to expand" hint
+  renderGroupSummary(group); // updates the "click to collapse" / "click to expand" hint
   updateCollapsedHints(group.container);
 }
 
-// Only the single most-recently-collapsed block or group across the whole
-// container gets to show "ctrl+o to expand" - a stream with several
-// collapsed blocks used to repeat that exact caption once per block, which
-// reads as noise once there are more than one or two. Every other collapsed
-// item still collapses/expands exactly the same way, it just renders blank
-// where the hint used to be. Recomputed from scratch (not tracked
-// incrementally) on every create/expand/collapse, so toggling any one item
-// correctly hands the hint off to whichever remains newest - `seq` is what
-// lets blocks and groups (two separate lists) be compared for "newest" at all.
+// Only the single most-recently-collapsed group across the whole container
+// gets to show "click to expand" - a stream with several collapsed groups
+// used to repeat that exact caption once per group, which reads as noise
+// once there are more than one or two. Every other collapsed group still
+// collapses/expands exactly the same way, it just renders blank where the
+// hint used to be. Recomputed from scratch (not tracked incrementally) on
+// every create/expand/collapse, so toggling any one group correctly hands
+// the hint off to whichever remains newest.
 function updateCollapsedHints(container) {
-  const allGroups = groupsByContainer.get(container) || [];
-  // A block inside a currently-collapsed group is invisible (the group's
-  // own .group-body is display:none) even if the block's own `expanded` is
-  // false - collapseAllExpanded (the "Collapse all" button) walks every
-  // block regardless of visibility and re-collapses whichever were
-  // individually expanded before, which re-stamps that block's seq
-  // (setBlockExpanded) possibly *above* the actual visible winner. Without
-  // this check an invisible nested block could win the hint slot, leaving
-  // the real visible collapsed group with nothing.
-  const isVisible = (block) => !allGroups.some((g) => !g.expanded && g.inner.contains(block.wrap));
-  const blocks = (collapsibleBlocksByContainer.get(container) || []).filter((b) => !b.expanded && isVisible(b));
-  const groups = allGroups.filter((g) => !g.expanded);
+  const groups = (groupsByContainer.get(container) || []).filter((g) => !g.expanded);
   let winner = null;
-  for (const item of [...blocks, ...groups]) {
-    if (!winner || item.seq > winner.seq) winner = item;
+  for (const group of groups) {
+    if (!winner || group.seq > winner.seq) winner = group;
   }
-  blocks.forEach((b) => renderBody(b.body, b.summary, b === winner ? b.hint : null));
-  groups.forEach((g) => { g.hintText.textContent = g === winner ? 'ctrl+o to expand' : ''; });
-}
-
-// Renders collapsed to a short summary by default (terminal behavior);
-// clicking the block, or Ctrl+O globally, expands it to the full text.
-// `parent` is the DOM node to append into - the container itself normally,
-// or a group's inner node when this call is part of a tool run (see above).
-function appendCollapsibleBlock(container, cls, roleLabel, fullText, summaryOverride, parent = container, meta = null) {
-  const { summary, hint, truncated } = summarize(fullText, summaryOverride);
-  const wrap = appendBlock(container, cls, roleLabel, summary, [], { collapsible: truncated }, parent, hint, meta);
-
-  if (truncated) {
-    const block = { wrap, body: wrap.querySelector('.body'), fullText, summary, hint, expanded: false, container, seq: nextHintSeq++ };
-    wrap.dataset.collapsible = 'true';
-    wrap.addEventListener('click', (e) => {
-      e.stopPropagation(); // don't also toggle an enclosing group
-      setBlockExpanded(block, !block.expanded);
-    });
-
-    const list = collapsibleBlocksByContainer.get(container) || [];
-    list.push(block);
-    collapsibleBlocksByContainer.set(container, list);
-  }
-  // Unconditional, not just on the truncated path above: this call is
-  // cheap (a recompute over already-small lists) and removing the early
-  // return means a non-collapsible block landing here can never leave a
-  // stale hint owner in place, whatever state it interrupted.
-  updateCollapsedHints(container);
-  return wrap;
-}
-
-// `text` is either a plain string or { lines: [{ text, cls }] } - the latter
-// from formatToolInput's diff output (see there). summaryOverride is always
-// a plain string (the terminal-style one-liner), never the diff shape.
-// `hint` is returned separately from `summary` now (not appended into the
-// same string) so the caller can render it as its own dim/small/right-
-// aligned span (index.html's .expand-hint) instead of plain trailing text.
-function summarize(text, summaryOverride) {
-  if (summaryOverride) return { summary: summaryOverride, hint: 'ctrl+o to expand', truncated: true };
-
-  const source = text ?? '';
-  const lines = source.split('\n');
-  const fitsCollapsed = lines.length <= COLLAPSE_LINES && source.length <= COLLAPSE_CHARS;
-  if (fitsCollapsed) return { summary: source, hint: null, truncated: false };
-
-  const extraLines = Math.max(0, lines.length - COLLAPSE_LINES);
-  const clipped = lines.slice(0, COLLAPSE_LINES).join('\n').slice(0, COLLAPSE_CHARS);
-  const hint = extraLines > 0 ? `+${extraLines} more lines - ctrl+o to expand` : 'ctrl+o to expand';
-  return { summary: clipped, hint, truncated: true };
-}
-
-function setBlockExpanded(block, expanded) {
-  block.expanded = expanded;
-  // Re-stamp on manual re-collapse (not just at creation) so clicking an old
-  // block shut again correctly reclaims the hint from whatever's currently
-  // showing it - "most recently collapsed", not just "most recently created".
-  if (!expanded) block.seq = nextHintSeq++;
-  renderBody(block.body, expanded ? block.fullText : block.summary, expanded ? null : block.hint);
-  block.wrap.classList.toggle('expanded', expanded);
-  updateCollapsedHints(block.container);
+  groups.forEach((g) => { g.hintText.textContent = g === winner ? 'click to expand' : ''; });
 }
 
 // Plain string -> textContent, same as before. { lines } (diff output from
@@ -630,10 +710,12 @@ function setBlockExpanded(block, expanded) {
 // classes (diff-add/diff-del/diff-hunk/diff-meta/diff-ctx) so an expanded
 // Edit/MultiEdit reads like the terminal's own diff instead of raw JSON.
 // `hint`, when given, renders as a trailing .expand-hint span in the same flex row
-// as the content (index.html's `.body.with-hint`) - collapsed content is
-// always capped to one line (COLLAPSE_LINES), so it never has to compete
-// with wrapped content for that row.
-function renderBody(body, content, hint = null) {
+// as the content (index.html's `.body.with-hint`) - unused today (nothing
+// still renders a collapsed-with-hint block; the click-to-collapse
+// interaction that used this is gone), kept because renderBody is exported
+// and reused as a generic content renderer (detail-pane.js's Payload/Result
+// tabs) where a future caller passing a hint should still work correctly.
+export function renderBody(body, content, hint = null) {
   if (content && typeof content === 'object' && Array.isArray(content.lines)) {
     body.className = 'body';
     body.textContent = '';
@@ -666,11 +748,11 @@ function renderBody(body, content, hint = null) {
 // node instead. `container` always stays the scroll-position/registry
 // reference regardless of where the block physically lands, since `parent`
 // is always a descendant of it.
-function appendBlock(container, cls, roleLabel, text, actions = [], { collapsible = false } = {}, parent = container, hint = null, meta = null, timestampMs = null) {
+function appendBlock(container, cls, roleLabel, text, actions = [], parent = container, hint = null, meta = null, timestampMs = null) {
   const wasAtBottom = isScrolledToBottom(container);
 
   const wrap = document.createElement('div');
-  wrap.className = `msg ${cls}${collapsible ? ' collapsible' : ''}`;
+  wrap.className = `msg ${cls}`;
 
   const roleRow = document.createElement('div');
   roleRow.className = 'role';
@@ -700,7 +782,7 @@ function appendBlock(container, cls, roleLabel, text, actions = [], { collapsibl
     btn.className = 'msg-action';
     btn.textContent = action.label;
     btn.addEventListener('click', (e) => {
-      e.stopPropagation(); // don't also trigger the block's own collapse toggle
+      e.stopPropagation(); // don't also trigger the enclosing group's own toggle, if this block happens to be inside one
       action.onClick();
     });
     roleRow.append(btn);

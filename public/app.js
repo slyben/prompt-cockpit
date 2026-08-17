@@ -1,7 +1,7 @@
 // Launcher (cwd picker + resume list), websocket wiring, and MVP2's five
 // features' client-side glue. Rendering lives in stream-view.js, input in
 // compose.js/file-picker.js, modals in dir-browser.js/diff-view.js.
-import { renderMessage, resetStreamView, expandAllCollapsed, collapseAllExpanded, prependHistory, isScrolledToBottom, setAutoCollapsePreviousGroup } from '/stream-view.js';
+import { renderMessage, resetStreamView, prependHistory, isScrolledToBottom, setAutoCollapsePreviousGroup } from '/stream-view.js';
 import { initCompose } from '/compose.js';
 import { initFilePicker } from '/file-picker.js';
 import { initDropTarget } from '/drop-target.js';
@@ -16,6 +16,7 @@ import { initMcpPanel } from '/mcp-panel.js';
 import { initPluginPanel } from '/plugin-panel.js';
 import { initSettings, loadSettings, patchSettings } from '/settings.js';
 import { initTurnChart } from '/turn-chart.js';
+import { initDetailPane } from '/detail-pane.js';
 import { initTaskPanel } from '/task-panel.js';
 import { initQueuePanel } from '/queue-panel.js';
 import { createPromptHistoryStore, fuzzyScore } from '/prompt-history.js';
@@ -23,6 +24,7 @@ import { initHistorySearch } from '/history-search.js';
 import { PERMISSION_MODES } from '/permissions.js';
 
 const launcherEl = document.getElementById('launcher');
+const streamWrapEl = document.getElementById('streamWrap'); // #stream + #detailPane side-by-side row (index.html) - this, not #stream itself, now owns the pre-session/session display:none<->flex toggle, so an empty flex:1 row doesn't reserve space on the launcher screen before a session exists
 const streamEl = document.getElementById('stream');
 const composeEl = document.getElementById('compose');
 const sessionLabelEl = document.getElementById('sessionLabel');
@@ -46,7 +48,6 @@ const diffBtn = document.getElementById('diffBtn');
 const compactBtn = document.getElementById('compactBtn');
 const copyLastBtn = document.getElementById('copyLastBtn');
 const exportBtn = document.getElementById('exportBtn');
-const collapseAllBtn = document.getElementById('collapseAllBtn');
 const autoContinueLabel = document.getElementById('autoContinueLabel');
 const autoContinueBtn = document.getElementById('autoContinueBtn');
 const rateLimitBanner = document.getElementById('rateLimitBanner');
@@ -71,6 +72,7 @@ const agentsBtn = document.getElementById('agentsBtn');
 const agentsList = document.getElementById('agentsList');
 const turnChartToggleBtn = document.getElementById('turnChartToggleBtn');
 const taskPanelToggleBtn = document.getElementById('taskPanelToggleBtn');
+const detailPaneToggleBtn = document.getElementById('detailPaneToggleBtn');
 const copyToast = document.getElementById('copyToast');
 const activityBar = document.getElementById('activityBar');
 const statsPanel = initStatsPanel({ el: document.getElementById('statsPanel') });
@@ -89,6 +91,30 @@ const turnChartMetricSelect = document.getElementById('turnChartMetric');
 const turnChartExcludeCacheMissCheckbox = document.getElementById('turnChartExcludeCacheMissBtn');
 if (turnChartExcludeCacheMissCheckbox) turnChartExcludeCacheMissCheckbox.checked = Boolean(persistedTurnChartPrefs.turnChartExcludeCacheMisses);
 
+// Docked tool-call detail pane (Trajectory-style redesign) - always shows
+// either the most recently rendered tool call ("live") or whichever row got
+// clicked ("pinned"), see detail-pane.js's own comment for the exact
+// pin/follow semantics. Created before turnChart (below) so the chart's own
+// onSelectToolCall callback can close over it.
+const detailPane = initDetailPane({
+  panel: document.getElementById('detailPane'),
+  headerLabel: document.getElementById('detailPaneLabel'),
+  followLiveBtn: document.getElementById('detailPaneFollowLiveBtn'),
+  tabButtons: [...document.querySelectorAll('#detailPane .detail-tab')],
+  body: document.getElementById('detailPaneBody'),
+  resizeHandle: document.getElementById('detailPaneResizeHandle'),
+  initialWidth: persistedTurnChartPrefs.detailPaneWidth,
+  onWidthChange: (width) => patchSettings({ detailPaneWidth: width }),
+});
+document.getElementById('detailPaneCollapseBtn').addEventListener('click', () => settings.setDetailPaneEnabled(false));
+
+// Click is an explicit ask to inspect this call - un-collapse a dismissed pane
+// rather than only painting .selected on a display:none box.
+function selectLiveToolCall(container, id) {
+  detailPane.selectToolCall(container, id);
+  if (!settings.isDetailPaneEnabled()) settings.setDetailPaneEnabled(true);
+}
+
 const turnChart = initTurnChart({
   panel: document.getElementById('turnChartPanel'),
   svg: document.getElementById('turnChart'),
@@ -97,6 +123,10 @@ const turnChart = initTurnChart({
   excludeCacheMissCheckbox: turnChartExcludeCacheMissCheckbox,
   sliderTrack: document.getElementById('turnChartSlider'),
   sliderThumb: document.getElementById('turnChartSliderThumb'),
+  // Clicking a cost-graph bar now also pins the detail pane to that turn's
+  // (first) tool call, not just scroll-and-highlight - see turn-chart.js's
+  // selectIndex.
+  onSelectToolCall: selectLiveToolCall,
 });
 
 if (persistedTurnChartPrefs.turnChartMetric && turnChartMetricSelect.querySelector(`option[value="${persistedTurnChartPrefs.turnChartMetric}"]`)) {
@@ -525,7 +555,6 @@ const diffView = initDiffView({
   closeButton: document.getElementById('diffCloseBtn'),
 });
 diffBtn.addEventListener('click', () => sessionId && diffView.open(sessionId, sessionToken));
-collapseAllBtn.addEventListener('click', () => collapseAllExpanded(streamEl));
 
 // Agents roster: expand/collapse in place, list built once from the
 // already-fetched availableAgents (connect() above) - no round trip on
@@ -544,6 +573,9 @@ turnChartToggleBtn.addEventListener('click', () => settings.setTurnChartEnabled(
 
 // Same shape as turnChartToggleBtn above, for the task list panel.
 taskPanelToggleBtn.addEventListener('click', () => settings.setTaskPanelEnabled(!settings.isTaskPanelEnabled()));
+
+// Same shape again, for the tool-call detail pane.
+detailPaneToggleBtn.addEventListener('click', () => settings.setDetailPaneEnabled(!settings.isDetailPaneEnabled()));
 
 function renderAgentsList() {
   agentsList.innerHTML = '';
@@ -628,6 +660,7 @@ const settings = initSettings({
   turnChartCheckbox: document.getElementById('turnChartEnabledBtn'),
   taskPanelCheckbox: document.getElementById('taskPanelEnabledBtn'),
   timestampsCheckbox: document.getElementById('showTimestampsBtn'),
+  detailPaneCheckbox: document.getElementById('detailPaneEnabledBtn'),
   closeSessionButton: closeSessionBtn,
   onAutoCollapseChange: setAutoCollapsePreviousGroup,
   onTurnChartEnabledChange: (enabled) => {
@@ -637,6 +670,10 @@ const settings = initSettings({
   onTaskPanelEnabledChange: (enabled) => {
     taskPanel.setEnabled(enabled);
     taskPanelToggleBtn.classList.toggle('on', enabled);
+  },
+  onDetailPaneEnabledChange: (enabled) => {
+    detailPane.setEnabled(enabled);
+    detailPaneToggleBtn.classList.toggle('on', enabled);
   },
   // Toggles the CSS class both stream-view.js render targets read
   // (index.html) - retroactive, so flipping this instantly stamps/unstamps
@@ -756,11 +793,10 @@ function returnToLauncher() {
   tabChrome.setNeedsAttention(false);
   statsPanel.reset();
   launcherEl.style.display = 'block';
-  streamEl.style.display = 'none';
+  streamWrapEl.style.display = 'none';
   composeEl.style.display = 'none';
   activityBar.style.display = 'none'; // sits directly above compose (index.html) - hides in lockstep with it rather than floating alone on the launcher screen
   modeBtn.style.display = 'none';
-  collapseAllBtn.style.display = 'none';
   autoContinueLabel.style.display = 'none';
   rateLimitBanner.style.display = 'none';
   agentsBar.style.display = 'none';
@@ -770,6 +806,7 @@ function returnToLauncher() {
   // below, once there's a session for it to chart again.
   turnChart.setEnabled(false);
   taskPanel.setEnabled(false); // same B9-style force-hide as turnChart above - see its own comment
+  detailPane.setEnabled(false); // same B9-style force-hide - nothing to show once there's no live session
   queuePanel.reset();
   agentsList.style.display = 'none';
   agentsList.innerHTML = '';
@@ -931,10 +968,6 @@ document.addEventListener('keydown', (event) => {
   if (event.key === 'Tab' && event.shiftKey && sessionId) {
     event.preventDefault();
     cycleMode();
-  }
-  if (event.key.toLowerCase() === 'o' && event.ctrlKey && sessionId) {
-    event.preventDefault();
-    expandAllCollapsed(streamEl);
   }
   // Grok CLI's Esc-stops-the-turn (see backlog.md). Deliberately deferred to
   // any @/model/command picker's own Escape-closes-dropdown handling
@@ -1196,7 +1229,17 @@ async function loadEarlierHistory() {
   loadHistoryBtn.textContent = 'Loading...';
   try {
     const { messages } = await sessionFetch('/earlier-history');
-    prependHistory(streamEl, messages, { onRewindClick, hasFileCheckpointing, turnIndexUnreliable, rewindLabel: rewindButtonLabel() });
+    // Deliberately no onToolCallStarted/onToolResultArrived here (unlike the
+    // live renderMessage call site above) - this batch is all *history*,
+    // rendered into a detached fragment in one shot (see prependHistory's own
+    // comment). Wiring those would hijack the live "follow most recent tool
+    // call" view to whatever the oldest loaded historical call happens to be.
+    // Clicking a loaded row still works via onSelectToolCall (an explicit
+    // pin, which is exactly what a click should do here too).
+    prependHistory(streamEl, messages, {
+      onRewindClick, hasFileCheckpointing, turnIndexUnreliable, rewindLabel: rewindButtonLabel(),
+      onSelectToolCall: selectLiveToolCall,
+    });
     loadHistoryBar.style.display = 'none';
   } catch (err) {
     loadHistoryBtn.disabled = false;
@@ -1441,17 +1484,18 @@ function connect(id, token, { reconnect = false } = {}) {
     turnChart.reset();
     taskPanel.setEnabled(settings.isTaskPanelEnabled());
     taskPanel.reset();
+    detailPane.setEnabled(settings.isDetailPaneEnabled());
+    detailPane.reset(streamEl);
     queuePanel.reset(); // corrected by the first cockpit:queue push if a turn's already queued behind another, same as statsPanel above
     pluginsLoadedForSession = false; // new session - the plugin panel hasn't paid its one reload yet (B2)
     refreshCommandsAndAgents(); // fetched eagerly, not lazily like /model's picker - agentsBtn's own visibility depends on whether the list is empty
   }
 
   launcherEl.style.display = 'none';
-  streamEl.style.display = 'flex';
+  streamWrapEl.style.display = 'flex';
   composeEl.style.display = 'flex';
   activityBar.style.display = 'flex';
   modeBtn.style.display = 'inline-block';
-  collapseAllBtn.style.display = 'inline-block';
   autoContinueLabel.style.display = 'flex';
   diffBtn.style.display = 'inline-block';
   compactBtn.style.display = 'inline-block';
@@ -1504,7 +1548,13 @@ function connect(id, token, { reconnect = false } = {}) {
       // bar in turn-chart.js find the tool blocks that produced it.
       const hasUsagePoint = payload.message.type === 'assistant' && payload.message._usageInfo;
       const turnPointIndex = hasUsagePoint ? turnChart.nextPointIndex() : null;
-      renderMessage(streamEl, payload.message, { onRewindClick, hasFileCheckpointing, turnIndexUnreliable, turnPointIndex, assistantLabel: sessionProviderLabel(), rewindLabel: rewindButtonLabel(), receivedAtMs: Date.now() });
+      renderMessage(streamEl, payload.message, {
+        onRewindClick, hasFileCheckpointing, turnIndexUnreliable, turnPointIndex,
+        assistantLabel: sessionProviderLabel(), rewindLabel: rewindButtonLabel(), receivedAtMs: Date.now(),
+        onSelectToolCall: selectLiveToolCall,
+        onToolCallStarted: (container, record) => detailPane.onToolCallStarted(container, record),
+        onToolResultArrived: (container, id) => detailPane.onToolResultArrived(container, id),
+      });
       // One bar per priced assistant turn (turn-chart.js) - same
       // message._usageInfo session-registry.js already stashes for
       // stream-view.js's inline "$0.0X, N in, M out" labels, just fed to
@@ -1519,6 +1569,7 @@ function connect(id, token, { reconnect = false } = {}) {
       streamEl.innerHTML = '';
       resetStreamView(streamEl);
       turnChart.reset(); // same full-resend replay, so the chart would otherwise double up its bars
+      detailPane.reset(streamEl); // same reasoning - a pinned/live record from before the gap now points at DOM that's gone
     } else if (payload.type === 'cockpit:hello' || payload.type === 'cockpit:state') {
       applySession(payload.session);
     } else if (payload.type === 'cockpit:approval-request') {

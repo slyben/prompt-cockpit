@@ -125,7 +125,7 @@
   #statsPanel .ctx-green { color: var(--ok); }
   #statsPanel .ctx-yellow { color: #e0b34d; }
   #statsPanel .ctx-red { color: var(--error); }
-  #diffBtn, #collapseAllBtn, #compactBtn {
+  #diffBtn, #compactBtn {
     padding: 5px 10px;
     background: var(--panel);
     border: 1px solid var(--border);
@@ -574,7 +574,7 @@
      send gets prefixed with a Task-tool instruction while this is showing,
      so it needs to stay visible even with the roster collapsed. */
   #agentsBtn.armed { color: var(--bg); background: var(--accent); border-color: var(--accent); }
-  #taskPanelToggleBtn, #turnChartToggleBtn {
+  #taskPanelToggleBtn, #turnChartToggleBtn, #detailPaneToggleBtn {
     background: none;
     border: 1px solid var(--border);
     color: var(--muted);
@@ -583,12 +583,13 @@
     font-size: 12px;
     cursor: pointer;
   }
-  /* Turn-chart toggle is first in DOM (see agentsBarRow markup); task-list
-     toggle just needs a small gap after it, not its own auto margin - the
-     auto margin that pins the right-aligned group now lives on #agentsBtn. */
-  #taskPanelToggleBtn { margin-left: 6px; }
-  #taskPanelToggleBtn:hover, #turnChartToggleBtn:hover { color: var(--text); border-color: var(--accent); }
-  #taskPanelToggleBtn.on, #turnChartToggleBtn.on { color: var(--text); border-color: var(--accent); }
+  /* Turn-chart toggle is first in DOM (see agentsBarRow markup); detail-pane
+     and task-list toggles just need a small gap after their predecessor, not
+     their own auto margin - the auto margin that pins the right-aligned
+     group now lives on #agentsBtn. */
+  #detailPaneToggleBtn, #taskPanelToggleBtn { margin-left: 6px; }
+  #taskPanelToggleBtn:hover, #turnChartToggleBtn:hover, #detailPaneToggleBtn:hover { color: var(--text); border-color: var(--accent); }
+  #taskPanelToggleBtn.on, #turnChartToggleBtn.on, #detailPaneToggleBtn.on { color: var(--text); border-color: var(--accent); }
   #agentsList {
     display: none;
     list-style: none;
@@ -613,15 +614,175 @@
      send until cleared (click again, or click a different entry). */
   #agentsList .cmd-name.selected::after { content: ' ✓'; }
 
+  /* Trajectory-style layout: #stream + docked #detailPane side by side.
+     #streamWrap (not #stream) now owns the pre-session/session display
+     toggle (app.js), so an empty flex:1 row doesn't reserve space on the
+     launcher screen before a session exists - #stream itself stays a plain
+     always-flex column once its parent is visible. */
+  #streamWrap {
+    flex: 1;
+    display: none;
+    flex-direction: row;
+    min-height: 0; /* let #stream keep its own overflow-y:auto inside a flex row ancestor */
+    overflow: hidden;
+  }
   #stream {
     flex: 1;
+    min-width: 0;
     overflow-y: auto;
     padding: 12px 16px;
-    display: none;
+    display: flex;
     flex-direction: column;
     gap: 6px;
     position: relative;
   }
+  /* Shared by the live session's #detailPane and the history modal's own
+     #historyDetailPane instance (history-pane.js) - class-based so both id'd
+     boxes get the same box/tab/body styling without duplicating rules. */
+  .detail-pane {
+    display: none;
+    flex-direction: column;
+    width: 380px; /* JS-overridden inline (detail-pane.js) once dragged or a persisted width is loaded - this is just the first-ever-open default */
+    min-width: 280px;
+    flex: 0 0 auto;
+    border-left: 1px solid var(--border);
+    overflow: hidden;
+    position: relative; /* anchors #detailPaneResizeHandle to this box's left edge, not the viewport */
+  }
+  .detail-pane.enabled { display: flex; }
+  /* Drag-to-resize handle (detail-pane.js, same pattern as
+     #composeResizeHandle) - a few px wider than the visible border so it's
+     an easy grab target without a fat visible seam. Sits on the pane's own
+     left edge (the pane is right-docked, so dragging left grows it). */
+  .detail-pane-resize-handle {
+    position: absolute;
+    left: -4px;
+    top: 0;
+    bottom: 0;
+    width: 8px;
+    cursor: ew-resize;
+    z-index: 1;
+  }
+  .detail-pane-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--border);
+    font-size: 12px;
+  }
+  /* Everything below is scoped `.detail-pane <thing>` (not bare `.detail-tab`
+     etc, and not ID-scoped) for two reasons: (1) both the live #detailPane
+     and the history modal's #historyDetailPane are instances of this same
+     markup shape, so class-based rules are what makes them look identical
+     without duplicating a whole rule set per id: the header label needs its
+     own class (.detail-pane-header-label) since a <span> has no element
+     selector worth using, but the header's buttons are matched by plain
+     `button` - any button inside .detail-pane-header gets this styling
+     automatically, live or history, no per-button class needed. (2) history's
+     buttons/tabs sit inside `.modal-box`, and `.modal-box button` (0,1,1) is
+     more specific than a bare `.detail-tab`/`.detail-pane-header button`
+     (0,1,0)/(0,1,1) tied-but-later-in-source rule would lose to - without
+     the `.detail-pane` ancestor bumping specificity to (0,2,x), every tab in
+     the history modal renders as a chunky default modal button with no way
+     to tell which one is active. */
+  .detail-pane .detail-pane-header-label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: ui-monospace, monospace; }
+  .detail-pane .detail-pane-header button {
+    flex: none;
+    background: none;
+    border: 1px solid var(--border);
+    color: var(--muted);
+    border-radius: 6px;
+    padding: 2px 8px;
+    cursor: pointer;
+    font-size: 11px;
+  }
+  .detail-pane .detail-pane-header button:hover { color: var(--text); border-color: var(--accent); }
+  /* Lit up only while the pane is pinned on a row that is NOT the most
+     recent tool call - i.e. there's genuinely something newer to jump to.
+     detail-pane.js's updateLiveIndicator computes this (not just "is
+     anything pinned"), so clicking the in-flight row to inspect it doesn't
+     falsely light this up too. */
+  .detail-pane .detail-pane-header button.pinned-away { color: var(--accent); border-color: var(--accent); }
+  .detail-pane-tabs { display: flex; gap: 2px; padding: 4px 8px; border-bottom: 1px solid var(--border); }
+  .detail-pane .detail-tab {
+    background: none;
+    border: none;
+    padding: 4px 8px;
+    cursor: pointer;
+    color: var(--muted);
+    font-size: 12px;
+    border-bottom: 2px solid transparent;
+  }
+  .detail-pane .detail-tab:hover { color: var(--text); }
+  .detail-pane .detail-tab.active { color: var(--text); border-bottom-color: var(--accent); }
+  .detail-pane-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 8px 10px;
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-family: ui-monospace, monospace;
+    font-size: 12px;
+    line-height: 1.5;
+  }
+  .detail-pane-placeholder { color: var(--muted); padding: 12px 0; }
+  .detail-pane-note { color: var(--muted); opacity: 0.75; font-size: 11px; margin-top: 4px; white-space: normal; }
+  /* Trajectory-style fixed one-line tool-call row (replaces the old
+     click-to-expand collapsible block for tool calls/results - see
+     stream-view.js's appendToolCallRow/updateToolCallRow). No wrapping: only
+     .tool-row-args shrinks/ellipsizes, name/usage/duration/status stay put. */
+  .tool-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    height: 22px;
+    line-height: 22px;
+    padding: 0 8px;
+    border-radius: 4px;
+    cursor: pointer;
+    overflow: hidden;
+    white-space: nowrap;
+    font-size: 12.5px;
+  }
+  .tool-row:hover { background: var(--panel); }
+  .tool-row.selected { background: var(--accent); }
+  .tool-row.selected .tool-row-args, .tool-row.selected .tool-row-meta, .tool-row.selected .tool-row-duration { color: white; }
+  .tool-row-name { font-family: ui-monospace, monospace; font-weight: 600; flex: 0 0 auto; }
+  .tool-row-args { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--muted); font-family: ui-monospace, monospace; }
+  .tool-row-meta { flex: 0 0 auto; }
+  .tool-row-duration { flex: 0 0 auto; font-variant-numeric: tabular-nums; color: var(--muted); min-width: 3.5em; text-align: right; }
+  .tool-row-status { flex: 0 0 auto; width: 1em; text-align: center; }
+  .tool-row-pending .tool-row-status { color: var(--accent); }
+  .tool-row-error { color: var(--error); }
+  .tool-row-orphan { color: var(--muted); font-style: italic; cursor: default; }
+  .tool-row-orphan:hover { background: none; }
+  .tool-row[data-tool-kind="read"] .tool-row-name { color: #56c2d6; }
+  .tool-row[data-tool-kind="edit"] .tool-row-name { color: var(--ok); }
+  .tool-row[data-tool-kind="bash"] .tool-row-name { color: #e0b34d; }
+  .tool-row[data-tool-kind="search"] .tool-row-name { color: #b585f0; }
+  .tool-row[data-tool-kind="other"] .tool-row-name { color: var(--accent); }
+  /* Must come after the [data-tool-kind] block and .tool-row-pending above -
+     same (0,3,0)/(0,2,0) specificity as those, so source order is what
+     decides here, not the cascade alone. Without this positioned last,
+     "other"-kind tool names (Task, WebFetch, etc - colored var(--accent) via
+     [data-tool-kind="other"] above) and a still-pending row's accent-colored
+     status dot both disappear into the same-color selected-row background. */
+  .tool-row.selected .tool-row-name, .tool-row.selected .tool-row-status { color: white; }
+  /* First side-panel the app has ever had - no prior @media convention
+     exists. Stack (not hide) below 900px so the "always docked when active"
+     intent (Decision 3) survives on narrow viewports, just less roomy. */
+  @media (max-width: 900px) {
+    #streamWrap { flex-direction: column; }
+    #detailPane.enabled { width: 100%; height: 240px; border-left: none; border-top: 1px solid var(--border); }
+  }
+  /* History modal gets a wider box (default .modal-box caps at 640px) so its
+     own docked detail pane (historyDetailPane) has room without squeezing
+     the transcript unreadably thin. */
+  #historyModal .modal-box { width: min(1040px, 92vw); }
+  #historyModal .modal-body-row { display: flex; flex: 1; min-height: 0; overflow: hidden; }
+  #historyBody { flex: 1; min-width: 0; overflow-y: auto; }
+  #historyDetailPane { position: static; } /* just a layout reset - same rules as .detail-pane otherwise */
   .msg { max-width: 100%; } /* candidate for a user-configurable setting later, not now */
   .msg .role {
     font-size: 11px;
@@ -670,10 +831,11 @@
     font-size: 13.5px;
     line-height: 1.4;
   }
-  /* Collapsed-with-hint row: content on the left, .expand-hint pinned to
-     the right edge of the same line - collapsed content is always capped
-     to one line (stream-view.js's COLLAPSE_LINES), so it never has to wrap
-     around the hint. */
+  /* Content-with-hint row: content on the left, .expand-hint pinned to the
+     right edge of the same line. Currently unreachable in practice (nothing
+     calls renderBody with a truthy hint since the click-to-collapse
+     interaction was removed - see stream-view.js's renderBody comment) but
+     kept as generic styling for renderBody's exported hint parameter. */
   .msg .body.with-hint { display: flex; align-items: baseline; gap: 10px; white-space: normal; }
   /* flex: 0 1 auto (not 1 1 auto) - the hint should trail right behind the
      preview text, not get shoved out to the row's far edge by a
@@ -695,8 +857,8 @@
      right edge of the row and force the whole stream to scroll
      horizontally. */
   .msg .role .role-text { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  /* Shared by both spots a "ctrl+o to expand"/"click to collapse" hint can
-     appear (a group's role row, or a collapsed block's body row) - dim and
+  /* Shared by both spots a "click to expand"/"click to collapse" hint can
+     appear (a group's role row, or a content-with-hint body row) - dim and
      small always, regardless of the row's own hover/expanded color (an
      element's own `color` wins over an inherited one no matter which rule
      is more specific), and never wraps onto a second line.
@@ -1257,7 +1419,6 @@
     <label id="autoContinueLabel" style="display:none" title="Same as the desktop app's checkbox: when the plan usage limit rejects a turn, automatically send Continue once it resets">
       <input type="checkbox" id="autoContinueBtn" /> Auto-continue
     </label>
-    <button id="collapseAllBtn" style="display:none" title="Fold every expanded tool call/result and group back down">Collapse all</button>
     <button id="diffBtn" style="display:none">Diff</button>
     <button id="settingsBtn" style="display:none" title="Settings">⚙</button>
   </header>
@@ -1293,7 +1454,30 @@
     <button id="loadHistoryBtn">Load earlier history</button>
   </div>
 
-  <div id="stream"></div>
+  <!-- Trajectory-style layout: #stream (flat one-line tool-call rows) beside
+       a permanently-docked detail pane (#detailPane) for whichever row is
+       selected - the app's first side-by-side layout, see the @media
+       fallback below #detailPane's rules for the narrow-viewport case.
+       Toggled via #detailPaneToggleBtn (agentsBar row) + settings.js's
+       detailPaneEnabled, same pattern as #turnChartPanel. -->
+  <div id="streamWrap">
+    <div id="stream"></div>
+    <div id="detailPane" class="detail-pane">
+      <div id="detailPaneResizeHandle" class="detail-pane-resize-handle" title="Drag to resize"></div>
+      <div class="detail-pane-header">
+        <span id="detailPaneLabel" class="detail-pane-header-label">No tool call selected yet</span>
+        <button id="detailPaneFollowLiveBtn" title="Jump to the most recent tool call">● live</button>
+        <button id="detailPaneCollapseBtn" title="Collapse detail pane">✕</button>
+      </div>
+      <div class="detail-pane-tabs">
+        <button type="button" class="detail-tab active" data-tab="summary">Summary</button>
+        <button type="button" class="detail-tab" data-tab="payload">Payload</button>
+        <button type="button" class="detail-tab" data-tab="result">Result</button>
+        <button type="button" class="detail-tab" data-tab="timing">Timing</button>
+      </div>
+      <div id="detailPaneBody" class="detail-pane-body"></div>
+    </div>
+  </div>
   <div id="copyToast">Copied</div>
   <!-- Sits directly above the compose box, not under the header - a
        decision needing your eyes belongs where your eyes already are
@@ -1361,6 +1545,10 @@
            also mirrored as a checkbox in the settings modal (see
            #turnChartEnabledBtn below). -->
       <button id="turnChartToggleBtn" title="Toggle per-turn cost graph">📊 Cost graph</button>
+      <!-- Docked tool-call detail pane toggle (detail-pane.js) - default ON
+           (unlike the other two, per Decision 3), also mirrored as a
+           checkbox in the settings modal (#detailPaneEnabledBtn below). -->
+      <button id="detailPaneToggleBtn" title="Toggle the tool-call detail pane">🔍 Detail pane</button>
       <!-- Task list toggle (task-panel.js) - sits between the cost graph
            toggle and the Agents button; also mirrored as a checkbox in the
            settings modal (see #taskPanelEnabledBtn below).
@@ -1428,7 +1616,7 @@
          but a future note/input field there would lose focus/value on the
          next tick). Runs the CLI's own /compact as a plain slash-command
          message, same path as typing it - there is no separate SDK method
-         for it. Hidden until a session exists, same as diffBtn/collapseAllBtn. -->
+         for it. Hidden until a session exists, same as diffBtn. -->
     <button id="compactBtn" style="display:none" title="Run /compact now to free up context">Compact</button>
     <button id="copyLastBtn" style="display:none" title="Copy Claude's most recent reply">Copy reply</button>
     <button id="exportBtn" style="display:none" title="Download the whole transcript as markdown">Export .md</button>
@@ -1488,7 +1676,28 @@
   <div id="historyModal" class="modal">
     <div class="modal-box">
       <header class="modal-body"><strong id="historyTitle"></strong></header>
-      <div class="modal-body" id="historyBody" style="display:flex;flex-direction:column;gap:6px;"></div>
+      <div class="modal-body modal-body-row">
+        <div id="historyBody" style="display:flex;flex-direction:column;gap:6px;"></div>
+        <!-- Same Trajectory-row + detail-pane UX as the live #stream/#detailPane
+             pair (history-pane.js reuses stream-view.js's renderMessage
+             verbatim, so rows render fixed-height "for free"; this gives
+             clicking one somewhere to land). Independent initDetailPane()
+             instance, own WeakMap-isolated tool-call records - see
+             tool-call-store.js, keyed per container. -->
+        <div id="historyDetailPane" class="detail-pane enabled">
+          <div class="detail-pane-header">
+            <span id="historyDetailPaneLabel" class="detail-pane-header-label">No tool call selected yet</span>
+            <button id="historyDetailPaneFollowLiveBtn" type="button" title="Jump to the most recent tool call">● live</button>
+          </div>
+          <div class="detail-pane-tabs">
+            <button type="button" class="detail-tab active" data-tab="summary">Summary</button>
+            <button type="button" class="detail-tab" data-tab="payload">Payload</button>
+            <button type="button" class="detail-tab" data-tab="result">Result</button>
+            <button type="button" class="detail-tab" data-tab="timing">Timing</button>
+          </div>
+          <div id="historyDetailPaneBody" class="detail-pane-body"></div>
+        </div>
+      </div>
       <footer>
         <a id="historyExportBtn" download title="Download this transcript as markdown">Export .md</a>
         <button id="historyCloseBtn">Close</button>
@@ -1535,6 +1744,10 @@
                  project" on an approval prompt (#alwaysAllowScope above). -->
             <ul id="permissionRulesList" class="settings-list"></ul>
           </div>
+          <label class="settings-row">
+            <input type="checkbox" id="detailPaneEnabledBtn" />
+            <span>Show the tool-call detail pane docked beside the transcript</span>
+          </label>
           <label class="settings-row">
             <input type="checkbox" id="turnChartEnabledBtn" />
             <span>Show the per-turn cost graph above the compose box</span>

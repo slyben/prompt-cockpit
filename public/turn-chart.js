@@ -42,7 +42,7 @@ const METRIC_CONF = {
   cache: { label: 'Tokens Cached', get: (p) => p.cacheReadTokens + p.cacheWriteTokens, color: '#8b929c' },
 };
 
-export function initTurnChart({ panel, svg, metricSelect, scrollContainer, excludeCacheMissCheckbox, sliderTrack, sliderThumb }) {
+export function initTurnChart({ panel, svg, metricSelect, scrollContainer, excludeCacheMissCheckbox, sliderTrack, sliderThumb, onSelectToolCall }) {
   const points = []; // one per assistant message that carried a priced usage figure
   let enabled = false;
   let dragging = false;
@@ -251,19 +251,23 @@ export function initTurnChart({ panel, svg, metricSelect, scrollContainer, exclu
     // first so two blocks sharing one group (a multi-tool-call turn) only
     // click that group's toggle once, not once per block.
     const groupsToExpand = new Set();
+    let firstToolCallId = null;
     nodes.forEach((wrap) => {
       const group = wrap.closest('.msg.group.collapsible');
       if (group && !group.classList.contains('expanded')) groupsToExpand.add(group);
-      if (wrap.dataset.collapsible === 'true' && !wrap.classList.contains('expanded')) {
-        wrap.click(); // stream-view.js's own toggle handler - see appendCollapsibleBlock
-        expandedBySelection.push(wrap);
-      }
+      // A turn can tag several tool-call rows with the same index (one
+      // assistant message emitting multiple tool_use blocks all shares one
+      // turnPointIndex - see app.js's nextPointIndex() call site) - pin the
+      // detail pane to the first one, same "first match wins" rule firstNode
+      // already uses below for scrolling.
+      if (!firstToolCallId && wrap.dataset.toolCallId) firstToolCallId = wrap.dataset.toolCallId;
       if (!firstNode) firstNode = wrap;
     });
     groupsToExpand.forEach((group) => {
       group.click(); // same toggle-handler trick, this time stream-view.js's setGroupExpanded
       expandedBySelection.push(group);
     });
+    if (firstToolCallId) onSelectToolCall?.(scrollContainer, firstToolCallId);
     // An explicit click means "take me there" - unlike the old hover nudge,
     // scroll it fully into view (centered) rather than just nudging.
     firstNode.scrollIntoView({ block: 'center' });

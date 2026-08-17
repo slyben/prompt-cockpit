@@ -28,6 +28,15 @@ const DEFAULTS = {
   turnChartExcludeCacheMisses: false,
   taskPanelEnabled: false,
   showMessageTimestamps: false,
+  // Default ON, unlike the other two panels above - Decision 3 (tool-call
+  // presentation redesign) calls for the detail pane docked by default when
+  // a session is active, not closed-by-default/slide-in.
+  detailPaneEnabled: true,
+  // Drag-resized (detail-pane.js's resizeHandle) - persisted the same way
+  // turnChartMetric is, via the standalone patchSettings() below rather than
+  // the settings-modal machinery, since there's no checkbox/select for this,
+  // just a drag handle.
+  detailPaneWidth: 380,
 };
 
 function makeFolderId() {
@@ -95,11 +104,13 @@ export function initSettings({
   turnChartCheckbox,
   taskPanelCheckbox,
   timestampsCheckbox,
+  detailPaneCheckbox,
   closeSessionButton,
   onAutoCollapseChange,
   onTurnChartEnabledChange,
   onTaskPanelEnabledChange,
   onTimestampsChange,
+  onDetailPaneEnabledChange,
   onCloseSession,
   onOpen,
 }) {
@@ -123,10 +134,12 @@ export function initSettings({
   turnChartCheckbox.checked = settings.turnChartEnabled;
   taskPanelCheckbox.checked = settings.taskPanelEnabled;
   timestampsCheckbox.checked = settings.showMessageTimestamps;
+  detailPaneCheckbox.checked = settings.detailPaneEnabled;
   onAutoCollapseChange(settings.autoCollapsePreviousGroup);
   onTurnChartEnabledChange(settings.turnChartEnabled);
   onTaskPanelEnabledChange(settings.taskPanelEnabled);
   onTimestampsChange(settings.showMessageTimestamps);
+  onDetailPaneEnabledChange(settings.detailPaneEnabled);
   renderCustomFolders();
 
   // "searchable in @" implies this already works out of the box, so a user
@@ -221,6 +234,7 @@ export function initSettings({
 
   turnChartCheckbox.addEventListener('change', () => setTurnChartEnabled(turnChartCheckbox.checked));
   taskPanelCheckbox.addEventListener('change', () => setTaskPanelEnabled(taskPanelCheckbox.checked));
+  detailPaneCheckbox.addEventListener('change', () => setDetailPaneEnabled(detailPaneCheckbox.checked));
   timestampsCheckbox.addEventListener('change', () => {
     persist({ showMessageTimestamps: timestampsCheckbox.checked });
     onTimestampsChange(timestampsCheckbox.checked);
@@ -252,11 +266,21 @@ export function initSettings({
     onTaskPanelEnabledChange(value);
   }
 
+  // Same shape again, for the tool-call detail pane's toggle button +
+  // settings-modal checkbox pair (default true, unlike the two above).
+  function setDetailPaneEnabled(value) {
+    detailPaneCheckbox.checked = value;
+    persist({ detailPaneEnabled: value });
+    onDetailPaneEnabledChange(value);
+  }
+
   return {
     getCustomFolders: () => settings.customFolders,
     isTurnChartEnabled: () => settings.turnChartEnabled,
     setTurnChartEnabled,
     isTaskPanelEnabled: () => settings.taskPanelEnabled,
     setTaskPanelEnabled,
+    isDetailPaneEnabled: () => settings.detailPaneEnabled,
+    setDetailPaneEnabled,
   };
 }
