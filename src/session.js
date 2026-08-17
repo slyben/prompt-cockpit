@@ -6,21 +6,34 @@ import { AUTO_ALLOW_MODES } from './permissions.js';
 
 // A minimal AsyncIterable<SDKUserMessage> that supports pushing values in
 // from the outside. query() pulls from this for as long as the session lives.
+// Also the backing store for the visible input queue (backlog.md): `pending`
+// only ever holds entries pushed while nothing was already waiting on
+// next() - i.e. exactly the messages queued up behind a still-running turn,
+// which is also exactly what a "queue pane" should show. A push that lands
+// while the consumer IS already waiting (idle session) is handed straight
+// to it and never touches `pending` at all - correctly invisible, since
+// there's nothing queued in that case, just a turn about to start.
 function createInputQueue() {
-  const pending = [];
+  const pending = []; // { id, message, text } - id/text null for untracked pushes (the startup sentinel)
   let waiting = null;
   let closed = false;
 
   return {
-    push(userMessage) {
-      if (closed) return;
+    // `meta` ({id, text}) is how pushInput() makes an entry visible/
+    // addressable in the queue; the startup sentinel omits it and is always
+    // handed straight to the waiting consumer at session start anyway (see
+    // session.js's inputQueue.push() call below), so it never appears
+    // tracked or untracked in `pending` in practice.
+    push(userMessage, meta) {
+      if (closed) return { queued: false };
       if (waiting) {
         const resolve = waiting;
         waiting = null;
         resolve({ value: userMessage, done: false });
-      } else {
-        pending.push(userMessage);
+        return { queued: false };
       }
+      pending.push({ id: meta?.id ?? null, message: userMessage, text: meta?.text ?? null });
+      return { queued: true };
     },
     close() {
       if (closed) return;
@@ -31,11 +44,54 @@ function createInputQueue() {
         resolve({ value: undefined, done: true });
       }
     },
+    // Tracked entries only (id !== null) - what the client's queue panel
+    // renders. Order is the order they'll actually run in.
+    list() {
+      return pending.filter((e) => e.id).map((e) => ({ id: e.id, text: e.text }));
+    },
+    remove(id) {
+      const i = pending.findIndex((e) => e.id === id);
+      if (i === -1) return false;
+      pending.splice(i, 1);
+      return true;
+    },
+    // "Send now" (backlog.md) - moves one queued entry to the front so it's
+    // what the SDK pulls next. Doesn't interrupt anything itself; the caller
+    // (session.js's sendNow) still has to abort whatever's currently running
+    // or this just becomes "runs next after the current turn" instead.
+    moveToFront(id) {
+      const i = pending.findIndex((e) => e.id === id);
+      if (i === -1) return false;
+      if (i === 0) return true;
+      const [entry] = pending.splice(i, 1);
+      pending.unshift(entry);
+      return true;
+    },
+    // `ids` is the desired order for the tracked entries it names; any
+    // tracked entry it omits, or any untracked entry, keeps its original
+    // relative position and is appended after the ones that were reordered.
+    reorder(ids) {
+      const byId = new Map(pending.filter((e) => e.id).map((e) => [e.id, e]));
+      const used = new Set();
+      const ordered = [];
+      for (const id of ids) {
+        const e = byId.get(id);
+        if (e && !used.has(id)) {
+          ordered.push(e);
+          used.add(id);
+        }
+      }
+      for (const e of pending) {
+        if (!e.id || !used.has(e.id)) ordered.push(e);
+      }
+      pending.length = 0;
+      pending.push(...ordered);
+    },
     [Symbol.asyncIterator]() {
       return {
         next() {
           if (pending.length > 0) {
-            return Promise.resolve({ value: pending.shift(), done: false });
+            return Promise.resolve({ value: pending.shift().message, done: false });
           }
           if (closed) {
             return Promise.resolve({ value: undefined, done: true });
@@ -51,16 +107,27 @@ function createInputQueue() {
 
 /**
  * Start a session. Returns a handle with `pushInput(text)`, `close()`,
- * `setMode(mode)`, and `resolveApproval(requestId, decision)`. `onMessage`
+ * `interrupt()`, `setMode(mode)`, `resolveApproval(requestId, decision)`,
+ * and the queue-pane operations `listQueue()`/`removeQueued(queueId)`/
+ * `reorderQueue(queueIds)`/`sendNow(queueId)` (backlog.md). `onMessage`
  * fires for every SDK message, `onStateChange` for coarse
  * idle/running/closed/error transitions, `onApprovalRequest` when any tool
  * needs a one-off client-side decision (default/plan mode, any tool the
- * CLI doesn't resolve itself - not just ExitPlanMode).
+ * CLI doesn't resolve itself - not just ExitPlanMode), `onQueueChange` with
+ * the current queue snapshot whenever it changes.
  */
-export function startSession({ cwd, resume, model, permissionMode, turnIndexOffset = 0, onMessage, onStateChange, onError, onApprovalRequest, queryImpl = query }) {
+export function startSession({ cwd, resume, model, permissionMode, turnIndexOffset = 0, onMessage, onStateChange, onError, onApprovalRequest, onQueueChange, queryImpl = query }) {
   const inputQueue = createInputQueue();
   let currentMode = permissionMode || 'default';
-  const pendingApprovals = new Map(); // requestId -> resolve(PermissionResult)
+  const pendingApprovals = new Map(); // requestId -> { resolve(PermissionResult), toolName }
+  // Permission "always allow this pattern" (backlog.md), scoped to the
+  // smallest durable version: per-tool-name, in-memory, for the rest of
+  // THIS session only - no persistence to settings.local.json's real
+  // `permissions` block and no input/cwd pattern matching, both flagged in
+  // the backlog as needing their own design call this doesn't attempt.
+  // Checked in canUseTool right alongside AUTO_ALLOW_MODES below; populated
+  // only by resolveApproval() when a decision's `alwaysAllow` flag is set.
+  const alwaysAllowTools = new Set();
   // Real pushInput() calls only - the priming sentinel below bypasses this.
   // Seeded with `turnIndexOffset` (the registry counts real user turns
   // already in the resumed transcript - session-history.js's
@@ -117,12 +184,12 @@ export function startSession({ cwd, resume, model, permissionMode, turnIndexOffs
         // anything for the human to answer, so calls either parked forever
         // (no click ever came) or resolved to an empty answer (a click on
         // the old generic allow/deny banner, which set no updatedInput).
-        if (toolName !== 'AskUserQuestion' && AUTO_ALLOW_MODES.has(currentMode)) {
+        if (toolName !== 'AskUserQuestion' && (AUTO_ALLOW_MODES.has(currentMode) || alwaysAllowTools.has(toolName))) {
           return { behavior: 'allow', updatedInput: input };
         }
         return new Promise((resolve) => {
           const requestId = randomUUID();
-          pendingApprovals.set(requestId, resolve);
+          pendingApprovals.set(requestId, { resolve, toolName });
           onApprovalRequest?.({ requestId, toolName, input, title: opts.title, displayName: opts.displayName });
         });
       },
@@ -150,7 +217,21 @@ export function startSession({ cwd, resume, model, permissionMode, turnIndexOffs
   (async () => {
     try {
       for await (const message of handle) {
-        if (message.type === 'result' && message.num_turns === 0) {
+        // Bug (found via the interrupt feature): originally just
+        // `num_turns === 0`, on the assumption only the priming sentinel
+        // above could ever report zero turns. A real turn interrupted early
+        // enough - before the model produced anything - can *also* come
+        // back with num_turns:0, and this `continue` skips the pendingTurns
+        // decrement AND onMessage() below for it just the same as it does
+        // for the sentinel, so pendingTurns never returns to 0 and
+        // onStateChange('idle') never fires - the state spinner then runs
+        // forever even though nothing is actually in flight. The sentinel
+        // is pushed before any pushInput() call, so its result is the only
+        // one that can ever arrive while pendingTurns is still 0 - a real
+        // turn's pendingTurns was already incremented at push time and
+        // isn't decremented until its own result is processed, so checking
+        // both conditions together only ever matches the true sentinel.
+        if (message.type === 'result' && message.num_turns === 0 && pendingTurns === 0) {
           continue; // priming-sentinel artifact, not a real turn
         }
         if (message.type === 'system' && message.subtype === 'init') {
@@ -203,22 +284,83 @@ export function startSession({ cwd, resume, model, permissionMode, turnIndexOffs
       message: { role: 'user', content: text },
       parent_tool_use_id: null,
     };
-    inputQueue.push(wireMessage);
+    // Tracked so a turn queued up behind a still-running one is addressable
+    // from the queue pane (backlog.md) - listQueue/removeQueued/reorderQueue/
+    // sendNow below all key off this id, not the wire message (which has no
+    // stable id of its own - see the comment on user_message_uuid above).
+    const queueId = randomUUID();
+    const { queued } = inputQueue.push(wireMessage, { id: queueId, text });
 
     // The CLI never echoes the prompt back on the output stream (confirmed
     // live) - so without a local echo, the transcript pane never shows
     // what was sent. `turnIndex` (1-based, counting only real pushInput
     // calls) is local bookkeeping only, safe to attach here since it never
-    // touches the wire message above.
+    // touches the wire message above. Echoed unconditionally, queued or not
+    // - removeQueued() below only ever un-queues it, it doesn't retract this
+    // echo (the transcript keeps showing what you typed, same as any chat
+    // app would once it's rendered locally).
     turnCounter += 1;
     pendingTurns += 1;
-    onMessage({ ...wireMessage, turnIndex: turnCounter });
+    onMessage({ ...wireMessage, turnIndex: turnCounter, queueId });
     onStateChange('running');
+    if (queued) onQueueChange?.(inputQueue.list());
+  }
+
+  // Queue pane operations (backlog.md) - all no-ops (false/[]) once the
+  // queueId in question has already been dequeued and started running,
+  // which is the normal race a slow double-click loses to; nothing more to
+  // do about it, the turn is just already underway.
+  function listQueue() {
+    return inputQueue.list();
+  }
+
+  function removeQueued(queueId) {
+    const removed = inputQueue.remove(queueId);
+    if (removed) {
+      // This turn will never produce a `result` now - same bookkeeping the
+      // normal result-handling path in the for-await loop above does, just
+      // triggered here instead since there's no SDK message coming for it.
+      pendingTurns = Math.max(0, pendingTurns - 1);
+      onStateChange(pendingTurns > 0 ? 'running' : 'idle');
+      onQueueChange?.(inputQueue.list());
+    }
+    return removed;
+  }
+
+  function reorderQueue(queueIds) {
+    inputQueue.reorder(queueIds);
+    onQueueChange?.(inputQueue.list());
+  }
+
+  // Moves `queueId` to the front, then interrupts whatever's currently
+  // running so the SDK's next pull grabs it - matches Grok CLI's
+  // Ctrl+Enter/empty-Enter "send now" (backlog.md). If nothing is actually
+  // running (queue can only be non-empty while something is - see
+  // createInputQueue's module comment), the interrupt is a documented no-op
+  // and this just reorders, safe either way.
+  async function sendNow(queueId) {
+    const moved = inputQueue.moveToFront(queueId);
+    if (!moved) return false;
+    onQueueChange?.(inputQueue.list());
+    await handle.interrupt();
+    return true;
   }
 
   function close() {
     inputQueue.close();
     handle.interrupt?.().catch(() => {});
+  }
+
+  // Cancel the turn(s) currently in flight without tearing down the session
+  // - the queue stays open and future pushInput() calls keep working, unlike
+  // close(). handle.interrupt() resolves once the abort is issued; the SDK
+  // then emits the interrupted turn's own `result` message through the
+  // normal for-await loop above, which is what actually flips pendingTurns
+  // back down and fires onStateChange('idle') - nothing extra to do here.
+  // Safe to call while idle (no-op turn to interrupt); the SDK just answers
+  // with an empty receipt.
+  async function interrupt() {
+    return handle.interrupt();
   }
 
   async function setMode(mode) {
@@ -227,16 +369,36 @@ export function startSession({ cwd, resume, model, permissionMode, turnIndexOffs
   }
 
   // Called by the registry once a client responds to an onApprovalRequest.
-  // `decision` is a PermissionResult: {behavior:'allow', updatedInput?} or
-  // {behavior:'deny', message?}. Returns false if the request already
-  // resolved or never existed (stale UI, double-click).
+  // `decision` is a PermissionResult plus an optional cockpit-only
+  // `alwaysAllow` flag (server.js's /approval-decision route): {behavior:
+  // 'allow', updatedInput?, alwaysAllow?} or {behavior:'deny', message?}.
+  // Returns false if the request already resolved or never existed (stale
+  // UI, double-click).
   function resolveApproval(requestId, decision) {
-    const resolve = pendingApprovals.get(requestId);
-    if (!resolve) return false;
+    const entry = pendingApprovals.get(requestId);
+    if (!entry) return false;
     pendingApprovals.delete(requestId);
-    resolve(decision);
+    if (decision?.alwaysAllow && decision.behavior === 'allow') {
+      alwaysAllowTools.add(entry.toolName);
+    }
+    // Stripped before it reaches the SDK - alwaysAllow is cockpit-only
+    // bookkeeping, not part of the real PermissionResult shape.
+    const { alwaysAllow, ...sdkDecision } = decision || {};
+    entry.resolve(sdkDecision);
     return true;
   }
 
-  return { query: handle, pushInput, close, setMode, resolveApproval, getMode: () => currentMode };
+  return {
+    query: handle,
+    pushInput,
+    close,
+    interrupt,
+    setMode,
+    resolveApproval,
+    getMode: () => currentMode,
+    listQueue,
+    removeQueued,
+    reorderQueue,
+    sendNow,
+  };
 }

@@ -18,7 +18,7 @@ function fakeQueryHandle() {
   let waiting = null;
   let closed = false;
   const handle = {
-    interrupt: async () => {},
+    interrupt: async () => { handle.interruptCalls = (handle.interruptCalls || 0) + 1; },
     setPermissionMode: async () => {},
     push(message) {
       if (closed) return;
@@ -100,6 +100,49 @@ test('a conversation_reset message (/clear) resets turnIndex back to 1, not the 
   assert.deepEqual(turnIndexes(), [4, 1, 2]);
 });
 
+// The fake handle's queryImpl never actually consumes `opts.prompt`
+// (session.js's inputQueue) the way the real SDK does - so nothing here
+// ever counts as "already waiting", and every pushInput() lands in
+// `pending` and is listQueue()-visible, same as a real turn queued up
+// behind a still-running one would be. Good enough to test the queue
+// mutations in isolation without wiring a second fake consumer loop.
+test('listQueue/removeQueued/reorderQueue/sendNow manage the visible input queue', async () => {
+  const { handle, session, messages, states } = startFakeSession();
+  handle.push({ type: 'system', subtype: 'init', permissionMode: 'default', session_id: 's1' });
+  await flush();
+
+  session.pushInput('first');
+  session.pushInput('second');
+  session.pushInput('third');
+  const [id1, id2, id3] = messages.filter((m) => 'queueId' in m).map((m) => m.queueId);
+  assert.equal(session.listQueue().length, 3);
+  assert.deepEqual(session.listQueue().map((e) => e.text), ['first', 'second', 'third']);
+
+  // Drop the middle one - the other two keep their order, and this frees up
+  // one pendingTurns slot even though no `result` will ever arrive for it.
+  assert.equal(session.removeQueued(id2), true);
+  assert.deepEqual(session.listQueue().map((e) => e.id), [id1, id3]);
+  assert.equal(session.removeQueued('not-a-real-id'), false);
+
+  // Reorder puts id3 ahead of id1.
+  session.reorderQueue([id3, id1]);
+  assert.deepEqual(session.listQueue().map((e) => e.id), [id3, id1]);
+
+  // sendNow moves the target to the front (already there) and interrupts
+  // whatever's running so the SDK's next pull grabs it.
+  assert.equal(await session.sendNow(id1), true);
+  assert.deepEqual(session.listQueue().map((e) => e.id), [id1, id3]);
+  assert.equal(handle.interruptCalls, 1);
+
+  assert.equal(await session.sendNow('not-a-real-id'), false);
+
+  // Draining the queue via removeQueued eventually settles state back to
+  // idle, same as every turn actually finishing would.
+  session.removeQueued(id1);
+  session.removeQueued(id3);
+  assert.equal(states[states.length - 1], 'idle');
+});
+
 // Regression test for the "AskUserQuestion doesn't work at all" root cause:
 // AUTO_ALLOW_MODES (acceptEdits, bypassPermissions, etc.) used to short-
 // circuit every gated tool call, including this one, straight back to the
@@ -107,6 +150,89 @@ test('a conversation_reset message (/clear) resets turnIndex back to 1, not the 
 // empty `answers`, i.e. "the user did not answer the questions", with no
 // human ever seeing the question. It must always reach onApprovalRequest
 // instead, regardless of mode, same as it would in `default`/`plan`.
+test('interrupt() calls the SDK handle without closing the input queue - pushInput still works after', async () => {
+  const { handle, session, messages } = startFakeSession();
+  handle.push({ type: 'system', subtype: 'init', permissionMode: 'default', session_id: 's1' });
+  await flush();
+
+  await session.interrupt();
+  assert.equal(handle.interruptCalls, 1);
+
+  // close() is the one that calls inputQueue.close() - interrupt() must not,
+  // or a pushInput() right after cancelling a turn would silently no-op
+  // instead of starting the next one (see session.js's pushInput() comment
+  // on what a closed queue does to a post-close call).
+  session.pushInput('still works');
+  assert.ok(messages.some((m) => m.turnIndex === 1 && m.message?.content === 'still works'));
+});
+
+// Regression test: a turn interrupted early enough (before the model
+// produced anything) can come back with num_turns:0, same as the priming
+// sentinel session.js pushes at startup - the sentinel's own `continue`
+// used to match on num_turns alone, swallowing the interrupted turn's
+// result too (skipping both the pendingTurns decrement and onMessage),
+// which left state stuck on 'running' forever - the spinner-never-stops
+// bug found while testing the Stop button. The two are only
+// distinguishable by pendingTurns: the sentinel's result is the only one
+// that can ever arrive while pendingTurns is still 0.
+test('a real turn interrupted before producing anything (num_turns:0) still settles state back to idle', async () => {
+  const { handle, session, messages, states } = startFakeSession();
+  handle.push({ type: 'system', subtype: 'init', permissionMode: 'default', session_id: 's1' });
+  await flush();
+
+  session.pushInput('stop before you start');
+  assert.equal(states[states.length - 1], 'running');
+
+  handle.push({ type: 'result', subtype: 'error_during_execution', num_turns: 0, is_error: true });
+  await flush();
+
+  assert.equal(states[states.length - 1], 'idle');
+  assert.ok(messages.some((m) => m.type === 'result' && m.num_turns === 0));
+});
+
+test('resolveApproval with alwaysAllow:true auto-allows the same tool for the rest of the session', async () => {
+  const approvalRequests = [];
+  const { session, getOptions } = startFakeSession({
+    onApprovalRequest: (req) => approvalRequests.push(req),
+  });
+
+  const first = getOptions().canUseTool('Bash', { command: 'ls' }, {});
+  assert.equal(approvalRequests.length, 1);
+  const requestId = approvalRequests[0].requestId;
+
+  assert.equal(session.resolveApproval(requestId, { behavior: 'allow', updatedInput: { command: 'ls' }, alwaysAllow: true }), true);
+  const firstResult = await first;
+  // alwaysAllow must never reach the SDK as part of the real PermissionResult.
+  assert.deepEqual(firstResult, { behavior: 'allow', updatedInput: { command: 'ls' } });
+
+  // A second call for the SAME tool now resolves immediately - no second
+  // onApprovalRequest - same as AUTO_ALLOW_MODES already does per-mode.
+  const second = await getOptions().canUseTool('Bash', { command: 'pwd' }, {});
+  assert.equal(approvalRequests.length, 1);
+  assert.deepEqual(second, { behavior: 'allow', updatedInput: { command: 'pwd' } });
+
+  // A DIFFERENT tool is unaffected - alwaysAllowTools is keyed per tool
+  // name, not a blanket switch.
+  const third = getOptions().canUseTool('Write', { path: 'x' }, {});
+  assert.equal(approvalRequests.length, 2);
+  session.resolveApproval(approvalRequests[1].requestId, { behavior: 'deny', message: 'no' });
+  assert.deepEqual(await third, { behavior: 'deny', message: 'no' });
+});
+
+test('resolveApproval without alwaysAllow does not remember the decision past this one call', async () => {
+  const approvalRequests = [];
+  const { getOptions, session } = startFakeSession({
+    onApprovalRequest: (req) => approvalRequests.push(req),
+  });
+
+  const first = getOptions().canUseTool('Bash', { command: 'ls' }, {});
+  session.resolveApproval(approvalRequests[0].requestId, { behavior: 'allow', updatedInput: { command: 'ls' } });
+  await first;
+
+  getOptions().canUseTool('Bash', { command: 'pwd' }, {});
+  assert.equal(approvalRequests.length, 2); // still asked again - no alwaysAllow, nothing remembered
+});
+
 test('AskUserQuestion always reaches onApprovalRequest, even in an auto-allow mode', () => {
   const approvalRequests = [];
   const { getOptions } = startFakeSession({

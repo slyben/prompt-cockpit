@@ -9,28 +9,40 @@
 // Matches index.html's CSS (min-height: 60px, ~2 lines at 14px/1.4 +
 // padding) - kept as one number here rather than read back from computed
 // style, since the two only ever need to agree, not derive from each other.
+// This is the absolute floor only - autosize() below also floors against
+// composeSendGroup's actual rendered height, which is usually taller (the
+// modeBtn+sendBtn stack), so the two stay top-aligned (index.html's
+// `#compose { align-items: stretch }`) even once typing starts driving an
+// explicit inline height.
 const MIN_HEIGHT_PX = 60;
 
-export function initCompose({ textarea, sendButton, onSend, resizeHandle, streamEl, isScrolledToBottom, isPickerOpen }) {
+export function initCompose({ textarea, sendButton, onSend, resizeHandle, streamEl, isScrolledToBottom, isPickerOpen, promptHistory, sendGroupEl }) {
   // The box auto-grows with typed content (autosize below) and is also
   // manually draggable via resizeHandle - `manualHeight` is the floor
   // autosize won't shrink below once the user has dragged it, so typing
   // afterward doesn't silently undo their resize.
   let manualHeight = null;
 
-  // Up/Down history recall (shell/REPL convention) - in-memory only, reset
-  // on page reload. `historyIndex === -1` means "not currently browsing";
-  // `draftText` is whatever was in the box when Up was first pressed, so
-  // Down all the way back restores it instead of leaving the box empty.
-  const history = [];
+  // Up/Down history recall (shell/REPL convention). The persisted list
+  // itself lives in prompt-history.js (backlog.md - survives reload, keyed
+  // per cwd, shared with history-search.js's Ctrl+R fuzzy search); this
+  // module only owns the browsing cursor into it. `historyIndex === -1`
+  // means "not currently browsing"; `draftText` is whatever was in the box
+  // when Up was first pressed, so Down all the way back restores it instead
+  // of leaving the box empty. `promptHistory` is optional (tests/other
+  // embedders may not wire it up) - Up/Down recall just no-ops without it.
   let historyIndex = -1;
   let draftText = '';
+
+  function historyList() {
+    return promptHistory ? promptHistory.list() : [];
+  }
 
   function send() {
     const text = textarea.value;
     if (text.trim().length === 0) return;
     onSend(text);
-    if (history[history.length - 1] !== text) history.push(text); // skip immediate repeats
+    promptHistory?.record(text);
     historyIndex = -1;
     draftText = '';
     textarea.value = '';
@@ -57,6 +69,7 @@ export function initCompose({ textarea, sendButton, onSend, resizeHandle, stream
   // history recall just always considers itself clear to act.
   function onHistoryKey(event) {
     if (isPickerOpen && isPickerOpen()) return;
+    const history = historyList();
     if (history.length === 0) return;
     const atStart = textarea.selectionStart === 0 && textarea.selectionEnd === 0;
     if (event.key === 'ArrowUp') {
@@ -149,7 +162,14 @@ export function initCompose({ textarea, sendButton, onSend, resizeHandle, stream
     const maxPx = window.innerHeight * 0.5; // mirrors index.html's `max-height: 50vh`
     textarea.style.height = 'auto'; // collapse first so scrollHeight reflects content, not the previous height
     const contentPx = textarea.scrollHeight;
-    const target = Math.min(Math.max(contentPx, MIN_HEIGHT_PX, manualHeight || 0), maxPx);
+    // Read fresh each call rather than cached once - composeSendGroup's
+    // real height changes with it (modeBtn hidden until a session connects,
+    // different heights per browser/OS <select> rendering, page zoom) and
+    // this has to track whatever it actually is right now, not a guessed
+    // constant, or CSS's stretch-driven alignment at rest would just get
+    // undone the moment the user types their first character.
+    const sendGroupPx = sendGroupEl ? sendGroupEl.getBoundingClientRect().height : 0;
+    const target = Math.min(Math.max(contentPx, MIN_HEIGHT_PX, sendGroupPx, manualHeight || 0), maxPx);
     textarea.style.height = `${target}px`;
   }
 

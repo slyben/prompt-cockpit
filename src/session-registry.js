@@ -114,6 +114,14 @@ export function createSession({ cwd, resume, name, model, permissionMode, histor
     // a call that never gets one (error mid-flight, session closes) just
     // lingers harmlessly for the row's lifetime.
     pendingTaskOps: new Map(),
+    // Visible input queue (backlog.md) - full snapshot from session.js's
+    // onQueueChange, same shape session.js's listQueue() returns:
+    // [{id, text}], ordered. Empty on grok sessions (stubbed - see
+    // grok-session.js). Not persisted/resumed across a reconnect for the
+    // same reason `tasks`/`pendingTaskOps` above aren't seeded from
+    // `history` either - a queue only ever holds turns pushed THIS process
+    // lifetime, there is nothing about it in a resumed transcript.
+    queue: [],
   };
   // Resumed sessions never replay their history through handleMessage - the
   // tail-append loop below just seeds the event log directly for display, no
@@ -159,6 +167,10 @@ export function createSession({ cwd, resume, name, model, permissionMode, histor
     onStateChange: (state) => setState(id, state),
     onError: (err) => handleError(id, err),
     onApprovalRequest: (request) => handleApprovalRequest(id, request),
+    onQueueChange: (queue) => {
+      row.queue = queue;
+      broadcastQueue(id);
+    },
   });
 
   return row;
@@ -246,6 +258,7 @@ export function attachClient(id, ws, sinceSeq = 0) {
   }
   send(ws, usagePayload(row));
   send(ws, tasksPayload(row));
+  send(ws, queuePayload(row));
   broadcastSummary(id);
   return true;
 }
@@ -282,6 +295,16 @@ async function queryPassthrough(id, action, patch) {
 
 export async function setPermissionMode(id, mode) {
   return queryPassthrough(id, (row) => row.handle.setMode(mode), { mode });
+}
+
+// Cancels whatever turn(s) are currently running, same session/no row-field
+// shape as setPermissionMode above minus the patch - session.js's interrupt()
+// doesn't change any row-visible state itself; the idle/running flip rides
+// in on the interrupted turn's own `result` message the same way a normal
+// completion does, broadcast separately by the row's existing message
+// handling, not by this call.
+export async function interruptTurn(id) {
+  return queryPassthrough(id, (row) => row.handle.interrupt());
 }
 
 // Same shape as setPermissionMode above, for the CLI's own /model - one
@@ -734,6 +757,49 @@ function broadcastTasks(id) {
   const row = sessions.get(id);
   if (!row) return;
   broadcast(id, tasksPayload(row));
+}
+
+// Same shape as tasksPayload/broadcastTasks above. row.queue is kept live by
+// session.js's onQueueChange callback (see createSession) - this just wraps
+// whatever the row already has, same as every other *Payload function here.
+function queuePayload(row) {
+  return { type: 'cockpit:queue', queue: row.queue };
+}
+
+function broadcastQueue(id) {
+  const row = sessions.get(id);
+  if (!row) return;
+  broadcast(id, queuePayload(row));
+}
+
+// Queue pane operations (backlog.md) - all three just forward to the
+// session handle (listQueue is synchronous and local, no round trip, so it
+// isn't wrapped in queryPassthrough's async shape). row.queue/the broadcast
+// itself are driven by onQueueChange, not by these calls succeeding - a
+// grok session's stubbed handle methods return false/[] harmlessly (see
+// grok-session.js) rather than throwing "not a function".
+export function listQueue(id) {
+  const row = sessions.get(id);
+  if (!row) throw new Error(`unknown session: ${id}`);
+  return row.handle.listQueue();
+}
+
+export async function removeQueued(id, queueId) {
+  const row = sessions.get(id);
+  if (!row) throw new Error(`unknown session: ${id}`);
+  return row.handle.removeQueued(queueId);
+}
+
+export async function reorderQueue(id, queueIds) {
+  const row = sessions.get(id);
+  if (!row) throw new Error(`unknown session: ${id}`);
+  return row.handle.reorderQueue(queueIds);
+}
+
+export async function sendNow(id, queueId) {
+  const row = sessions.get(id);
+  if (!row) throw new Error(`unknown session: ${id}`);
+  return row.handle.sendNow(queueId);
 }
 
 // Wake a minute after the stated reset, not exactly on it - "2:10am" is the

@@ -249,6 +249,18 @@ async function handleSessionRoute(req, res, url, id, action) {
     }
   }
 
+  // Cancel the turn(s) currently in flight - keeps the session and its
+  // websocket connections alive, unlike closing it. No body: there is
+  // nothing to choose, just "stop now" (mirrors Grok CLI's Esc / Ctrl+C).
+  if (action === 'interrupt' && req.method === 'POST') {
+    try {
+      await registry.interruptTurn(id);
+      return respondJson(res, 200, {});
+    } catch (err) {
+      return respondJson(res, 500, { error: String(err.message || err) });
+    }
+  }
+
   if (action === 'models' && req.method === 'GET') {
     // Same shape as the 'commands' route above (Query.supportedCommands) -
     // Query.supportedModels is the SDK's own list, no cockpit-side hardcoded
@@ -428,8 +440,13 @@ async function handleSessionRoute(req, res, url, id, action) {
 
   if (action === 'approval-decision' && req.method === 'POST') {
     const body = await readJsonBody(req);
+    // `alwaysAllow` (backlog.md's permission "always allow this pattern",
+    // scoped to per-tool-name/this-session-only) rides along on the same
+    // decision object session.js's resolveApproval already receives -
+    // stripped back off before it's ever handed to the SDK as the actual
+    // PermissionResult (see that function).
     const decision = body.decision === 'allow'
-      ? { behavior: 'allow', updatedInput: body.updatedInput }
+      ? { behavior: 'allow', updatedInput: body.updatedInput, alwaysAllow: Boolean(body.alwaysAllow) }
       : { behavior: 'deny', message: body.message || 'Not approved by user.' };
     const resolved = registry.resolveApproval(id, body.requestId, decision);
     return respondJson(res, resolved ? 200 : 404, { resolved });
@@ -633,6 +650,25 @@ wss.on('connection', (ws, req, id, since) => {
     if (payload.type === 'input' && typeof payload.text === 'string' && payload.text.length > 0) {
       registry.sendInput(id, payload.text).catch((err) => {
         console.error(`sendInput failed for ${id}:`, err);
+      });
+    }
+    // Queue pane mutations (backlog.md) - same ws channel as 'input' rather
+    // than a REST round trip: these are live edits to messages already sent
+    // down this same socket, so there's no meaningful "queue-remove before
+    // the socket that queued it is even open" case to support.
+    if (payload.type === 'queue-remove' && typeof payload.queueId === 'string') {
+      registry.removeQueued(id, payload.queueId).catch((err) => {
+        console.error(`removeQueued failed for ${id}:`, err);
+      });
+    }
+    if (payload.type === 'queue-reorder' && Array.isArray(payload.queueIds)) {
+      registry.reorderQueue(id, payload.queueIds).catch((err) => {
+        console.error(`reorderQueue failed for ${id}:`, err);
+      });
+    }
+    if (payload.type === 'queue-send-now' && typeof payload.queueId === 'string') {
+      registry.sendNow(id, payload.queueId).catch((err) => {
+        console.error(`sendNow failed for ${id}:`, err);
       });
     }
   });

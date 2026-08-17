@@ -125,7 +125,7 @@
   #statsPanel .ctx-green { color: var(--ok); }
   #statsPanel .ctx-yellow { color: #e0b34d; }
   #statsPanel .ctx-red { color: var(--error); }
-  #diffBtn, #collapseAllBtn {
+  #diffBtn, #collapseAllBtn, #compactBtn {
     padding: 5px 10px;
     background: var(--panel);
     border: 1px solid var(--border);
@@ -135,6 +135,12 @@
     font-size: 12px;
   }
   #diffBtn:hover { border-color: var(--accent); }
+  #compactBtn { margin-left: 8px; }
+  #compactBtn:hover { border-color: var(--accent); }
+  /* Matches stats-panel.js's ctx-red threshold (remaining context < 20%) -
+     same red-zone color the context bar itself already turns, so "this
+     button now matters" reads without a separate alarm color to learn. */
+  #compactBtn.compact-urgent { border-color: var(--error); color: var(--error); }
   /* Deliberately just an icon, same footprint as the other header buttons
      but nothing about it reads "click me to end the session" - that action
      now lives a step further in, behind the modal it opens. */
@@ -425,6 +431,7 @@
     display: flex;
     gap: 10px;
     align-items: center;
+    flex-wrap: wrap; /* lets #planReviewControls below claim its own full-width row instead of squeezing into the pre/button row */
   }
   #approvalPlain pre {
     flex: 1;
@@ -434,6 +441,9 @@
     margin: 0;
     font-size: 12px;
   }
+  /* Plan review (backlog.md) - a plan is worth an actual read, not the same
+     120px peephole a Bash/Write JSON blob gets. Toggled in showApprovalRequest. */
+  #approvalPlain pre.plan-detail { max-height: 320px; }
   #approvalBanner button {
     padding: 6px 12px;
     border-radius: 6px;
@@ -443,6 +453,32 @@
   }
   #approveBtn { background: var(--ok); color: #10281c; }
   #rejectBtn { background: var(--error); color: #2b0d0d; }
+  #alwaysAllowLabel {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 12px;
+    color: var(--muted);
+    white-space: nowrap;
+  }
+  #planReviewControls {
+    flex: 1 1 100%;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  #planFeedbackText, #planNoteText {
+    width: 100%;
+    box-sizing: border-box;
+    font-family: inherit;
+    font-size: 12px;
+    padding: 6px 8px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--panel);
+    color: var(--text);
+  }
+  #planFeedbackText { min-height: 50px; resize: vertical; }
 
   /* AskUserQuestion's own form - see index.html's module comment on
      #questionForm. One block per question, options as toggleable pills
@@ -754,6 +790,45 @@
     max-height: 160px;
     overflow-y: auto;
   }
+  /* Visible input queue (queue-panel.js) - same shape as #taskPanel above
+     minus the toggle (it shows/hides itself off queue length, see the
+     markup comment). */
+  #queuePanel {
+    display: none;
+    border-top: 1px solid var(--border);
+    padding: 6px 16px;
+  }
+  #queuePanel .controls {
+    font-size: 11px;
+    color: var(--muted);
+    margin-bottom: 4px;
+  }
+  #queueList {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    max-height: 160px;
+    overflow-y: auto;
+  }
+  .queue-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 2px 0;
+    font-size: 12px;
+  }
+  .queue-text { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .queue-row button {
+    padding: 2px 6px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 11px;
+  }
+  .queue-row button:hover { border-color: var(--accent); }
+  .queue-row button:disabled { opacity: 0.4; cursor: default; }
   .task-row {
     display: flex;
     align-items: center;
@@ -854,7 +929,14 @@
     border-top: 1px solid var(--border);
     padding: 10px 16px;
     gap: 8px;
-    align-items: flex-end;
+    /* stretch (not flex-end) so composeInput and composeSendGroup always
+       share the same top AND bottom edge - whichever of the two is
+       naturally taller (composeSendGroup's modeBtn+sendBtn stack usually
+       is, at rest) sets the row's height, and the other stretches to match.
+       compose.js's autosize() reads composeSendGroup's real rendered height
+       as its own floor, so typing never shrinks composeInput back below it
+       once this alignment exists - see MIN_HEIGHT_PX's neighbor there. */
+    align-items: stretch;
   }
   #compose textarea {
     flex: 1;
@@ -909,6 +991,61 @@
     height: 42px;
   }
   #compose button:disabled { opacity: 0.5; cursor: default; }
+  /* Lives in #activityBar now, right next to the |\-/ state spinner it
+     cancels - not down by Send anymore (too easy to fat-finger right after
+     Enter). Same row/height as stateLabel/statsPanel/compactBtn, not the
+     tall #compose button footprint it used to share with Send. Fixed width
+     to fit the armed label ("Confirm stop?") without it - without this the
+     button grows/shrinks between resting and armed, shifting the rest of
+     the row on every click right when precision matters most. */
+  #stopBtn {
+    position: relative; /* anchors the countdown bar (.armed::after) below */
+    overflow: hidden; /* clips the bar to the button's rounded corners */
+    padding: 5px 10px;
+    background: var(--error);
+    border: 1px solid var(--error);
+    color: white;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 12px;
+    width: 116px;
+    box-sizing: border-box;
+    white-space: nowrap;
+  }
+  #stopBtn:hover { opacity: 0.85; }
+  /* Armed state (app.js) - first click arms a ~2s confirm window instead of
+     stopping immediately, so a stray click next to the spinner doesn't
+     cancel a turn outright. Visually distinct from the resting red so "one
+     more click and this actually happens" reads clearly, not just a hover
+     blip. */
+  #stopBtn.armed {
+    background: #e0b34d;
+    border-color: #e0b34d;
+    color: #2b1d02;
+    font-weight: 600;
+  }
+  /* Countdown bar for the arm window above - a full-width strip that
+     depletes to nothing over the same window app.js's STOP_CONFIRM_WINDOW_MS
+     uses (2000ms, kept in sync by comment since CSS can't read a JS const).
+     transform (not width) so the browser animates it on the compositor
+     instead of laying out every frame. Removing the .armed class (disarmStop,
+     on confirm or on timeout) cancels the animation outright - nothing to
+     clean up on the JS side. */
+  #stopBtn.armed::after {
+    content: '';
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: 3px;
+    background: #2b1d02;
+    transform-origin: left;
+    animation: stopCountdown 2000ms linear forwards;
+  }
+  @keyframes stopCountdown {
+    from { transform: scaleX(1); }
+    to { transform: scaleX(0); }
+  }
   /* Stacks the mode picker directly above Send, using the vertical room
      that's otherwise empty there since the textarea can grow taller than
      the button - keeps the mode one click away without spending header
@@ -974,7 +1111,7 @@
   #fileSuggestionsFiles li.suggestion-empty { color: var(--muted); cursor: default; }
   #fileSuggestionsFiles li.suggestion-empty:hover { background: none; color: var(--muted); }
 
-  #commandSuggestions, #modelSuggestions {
+  #commandSuggestions, #modelSuggestions, #historySuggestions {
     display: none;
     position: absolute;
     bottom: 60px;
@@ -991,7 +1128,7 @@
     font-size: 12.5px;
     z-index: 5;
   }
-  #commandSuggestions li, #modelSuggestions li {
+  #commandSuggestions li, #modelSuggestions li, #historySuggestions li {
     padding: 5px 8px;
     border-radius: 4px;
     cursor: pointer;
@@ -1000,11 +1137,14 @@
     align-items: baseline;
   }
   #commandSuggestions li.active, #commandSuggestions li:hover,
-  #modelSuggestions li.active, #modelSuggestions li:hover { background: var(--accent); }
+  #modelSuggestions li.active, #modelSuggestions li:hover,
+  #historySuggestions li.active, #historySuggestions li:hover { background: var(--accent); }
   #commandSuggestions li.active .cmd-desc, #commandSuggestions li:hover .cmd-desc,
-  #modelSuggestions li.active .cmd-desc, #modelSuggestions li:hover .cmd-desc { color: white; }
-  #commandSuggestions .cmd-name, #modelSuggestions .cmd-name { font-family: ui-monospace, monospace; white-space: nowrap; }
+  #modelSuggestions li.active .cmd-desc, #modelSuggestions li:hover .cmd-desc,
+  #historySuggestions li.active .cmd-desc, #historySuggestions li:hover .cmd-desc { color: white; }
+  #commandSuggestions .cmd-name, #modelSuggestions .cmd-name, #historySuggestions .cmd-name { font-family: ui-monospace, monospace; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   #commandSuggestions .cmd-desc, #modelSuggestions .cmd-desc { color: var(--muted); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #historySuggestions .cmd-name { flex: 1; font-family: inherit; } /* one prompt per row, not name+desc - flex:1 so ellipsis has a width to clip against */
   #modelSuggestions .cmd-name.current::after { content: ' ✓'; }
 
   .modal {
@@ -1131,6 +1271,30 @@
     <div id="approvalPlain">
       <strong id="approvalHeading"></strong>
       <pre id="approvalDetail"></pre>
+      <!-- Backlog.md's permission "always allow this pattern" gap, scoped to
+           the smallest durable version: per-tool-name, for the rest of THIS
+           session only - no persistence to settings.local.json, no input/
+           cwd pattern matching (both flagged in the backlog as needing their
+           own design call). Label text is filled in per-request (app.js's
+           showApprovalRequest) with the actual tool name. Hidden by default
+           since #approvalPlain itself is hidden for AskUserQuestion, which
+           always needs a real per-call answer regardless of this checkbox. -->
+      <label id="alwaysAllowLabel"><input type="checkbox" id="alwaysAllowBtn" /> Always allow <span id="alwaysAllowToolName"></span> this session</label>
+      <!-- Plan review (backlog.md's "preview + comment/revise, not just
+           approve/reject" - Grok CLI's /view-plan equivalent). Shown only
+           for ExitPlanMode (showApprovalRequest); a plain Bash/Write
+           approval has no use for either field. Two independent verbs, not
+           one text box: "Request changes" reuses the existing deny path
+           (ExitPlanMode's PermissionResult already supports a `message` the
+           model reads as feedback - previously always the hardcoded "Not
+           approved by user."), while the note field rides on approval
+           instead, queued as a real follow-up turn right after (session.js's
+           pushInput/the visible-queue work) since an `allow` PermissionResult
+           has no message field of its own for the model to see. -->
+      <div id="planReviewControls" style="display:none">
+        <textarea id="planFeedbackText" placeholder="What should change? (used by Request changes below)"></textarea>
+        <input type="text" id="planNoteText" placeholder="Optional note to send right after approving (e.g. also validate with a second agent)" />
+      </div>
       <button id="approveBtn">Accept this</button>
       <button id="rejectBtn">No</button>
     </div>
@@ -1177,6 +1341,14 @@
     <div class="controls"><span>Tasks:</span></div>
     <ul id="taskList"></ul>
   </div>
+  <!-- Visible input queue (queue-panel.js) - docked just above the compose
+       box, same spot as taskPanel above. No toggle: hidden whenever the
+       queue is empty (session idle, or nothing typed ahead of a running
+       turn), shown the instant a cockpit:queue push has at least one entry. -->
+  <div id="queuePanel">
+    <div class="controls"><span>Queued (behind the running turn):</span></div>
+    <ul id="queueList"></ul>
+  </div>
   <!-- Per-turn cost graph (turn-chart.js) - docked just above the compose
        box per plan, not in the header stats strip: it's a "how did I get
        here" view of the transcript you're about to keep typing into, not a
@@ -1202,7 +1374,22 @@
        app.js, so nothing else needed to change. -->
   <div id="activityBar">
     <span id="stateLabel" class="state"><span id="stateIcon"></span></span>
+    <!-- Cancel the running turn (backlog.md) - lives right next to the
+         |\-/ activity spinner it's cancelling, not down in composeSendGroup
+         next to Send anymore (too easy to fat-finger right after Enter).
+         Same row height as stateLabel/statsPanel, not the tall #compose
+         button footprint it used to share with Send. Arm-then-confirm
+         behavior (click, then click again within ~2s) is unchanged - only
+         its position and sizing moved, see app.js's armStop/disarmStop. -->
+    <button id="stopBtn" style="display:none" title="Cancel the running turn (Esc)">Stop</button>
     <span id="statsPanel"></span>
+    <!-- Static (not part of stats-panel.js's innerHTML, which is rebuilt on
+         every usage push - a button living inside that HTML would be fine,
+         but a future note/input field there would lose focus/value on the
+         next tick). Runs the CLI's own /compact as a plain slash-command
+         message, same path as typing it - there is no separate SDK method
+         for it. Hidden until a session exists, same as diffBtn/collapseAllBtn. -->
+    <button id="compactBtn" style="display:none" title="Run /compact now to free up context">Compact</button>
   </div>
   <div id="compose">
     <div id="composeResizeHandle" title="Drag to resize"></div>
@@ -1216,6 +1403,12 @@
     </div>
     <ul id="commandSuggestions"></ul>
     <ul id="modelSuggestions"></ul>
+    <!-- Persisted prompt history + fuzzy search (backlog.md, history-search.js)
+         - Ctrl+R while focused in composeInput, shell reverse-search
+         convention. Reuses #commandSuggestions/#modelSuggestions' own CSS
+         (.cmd-name/.cmd-desc, dropdown positioning) under its own id, same
+         as modelSuggestions already does under commandSuggestions'. -->
+    <ul id="historySuggestions"></ul>
     <textarea id="composeInput" placeholder="Message Claude... (Enter to send, Shift+Enter for newline, @ for files, / for commands)"></textarea>
     <div id="composeSendGroup">
       <select id="modeBtn" style="display:none" title="Pick a mode directly, or press Shift+Tab to cycle"></select>

@@ -43,6 +43,7 @@ function fakeStartSession() {
   return {
     pushInput: () => {},
     close: () => {},
+    interrupt: async () => { lastInterruptCalled = true; },
     setMode: async (m) => m,
     getMode: () => 'default',
     resolveApproval: () => false,
@@ -65,6 +66,7 @@ function fakeStartSession() {
 }
 
 let lastPluginEnabled = null;
+let lastInterruptCalled = false;
 
 test('GET / serves the launcher page', async () => {
   const res = await fetch(`${ORIGIN}/`);
@@ -154,6 +156,23 @@ test('a session-scoped route rejects a missing or wrong token, and accepts the r
     body: JSON.stringify({ mode: 'plan' }),
   });
   assert.equal(rightToken.status, 200);
+});
+
+test('POST /api/sessions/:id/interrupt requires the session token and calls through to the handle', async () => {
+  registry._reset();
+  lastInterruptCalled = false;
+  const row = registry.createSession({ cwd: '/tmp', startSessionImpl: fakeStartSession });
+
+  const noToken = await fetch(`${ORIGIN}/api/sessions/${row.id}/interrupt`, { method: 'POST' });
+  assert.equal(noToken.status, 401);
+  assert.equal(lastInterruptCalled, false);
+
+  const res = await fetch(`${ORIGIN}/api/sessions/${row.id}/interrupt`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${row.token}` },
+  });
+  assert.equal(res.status, 200);
+  assert.equal(lastInterruptCalled, true);
 });
 
 test('GET /api/sessions/:id requires the session token and returns the summary (MVP3 reload-rejoin check)', async () => {

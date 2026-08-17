@@ -12,7 +12,7 @@ function unsupported(name) {
 
 /**
  * Start a Grok session. Returns the same handle as startSession():
- * pushInput, close, setMode, resolveApproval, getMode, query.
+ * pushInput, close, interrupt, setMode, resolveApproval, getMode, query.
  */
 export function startGrokSession({
   cwd,
@@ -210,6 +210,22 @@ export function startGrokSession({
     onStateChange('closed');
   }
 
+  // Cancels the in-flight prompt without tearing down the connection/process
+  // - same `session/cancel` notify close() already sends, minus the process
+  // kill and pendingApprovals wipe. runPrompt()'s `session/prompt` request
+  // resolves with stopReason 'cancelled' once the agent acts on it (already
+  // a recognized outcome - see turnResultMessage above), which drives
+  // pendingTurns/onStateChange back down through the normal path; nothing
+  // extra to do here.
+  async function interrupt() {
+    if (closed || !sessionId || !connection) return;
+    try {
+      connection.client.notify('session/cancel', { sessionId });
+    } catch {
+      // process may already be gone
+    }
+  }
+
   async function setMode(mode) {
     currentMode = mode;
   }
@@ -242,9 +258,24 @@ export function startGrokSession({
     });
   }
 
+  // Queue-pane operations (backlog.md) aren't meaningful here yet: grok
+  // sessions serialize pushInput() calls through `promptTail` (a plain
+  // promise chain), not a pull-based queue a turn can sit "in" and be
+  // inspected/reordered - there's nothing to list. Stubbed rather than
+  // omitted so registry callers get an empty-but-valid response instead of
+  // a thrown "not a function".
+  function listQueue() {
+    return [];
+  }
+
   return {
     pushInput,
     close,
+    interrupt,
+    listQueue,
+    removeQueued: () => false,
+    reorderQueue: () => {},
+    sendNow: async () => false,
     setMode,
     resolveApproval,
     listRewindPoints,

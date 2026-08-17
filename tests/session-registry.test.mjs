@@ -46,6 +46,21 @@ function fakeStartSession({ rejectModes = new Set(), usageExperimental, mcpStatu
       close: () => {
         impl.closed = true;
       },
+      interrupt: async () => {
+        impl.interrupted = (impl.interrupted || 0) + 1;
+      },
+      listQueue: () => impl.queue || [],
+      removeQueued: (queueId) => {
+        impl.lastRemoveQueued = queueId;
+        return impl.removeQueuedResult ?? true;
+      },
+      reorderQueue: (queueIds) => {
+        impl.lastReorderQueue = queueIds;
+      },
+      sendNow: async (queueId) => {
+        impl.lastSendNow = queueId;
+        return impl.sendNowResult ?? true;
+      },
       setMode: async (m) => {
         if (rejectModes.has(m)) {
           throw new Error(`Cannot set permission mode to ${m} because the session was not launched with the required flag`);
@@ -257,6 +272,55 @@ test('sendInput delegates to the session handle', async () => {
 test('sendInput on an unknown session id rejects instead of throwing synchronously', async () => {
   registry._reset();
   await assert.rejects(() => registry.sendInput('does-not-exist', 'hi'));
+});
+
+test('interruptTurn delegates to the session handle and broadcasts', async () => {
+  registry._reset();
+  const startSessionImpl = fakeStartSession();
+  const row = registry.createSession({ cwd: '/tmp', startSessionImpl });
+  await registry.interruptTurn(row.id);
+  assert.equal(startSessionImpl.interrupted, 1);
+});
+
+test('interruptTurn on an unknown session id rejects instead of throwing synchronously', async () => {
+  registry._reset();
+  await assert.rejects(() => registry.interruptTurn('does-not-exist'));
+});
+
+test('listQueue/removeQueued/reorderQueue/sendNow all delegate to the session handle', async () => {
+  registry._reset();
+  const startSessionImpl = fakeStartSession();
+  const row = registry.createSession({ cwd: '/tmp', startSessionImpl });
+
+  assert.deepEqual(registry.listQueue(row.id), []);
+
+  assert.equal(await registry.removeQueued(row.id, 'q1'), true);
+  assert.equal(startSessionImpl.lastRemoveQueued, 'q1');
+
+  await registry.reorderQueue(row.id, ['q2', 'q1']);
+  assert.deepEqual(startSessionImpl.lastReorderQueue, ['q2', 'q1']);
+
+  assert.equal(await registry.sendNow(row.id, 'q2'), true);
+  assert.equal(startSessionImpl.lastSendNow, 'q2');
+
+  assert.throws(() => registry.listQueue('does-not-exist'));
+  await assert.rejects(() => registry.removeQueued('does-not-exist', 'q1'));
+  await assert.rejects(() => registry.reorderQueue('does-not-exist', []));
+  await assert.rejects(() => registry.sendNow('does-not-exist', 'q1'));
+});
+
+test('a live onQueueChange push broadcasts cockpit:queue to attached clients', async () => {
+  registry._reset();
+  const startSessionImpl = fakeStartSession();
+  const row = registry.createSession({ cwd: '/tmp', startSessionImpl });
+  const ws = fakeWs();
+  registry.attachClient(row.id, ws);
+  ws.sent.length = 0; // clear the initial hello/replay/usage/tasks/queue burst
+
+  startSessionImpl.lastOpts.onQueueChange([{ id: 'q1', text: 'queued turn' }]);
+  const queueMsg = ws.sent.find((m) => m.type === 'cockpit:queue');
+  assert.ok(queueMsg);
+  assert.deepEqual(queueMsg.queue, [{ id: 'q1', text: 'queued turn' }]);
 });
 
 test('a fresh attach replays every buffered message (event-log.js\'s own tests cover the byte cap/eviction)', () => {

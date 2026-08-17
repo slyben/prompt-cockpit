@@ -17,6 +17,9 @@ import { initPluginPanel } from '/plugin-panel.js';
 import { initSettings, loadSettings, patchSettings } from '/settings.js';
 import { initTurnChart } from '/turn-chart.js';
 import { initTaskPanel } from '/task-panel.js';
+import { initQueuePanel } from '/queue-panel.js';
+import { createPromptHistoryStore, fuzzyScore } from '/prompt-history.js';
+import { initHistorySearch } from '/history-search.js';
 import { PERMISSION_MODES } from '/permissions.js';
 
 const launcherEl = document.getElementById('launcher');
@@ -33,12 +36,14 @@ const browseBtn = document.getElementById('browseBtn');
 const recentFoldersSelect = document.getElementById('recentFoldersSelect');
 const resumeListEl = document.getElementById('resumeList');
 const modeBtn = document.getElementById('modeBtn');
+const stopBtn = document.getElementById('stopBtn');
 const thinkingBudgetBtn = document.getElementById('thinkingBudgetBtn');
 const thinkingDisplayBtn = document.getElementById('thinkingDisplayBtn');
 const thinkingErrorEl = document.getElementById('thinkingError');
 const effortBtn = document.getElementById('effortBtn');
 const effortErrorEl = document.getElementById('effortError');
 const diffBtn = document.getElementById('diffBtn');
+const compactBtn = document.getElementById('compactBtn');
 const collapseAllBtn = document.getElementById('collapseAllBtn');
 const autoContinueLabel = document.getElementById('autoContinueLabel');
 const autoContinueBtn = document.getElementById('autoContinueBtn');
@@ -51,6 +56,11 @@ const approvalHeading = document.getElementById('approvalHeading');
 const approvalDetail = document.getElementById('approvalDetail');
 const approveBtn = document.getElementById('approveBtn');
 const rejectBtn = document.getElementById('rejectBtn');
+const alwaysAllowBtn = document.getElementById('alwaysAllowBtn');
+const alwaysAllowToolName = document.getElementById('alwaysAllowToolName');
+const planReviewControls = document.getElementById('planReviewControls');
+const planFeedbackText = document.getElementById('planFeedbackText');
+const planNoteText = document.getElementById('planNoteText');
 const questionForm = document.getElementById('questionForm');
 const loadHistoryBar = document.getElementById('loadHistoryBar');
 const loadHistoryBtn = document.getElementById('loadHistoryBtn');
@@ -102,6 +112,22 @@ const taskPanel = initTaskPanel({
   panel: document.getElementById('taskPanel'),
   listEl: document.getElementById('taskList'),
 });
+const queuePanel = initQueuePanel({
+  panel: document.getElementById('queuePanel'),
+  listEl: document.getElementById('queueList'),
+  onReorder: (queueIds) => {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    ws.send(JSON.stringify({ type: 'queue-reorder', queueIds }));
+  },
+  onRemove: (queueId) => {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    ws.send(JSON.stringify({ type: 'queue-remove', queueId }));
+  },
+  onSendNow: (queueId) => {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    ws.send(JSON.stringify({ type: 'queue-send-now', queueId }));
+  },
+});
 const historyPane = initHistoryPane({
   modal: document.getElementById('historyModal'),
   body: document.getElementById('historyBody'),
@@ -114,6 +140,7 @@ let sessionId = null;
 let sessionToken = null;
 let currentMode = 'default';
 let pendingApprovalRequestId = null;
+let pendingApprovalToolName = null; // gates planReviewControls/rejectBtn's label - only ExitPlanMode gets the plan-review treatment
 let availableCommands = [];
 let availableAgents = []; // Query.supportedAgents(), fetched once on connect - see the `if (!reconnect)` block below
 // Sticky "default agent" set by clicking a roster entry (renderAgentsList) -
@@ -253,12 +280,27 @@ function isSuggestionPickerOpen() {
   const fileDropdown = document.getElementById('fileSuggestions');
   const modelDropdown = document.getElementById('modelSuggestions');
   const commandDropdown = document.getElementById('commandSuggestions');
+  const historyDropdown = document.getElementById('historySuggestions');
   return (
     fileDropdown.classList.contains('show') ||
     modelDropdown.style.display === 'block' ||
-    commandDropdown.style.display === 'block'
+    commandDropdown.style.display === 'block' ||
+    historyDropdown.style.display === 'block'
   );
 }
+
+// Persisted prompt history + Ctrl+R fuzzy search (backlog.md) - one store
+// shared by compose.js's Up/Down recall and history-search.js's dropdown,
+// see prompt-history.js's module comment. setCwd() is called from
+// applySession() below once a session's cwd is known.
+const promptHistory = createPromptHistoryStore();
+initHistorySearch({
+  textarea: document.getElementById('composeInput'),
+  dropdown: document.getElementById('historySuggestions'),
+  getEntries: () => promptHistory.list(),
+  fuzzyScore,
+  isPickerOpen: isSuggestionPickerOpen,
+});
 
 const compose = initCompose({
   textarea: document.getElementById('composeInput'),
@@ -267,6 +309,8 @@ const compose = initCompose({
   streamEl,
   isScrolledToBottom,
   isPickerOpen: isSuggestionPickerOpen,
+  promptHistory,
+  sendGroupEl: document.getElementById('composeSendGroup'),
   onSend: (text) => {
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     // Sticky agent prefix (see selectedAgentName above) - a plain
@@ -641,12 +685,17 @@ function returnToLauncher() {
   // below, once there's a session for it to chart again.
   turnChart.setEnabled(false);
   taskPanel.setEnabled(false); // same B9-style force-hide as turnChart above - see its own comment
+  queuePanel.reset();
   agentsList.style.display = 'none';
   agentsList.innerHTML = '';
   agentsBtn.classList.remove('open');
   selectedAgentName = null;
   applyAgentArmedIndicator();
   diffBtn.style.display = 'none';
+  compactBtn.style.display = 'none';
+  compactBtn.classList.remove('compact-urgent');
+  stopBtn.style.display = 'none';
+  disarmStop();
   closeSessionBtn.style.display = 'none';
   settingsBtn.style.display = 'none';
   document.getElementById('settingsModal').style.display = 'none';
@@ -796,6 +845,17 @@ document.addEventListener('keydown', (event) => {
     event.preventDefault();
     expandAllCollapsed(streamEl);
   }
+  // Grok CLI's Esc-stops-the-turn (see backlog.md). Deliberately deferred to
+  // any @/model/command picker's own Escape-closes-dropdown handling
+  // (isSuggestionPickerOpen, same guard compose.js's history recall uses) -
+  // those listeners live on the textarea itself and don't stopPropagation,
+  // so without this check Escape-to-close-a-dropdown would also cancel the
+  // running turn underneath it. No-op while idle: nothing to cancel, and
+  // stopBtn isn't even visible then.
+  if (event.key === 'Escape' && stopBtn.style.display !== 'none' && !isSuggestionPickerOpen()) {
+    event.preventDefault();
+    interruptTurn();
+  }
 });
 
 // Terminal-style select-and-release-to-copy: most terminal emulators copy
@@ -827,6 +887,85 @@ streamEl.addEventListener('mouseup', (event) => {
     // than surfacing an error for what's a convenience feature.
   });
 });
+
+// Cancel the in-flight turn - Grok CLI's Esc/Ctrl+C equivalent (see
+// backlog.md). Session and any queued follow-ups stay alive; only the turn
+// currently running is aborted. `interruptInFlight` guards the same
+// double-click race modeChangeInFlight guards below - a second click before
+// the first request lands would just re-send the same no-op.
+let interruptInFlight = false;
+
+async function interruptTurn() {
+  if (!sessionId || interruptInFlight) return;
+  interruptInFlight = true;
+  try {
+    const res = await fetch(`/api/sessions/${sessionId}/interrupt`, {
+      method: 'POST',
+      headers: authHeaders(),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      console.error(`interrupt failed: ${err.error || res.statusText}`);
+    }
+  } catch (err) {
+    console.error('interrupt failed:', err);
+  } finally {
+    interruptInFlight = false;
+  }
+}
+
+// Arm-then-confirm (backlog.md follow-up: Stop sat exactly where Send does,
+// too easy to fat-finger right after hitting Enter). First click arms a
+// short confirm window instead of interrupting outright; a second click
+// inside that window is what actually stops the turn. Escape deliberately
+// bypasses all of this and interrupts immediately (see the keydown handler
+// below) - that's the "I meant it, right now" path, arming it too would
+// defeat the point of a keyboard shortcut.
+const STOP_CONFIRM_WINDOW_MS = 2000;
+let stopArmed = false;
+let stopArmTimer = null;
+
+function armStop() {
+  stopArmed = true;
+  stopBtn.textContent = 'Confirm stop?'; // short enough to fit stopBtn's fixed width (index.html) without reflowing it
+  stopBtn.classList.add('armed');
+  clearTimeout(stopArmTimer);
+  stopArmTimer = setTimeout(disarmStop, STOP_CONFIRM_WINDOW_MS);
+}
+
+function disarmStop() {
+  stopArmed = false;
+  clearTimeout(stopArmTimer);
+  stopArmTimer = null;
+  stopBtn.textContent = 'Stop';
+  stopBtn.classList.remove('armed');
+}
+
+stopBtn.addEventListener('click', () => {
+  if (stopArmed) {
+    disarmStop();
+    interruptTurn();
+  } else {
+    armStop();
+  }
+});
+
+// Surfaces the CLI's own /compact as a button next to the context bar (see
+// backlog.md) - there's no separate SDK method for it, so this sends the
+// literal slash-command text through the same input path as anything typed
+// by hand (compose.js's onSend). `prompt()` for the optional "keep this"
+// note rather than a persistent field in the compose box or stats strip:
+// stats-panel.js's innerHTML is rebuilt on every usage push (every assistant
+// message), which would silently wipe a live input's value/focus mid-type.
+function runCompact() {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  const note = prompt('Optional - what should Claude keep in mind after compacting? (blank to skip)');
+  if (note === null) return; // cancelled, not just left blank
+  const text = note.trim() ? `/compact ${note.trim()}` : '/compact';
+  ws.send(JSON.stringify({ type: 'input', text }));
+}
+
+compactBtn.addEventListener('click', runCompact);
 
 let modeChangeInFlight = false;
 
@@ -869,25 +1008,56 @@ async function setMode(next) {
   }
 }
 
-approveBtn.addEventListener('click', () => sendApprovalDecision('allow'));
-rejectBtn.addEventListener('click', () => sendApprovalDecision('deny'));
+approveBtn.addEventListener('click', () => {
+  // Captured before sendApprovalDecision resolves - pendingApprovalToolName
+  // is cleared once the request is gone, and reading it after the await
+  // would race a fast-arriving next approval request for a different tool.
+  const note = pendingApprovalToolName === 'ExitPlanMode' ? planNoteText.value.trim() : '';
+  sendApprovalDecision('allow', undefined, alwaysAllowBtn.checked).then(() => {
+    // Plan review's "append more before approving" (backlog.md) - queued as
+    // a real follow-up turn right after approving (same ws 'input' path
+    // compose.js uses, so it lands in the visible queue if a turn's already
+    // running), since an `allow` PermissionResult has no message field of
+    // its own for the model to see - there's nowhere else for this to ride.
+    if (note && ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'input', text: note }));
+    }
+  });
+});
+rejectBtn.addEventListener('click', () => {
+  // Plan review's "request changes" (backlog.md) - reuses the existing deny
+  // path with a real reason instead of the hardcoded default: ExitPlanMode's
+  // PermissionResult already carries `message` back to the model as
+  // feedback, previously always "Not approved by user." regardless of why.
+  const feedback = pendingApprovalToolName === 'ExitPlanMode' ? planFeedbackText.value.trim() : '';
+  sendApprovalDecision('deny', undefined, false, feedback || undefined);
+});
 
 // One-off per action - the terminal's own "proceed? y/n", not a mode
 // change. Every gated tool call routes here now (session.js's
 // canUseTool), not just ExitPlanMode. `updatedInput` is what
 // AskUserQuestion's answer actually rides back on (see
 // renderQuestionForm) - every other caller omits it, same as before.
-async function sendApprovalDecision(decision, updatedInput) {
+// `alwaysAllow` (backlog.md) only ever comes from approveBtn's own click
+// above - session.js strips it back off before handing the decision to the
+// SDK, it's cockpit-only bookkeeping (remembers the tool name for the rest
+// of this session, nothing persisted to disk). `message` is the plan
+// review "request changes" reason above; server.js falls back to its own
+// default when this is undefined, same as it always has for a plain deny.
+async function sendApprovalDecision(decision, updatedInput, alwaysAllow, message) {
   if (!pendingApprovalRequestId) return;
   await fetch(`/api/sessions/${sessionId}/approval-decision`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', ...authHeaders() },
-    body: JSON.stringify({ requestId: pendingApprovalRequestId, decision, updatedInput }),
+    body: JSON.stringify({ requestId: pendingApprovalRequestId, decision, updatedInput, alwaysAllow, message }),
   });
   approvalBanner.style.display = 'none';
   questionForm.style.display = 'none';
   questionForm.innerHTML = '';
+  alwaysAllowBtn.checked = false;
+  planReviewControls.style.display = 'none';
   pendingApprovalRequestId = null;
+  pendingApprovalToolName = null;
 }
 
 loadHistoryBtn.addEventListener('click', loadEarlierHistory);
@@ -1121,6 +1291,7 @@ function connect(id, token, { reconnect = false } = {}) {
     turnChart.reset();
     taskPanel.setEnabled(settings.isTaskPanelEnabled());
     taskPanel.reset();
+    queuePanel.reset(); // corrected by the first cockpit:queue push if a turn's already queued behind another, same as statsPanel above
     pluginsLoadedForSession = false; // new session - the plugin panel hasn't paid its one reload yet (B2)
     refreshCommandsAndAgents(); // fetched eagerly, not lazily like /model's picker - agentsBtn's own visibility depends on whether the list is empty
   }
@@ -1133,6 +1304,7 @@ function connect(id, token, { reconnect = false } = {}) {
   collapseAllBtn.style.display = 'inline-block';
   autoContinueLabel.style.display = 'flex';
   diffBtn.style.display = 'inline-block';
+  compactBtn.style.display = 'inline-block';
   closeSessionBtn.style.display = 'inline-block';
   settingsBtn.style.display = 'inline-block';
 
@@ -1201,6 +1373,17 @@ function connect(id, token, { reconnect = false } = {}) {
       showApprovalRequest(payload.request);
     } else if (payload.type === 'cockpit:usage') {
       statsPanel.update(payload.usage, payload.context, payload.rateLimits);
+      // Same red-zone threshold stats-panel.js's own context bar already
+      // uses (remaining < 20%) - not the SDK's isAutoCompactEnabled/
+      // autoCompactThreshold (units unconfirmed against `percentage`'s 0-100
+      // scale; not worth risking a wrong-scale false alarm over).
+      const pct = payload.context ? payload.context.percentage || 0 : 0;
+      compactBtn.classList.toggle('compact-urgent', pct >= 80);
+    } else if (payload.type === 'cockpit:queue') {
+      // Always the full current queue (session-registry.js's broadcastQueue
+      // never sends a delta), sent on every attach and again on every real
+      // change - queue-panel.js just replaces and re-renders.
+      queuePanel.setQueue(payload.queue);
     } else if (payload.type === 'cockpit:tasks') {
       // Always the full current list (session-registry.js never sends a
       // delta), sent once on every attach/reconnect and again on every real
@@ -1235,14 +1418,28 @@ function showApprovalRequest(request) {
   questionForm.style.display = 'none';
   questionForm.innerHTML = '';
   approvalPlain.style.display = 'flex';
+  alwaysAllowBtn.checked = false; // never carry a stale check into a different tool's request
+  alwaysAllowToolName.textContent = request.toolName;
+  pendingApprovalToolName = request.toolName;
 
-  approvalHeading.textContent = request.toolName === 'ExitPlanMode'
+  const isPlan = request.toolName === 'ExitPlanMode';
+  approvalHeading.textContent = isPlan
     ? 'Plan ready - approve to exit plan mode?'
     : (request.title || request.displayName || `${request.toolName}?`);
 
-  approvalDetail.textContent = request.toolName === 'ExitPlanMode' && request.input?.plan
+  approvalDetail.textContent = isPlan && request.input?.plan
     ? request.input.plan
     : JSON.stringify(request.input, null, 2);
+  approvalDetail.classList.toggle('plan-detail', isPlan);
+
+  // Plan review (backlog.md) - preview + comment/revise, only for
+  // ExitPlanMode. planFeedbackText/planNoteText always reset on a new
+  // request, same as alwaysAllowBtn above, so neither field leaks between
+  // this plan and whatever comes after it.
+  planReviewControls.style.display = isPlan ? 'flex' : 'none';
+  planFeedbackText.value = '';
+  planNoteText.value = '';
+  rejectBtn.textContent = isPlan ? 'Request changes' : 'No';
 
   approvalBanner.style.display = 'flex';
   tabChrome.setNeedsAttention(true); // needs a decision regardless of focus - cleared on window focus (tab-chrome.js)
@@ -1350,6 +1547,7 @@ function shortenCwd(cwd) {
 }
 
 function applySession(session) {
+  promptHistory.setCwd(session.cwd); // no-ops if unchanged - safe on every cockpit:state broadcast, not just the first
   currentProvider = session.provider === 'grok' ? 'grok' : 'claude';
   const providerLabel = sessionProviderLabel();
   sessionLabelEl.textContent = `${shortenCwd(session.cwd)}  ·  ${providerLabel}${session.tabCount > 1 ? `  ·  ${session.tabCount} tabs` : ''}`;
@@ -1449,6 +1647,11 @@ function setState(state) {
   stateLabelEl.className = `state ${state}`;
   if (state === 'running' || state === 'reconnecting') startSpinner();
   else stopSpinner();
+  // Stop (lives in #activityBar next to the state spinner - index.html)
+  // only shows while there's actually a turn to cancel - reconnecting/idle/
+  // error/closed all have nothing in flight on this connection to interrupt.
+  stopBtn.style.display = state === 'running' ? 'inline-block' : 'none';
+  if (state !== 'running') disarmStop(); // never carry an armed "click again" into the next turn
   // A turn that finished while this tab was unfocused is the terminal
   // bell's replacement (plan MVP3) - caught here as the running-to-idle
   // edge rather than on every 'idle' so it doesn't re-fire on states that
