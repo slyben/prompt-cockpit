@@ -181,6 +181,52 @@ export function initDetailPane({ panel, headerLabel, followLiveBtn, tabButtons, 
       // already documents for the shared _usageInfo object).
       line('(Cost/tokens are for the whole API turn - may cover other tool calls made in the same response. The SDK does not report per-tool-call figures.)', 'detail-pane-note');
     }
+
+    // Inline preview: only worth it when both payload and result are short
+    // enough to read at a glance without turning the Summary tab into a
+    // scroll-fest that duplicates the Payload/Result tabs. Below the
+    // threshold, show both in full (reusing renderBody for diff coloring);
+    // above it, or while the result hasn't arrived yet, say nothing here -
+    // the dedicated tabs are one click away.
+    if (record.resultText == null) return; // pending - nothing to preview yet
+    const payloadText = payloadToPlainText(record.payload);
+    const resultText = record.resultText;
+    if (!fitsInline(payloadText) || !fitsInline(resultText)) return;
+
+    line('');
+    line('Payload:', 'detail-pane-section-label');
+    const payloadWrap = document.createElement('div');
+    payloadWrap.className = 'body';
+    renderBody(payloadWrap, record.payload);
+    body.append(payloadWrap);
+
+    line('');
+    line('Result:', 'detail-pane-section-label');
+    const resultWrap = document.createElement('div');
+    resultWrap.className = 'body';
+    renderBody(resultWrap, record.resultText);
+    body.append(resultWrap);
+  }
+
+  // record.payload is either a plain string or formatToolInput's
+  // { lines: [{ text, cls }] } diff shape (see stream-view.js) - flatten to
+  // plain text for the fits-inline size check, same content renderBody would
+  // paint either way.
+  function payloadToPlainText(payload) {
+    if (payload == null) return '';
+    if (typeof payload === 'string') return payload;
+    if (Array.isArray(payload.lines)) return payload.lines.map((l) => l.text).join('\n');
+    return '';
+  }
+
+  // Fixed thresholds rather than measuring the pane's actual rendered
+  // height - simpler, and "does this look like a quick summary or a wall of
+  // text" doesn't really change with the pane's current drag-resized width.
+  const INLINE_PREVIEW_MAX_CHARS = 600;
+  const INLINE_PREVIEW_MAX_LINES = 16;
+  function fitsInline(text) {
+    if (!text) return true; // empty payload/result is trivially "fits"
+    return text.length <= INLINE_PREVIEW_MAX_CHARS && text.split('\n').length <= INLINE_PREVIEW_MAX_LINES;
   }
 
   function renderPayloadTab(record) {

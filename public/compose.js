@@ -23,6 +23,28 @@ export function initCompose({ textarea, sendButton, onSend, resizeHandle, stream
   // afterward doesn't silently undo their resize.
   let manualHeight = null;
 
+  // Prompt-suggestion ghost text (see backlog.md/2026-08-18 - Claude Code's
+  // own "prompt suggestions" feature, mirrored here): app.js computes a
+  // suggested next message from the last assistant reply once a turn ends
+  // idle and hands it to setSuggestion() below. Shown via the textarea's own
+  // `placeholder` attribute rather than an overlay element - the browser
+  // already renders placeholders dim and only while the box is genuinely
+  // empty, which is exactly the behavior wanted here, for free. Tab accepts
+  // it into the box (still editable, not sent); Enter on an empty box with a
+  // live suggestion accepts *and* sends in one step, matching Claude Code's
+  // "tab still accepts for editing" / "Enter accepts and submits" split.
+  const defaultPlaceholder = textarea.placeholder;
+  let currentSuggestion = null;
+
+  function setSuggestion(text) {
+    currentSuggestion = text || null;
+    textarea.placeholder = currentSuggestion || defaultPlaceholder;
+  }
+
+  function clearSuggestion() {
+    setSuggestion(null);
+  }
+
   // Up/Down history recall (shell/REPL convention). The persisted list
   // itself lives in prompt-history.js (backlog.md - survives reload, keyed
   // per cwd, shared with history-search.js's Ctrl+R fuzzy search); this
@@ -47,6 +69,7 @@ export function initCompose({ textarea, sendButton, onSend, resizeHandle, stream
     draftText = '';
     textarea.value = '';
     manualHeight = null; // a sent message starts the next one fresh, same as content-driven autosize already resetting to min
+    clearSuggestion(); // whatever was suggested is about to be answered by a new turn - stale the instant this fires
     autosize();
   }
 
@@ -54,7 +77,23 @@ export function initCompose({ textarea, sendButton, onSend, resizeHandle, stream
     if (event.key === 'Enter') {
       if (event.shiftKey) return; // newline, let it through
       event.preventDefault();
+      // Empty box + a live suggestion: Enter accepts and sends in one step
+      // (Claude Code's "Enter accepts and submits prompt suggestions
+      // immediately" - Tab below is the "still accepts for editing" path).
+      if (textarea.value.length === 0 && currentSuggestion) textarea.value = currentSuggestion;
       send();
+      return;
+    }
+    // Same isPickerOpen guard as onHistoryKey below - file/model/command
+    // pickers install their own capturing Tab listener on this textarea and
+    // preventDefault without stopPropagation, so without this check their
+    // Tab-to-accept would also silently fill in the prompt suggestion
+    // underneath it.
+    if (event.key === 'Tab' && textarea.value.length === 0 && currentSuggestion && !(isPickerOpen && isPickerOpen())) {
+      event.preventDefault();
+      textarea.value = currentSuggestion;
+      placeCaretEnd();
+      autosize();
       return;
     }
     if (event.key === 'ArrowUp' || event.key === 'ArrowDown') onHistoryKey(event);
@@ -178,5 +217,7 @@ export function initCompose({ textarea, sendButton, onSend, resizeHandle, stream
       textarea.disabled = !enabled;
       sendButton.disabled = !enabled;
     },
+    setSuggestion,
+    clearSuggestion,
   };
 }

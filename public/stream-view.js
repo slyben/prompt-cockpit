@@ -35,9 +35,10 @@
 // all" button - both were removed along with the rest of the old interaction).
 
 import { resetToolCallStore, createToolCallRecord, completeToolCallRecord, mergeToolCallStore, recordOrphanResult, popOrphanResult } from '/tool-call-store.js';
+import { renderMarkdown } from '/markdown.js';
 
 const seenInitByContainer = new WeakMap();
-const groupsByContainer = new WeakMap(); // container -> group[], for the group-collapse hint handoff (updateCollapsedHints)
+const groupsByContainer = new WeakMap(); // container -> group[]
 const openGroupByContainer = new WeakMap(); // container -> the currently-accumulating group, if any
 
 // Settings-panel toggle (default on - see settings.js). When true, the
@@ -63,11 +64,6 @@ const SILENT_SYSTEM_SUBTYPES = new Set([
   'hook_response',
   'thinking_tokens',
 ]);
-
-// Creation-order counter for groups (groupsByContainer), stamped once per
-// group at creation and re-stamped on manual collapse (setGroupExpanded) so
-// updateCollapsedHints can find the single most-recently-collapsed one.
-let nextHintSeq = 0;
 
 // Call once per fresh session view (app.js does this on connect(), right
 // after clearing the container) so stale block references from a previous
@@ -100,32 +96,15 @@ export function prependHistory(container, messages, options = {}) {
 
   // Groups built into the fragment registered themselves under the
   // fragment's own WeakMap entry (renderMessage's container param) - merge
-  // them into the real container's list so the group-collapse hint handoff
-  // still reaches them. The fragment's own dangling open group (if the
-  // history slice ends mid-run) is discarded, not merged - it belongs to a
-  // different DOM subtree and can never accept another tool call now that
-  // it's sealed.
+  // them into the real container's list. The fragment's own dangling open
+  // group (if the history slice ends mid-run) is discarded, not merged - it
+  // belongs to a different DOM subtree and can never accept another tool
+  // call now that it's sealed. Each group's `container` field also gets
+  // re-pointed at the real container - it was stamped `fragment` during
+  // creation, and fragment is discarded below, so anything still
+  // referencing it would look up an empty list.
   const fragmentGroups = groupsByContainer.get(fragment) || [];
   const containerGroups = groupsByContainer.get(container) || [];
-
-  // Historical groups got their updateCollapsedHints `seq` stamped while
-  // rendering into `fragment`, which happens after the live container's own
-  // entries already exist - so their seq would otherwise sort *after* the
-  // live tail's, exactly backwards from where they land in the DOM (always
-  // above it, never below). Shift the whole batch below the container's
-  // current minimum seq, preserving order within the batch, so the live
-  // tail still reads as "newest collapsed" once everything's merged. Each
-  // group's `container` field also gets re-pointed at the real container -
-  // it was stamped `fragment` during creation, and fragment is discarded
-  // below, so anything still referencing it would look up an empty list.
-  if (containerGroups.length && fragmentGroups.length) {
-    const containerMin = Math.min(...containerGroups.map((g) => g.seq));
-    const fragMax = Math.max(...fragmentGroups.map((g) => g.seq));
-    if (fragMax >= containerMin) {
-      const offset = fragMax - containerMin + 1;
-      fragmentGroups.forEach((g) => { g.seq -= offset; });
-    }
-  }
   fragmentGroups.forEach((g) => { g.container = container; });
 
   groupsByContainer.set(container, [...fragmentGroups, ...containerGroups]);
@@ -138,7 +117,6 @@ export function prependHistory(container, messages, options = {}) {
   const mergedIds = mergeToolCallStore(fragment, container);
 
   container.prepend(fragment);
-  updateCollapsedHints(container); // finalize hint ownership now that everything's merged in true document order
 
   // A tool_use that just arrived via this merge might be the match an
   // earlier orphan result (rendered before this history page ever loaded -
@@ -230,7 +208,7 @@ function renderAssistant(container, message, turnPointIndex = null, assistantLab
   for (const block of blocks) {
     if (block.type === 'text') {
       closeGroup(container); // real reply - whatever tool run preceded it is done
-      const wrap = appendBlock(container, 'assistant', assistantLabel, block.text, [], container, null, usage, timestampMs); // the actual reply - never collapsed
+      const wrap = appendBlock(container, 'assistant', assistantLabel, block.text, [], container, null, usage, timestampMs, true); // the actual reply - never collapsed; markdown-rendered (see markdown.js)
       // Text-only turns (no tool_use blocks) otherwise never get tagged, so
       // clicking their bar in turn-chart.js just clears whatever highlight
       // was showing and does nothing (B7) - tag this one too. It's not
@@ -242,7 +220,12 @@ function renderAssistant(container, message, turnPointIndex = null, assistantLab
       if (!block.thinking || !block.thinking.trim()) continue; // signature-only/empty thinking blocks - nothing to show
       appendBlock(container, 'thinking', 'Thinking', block.thinking, [], container, null, usage, timestampMs); // always fully rendered now, no collapse/expand affordance (see module comment)
     } else if (block.type === 'tool_use') {
-      const parent = addToolCallToGroup(container, block.name, message._usageInfo);
+      // Same live-vs-historical split as appendToolCallRow's own startedAtMs
+      // below: Date.now() is the real fired-at moment for a message arriving
+      // live; a historical batch render has no such moment; message.timestampMs
+      // is the coarser fallback (see appendToolCallRow's comment).
+      const groupFiredAtMs = toolOpts.historical ? timestampMs : Date.now();
+      const parent = addToolCallToGroup(container, block.name, message._usageInfo, groupFiredAtMs);
       appendToolCallRow(container, block, message._usageInfo, parent, turnPointIndex, toolOpts, timestampMs);
     }
   }
@@ -571,11 +554,11 @@ function renderResult(container, message, timestampMs = null) {
 // A run of consecutive tool call/result pairs, collapsed to one summary row
 // ("3 tool calls: Bash → Read → Edit") instead of each pair getting its own
 // top-level row. See module comment for when a group opens/closes.
-function getOrOpenGroup(container) {
-  return openGroupByContainer.get(container) || openGroup(container);
+function getOrOpenGroup(container, firedAtMs) {
+  return openGroupByContainer.get(container) || openGroup(container, firedAtMs);
 }
 
-function openGroup(container) {
+function openGroup(container, firedAtMs = null) {
   if (autoCollapsePreviousGroup) {
     const existing = groupsByContainer.get(container) || [];
     const previous = existing[existing.length - 1];
@@ -591,10 +574,16 @@ function openGroup(container) {
   const roleText = document.createElement('span');
   roleText.className = 'role-text';
   const usageMetaText = document.createElement('span');
-  usageMetaText.className = 'usage-meta';
-  const hintText = document.createElement('span');
-  hintText.className = 'expand-hint';
-  roleRow.append(roleText, usageMetaText, hintText);
+  // group-usage-meta (in addition to the plain .usage-meta every other row
+  // type uses) carries the margin-left: auto that pins this whole trailing
+  // cluster - cost/tokens then fired-at time, in that order - to the row's
+  // right edge as one unit; .group-time deliberately has no margin of its
+  // own so it just sits adjacent to usageMetaText instead of each fighting
+  // over the same auto-margin space.
+  usageMetaText.className = 'usage-meta group-usage-meta';
+  const timeText = document.createElement('span');
+  timeText.className = 'group-time';
+  roleRow.append(roleText, usageMetaText, timeText);
   const inner = document.createElement('div');
   inner.className = 'group-body';
   wrap.append(roleRow, inner);
@@ -610,10 +599,10 @@ function openGroup(container) {
   // figure (addToolCallToGroup below), and counting it once per block would
   // inflate the sum by however many tool calls that single API call made.
   const group = {
-    wrap, inner, roleText, usageMetaText, hintText, toolNames: [], expanded: true,
+    wrap, inner, roleText, usageMetaText, timeText, toolNames: [], expanded: true,
     usage: { costUsd: 0, inputTokens: 0, outputTokens: 0 },
     countedUsageInfos: new Set(),
-    container, seq: nextHintSeq++,
+    container, firedAtMs, // when the run started - set once at creation, never touched by later calls joining the same group
   };
   wrap.classList.add('expanded'); // groups open by default
   wrap.addEventListener('click', () => setGroupExpanded(group, !group.expanded));
@@ -632,9 +621,11 @@ function closeGroup(container) {
 // Opens (or reuses) the container's current group, records the tool call
 // (and its originating message's usage, if any - see openGroup's comment)
 // in its summary, and returns the DOM node its one-line row (appendToolCallRow)
-// should render into (instead of the top-level container).
-function addToolCallToGroup(container, name, usageInfo) {
-  const group = getOrOpenGroup(container);
+// should render into (instead of the top-level container). firedAtMs only
+// takes effect the moment a *new* group is opened (openGroup's own default
+// param) - joining an already-open group never overwrites its start time.
+function addToolCallToGroup(container, name, usageInfo, firedAtMs) {
+  const group = getOrOpenGroup(container, firedAtMs);
   group.toolNames.push(name);
   if (usageInfo && !group.countedUsageInfos.has(usageInfo)) {
     group.countedUsageInfos.add(usageInfo);
@@ -666,43 +657,22 @@ function renderGroupSummary(group) {
   // "nothing counted yet".
   const hasUsage = group.usage.costUsd > 0 || group.usage.inputTokens > 0 || group.usage.outputTokens > 0;
   group.usageMetaText.textContent = hasUsage ? formatUsageInline(group.usage) : '';
-  // Its own span (index.html's .expand-hint), not appended into roleText - lets it
-  // sit dim/small/right-aligned regardless of roleText's own hover/expanded
-  // color changes, and regardless of how long the tool-name list runs.
-  // Collapsed case is provisional - updateCollapsedHints (called by every
-  // site that can change collapsed state) decides whether this group
-  // actually gets to keep that text or goes blank because a newer collapsed
-  // item took over. 'click to collapse' isn't deduped: normally only the
-  // one currently-open group shows it, so there's nothing to repeat.
-  group.hintText.textContent = group.expanded ? 'click to collapse' : 'click to expand';
+  // Its own span (index.html's .group-time), not appended into roleText -
+  // lets it sit dim/small/right-aligned regardless of roleText's own
+  // hover/expanded color changes, and regardless of how long the tool-name
+  // list runs. Replaces the old "click to expand"/"click to collapse" hint
+  // text (the row's still just as clickable, it just no longer says so) -
+  // when the group started is more useful at a glance than a reminder of an
+  // interaction most users find on their own. Always shown, expanded or
+  // not, unlike the old hint's collapsed-only dedup logic - there's nothing
+  // to dedup, every group has its own distinct start time.
+  group.timeText.textContent = group.firedAtMs != null ? formatClock(group.firedAtMs) : '';
 }
 
 function setGroupExpanded(group, expanded) {
   group.expanded = expanded;
-  // Re-stamp on manual re-collapse (not just at creation) so re-collapsing an
-  // old group correctly reclaims the hint from whatever's currently showing
-  // it - "most recently collapsed", not just "most recently created".
-  if (!expanded) group.seq = nextHintSeq++;
   group.wrap.classList.toggle('expanded', expanded);
-  renderGroupSummary(group); // updates the "click to collapse" / "click to expand" hint
-  updateCollapsedHints(group.container);
-}
-
-// Only the single most-recently-collapsed group across the whole container
-// gets to show "click to expand" - a stream with several collapsed groups
-// used to repeat that exact caption once per group, which reads as noise
-// once there are more than one or two. Every other collapsed group still
-// collapses/expands exactly the same way, it just renders blank where the
-// hint used to be. Recomputed from scratch (not tracked incrementally) on
-// every create/expand/collapse, so toggling any one group correctly hands
-// the hint off to whichever remains newest.
-function updateCollapsedHints(container) {
-  const groups = (groupsByContainer.get(container) || []).filter((g) => !g.expanded);
-  let winner = null;
-  for (const group of groups) {
-    if (!winner || group.seq > winner.seq) winner = group;
-  }
-  groups.forEach((g) => { g.hintText.textContent = g === winner ? 'click to expand' : ''; });
+  renderGroupSummary(group);
 }
 
 // Plain string -> textContent, same as before. { lines } (diff output from
@@ -715,7 +685,7 @@ function updateCollapsedHints(container) {
 // interaction that used this is gone), kept because renderBody is exported
 // and reused as a generic content renderer (detail-pane.js's Payload/Result
 // tabs) where a future caller passing a hint should still work correctly.
-export function renderBody(body, content, hint = null) {
+export function renderBody(body, content, hint = null, markdown = false) {
   if (content && typeof content === 'object' && Array.isArray(content.lines)) {
     body.className = 'body';
     body.textContent = '';
@@ -725,6 +695,18 @@ export function renderBody(body, content, hint = null) {
       if (line.cls) div.className = line.cls;
       body.append(div);
     }
+    return;
+  }
+  // Markdown path - only ever passed true for Claude's own reply text (see
+  // appendBlock's caller in renderAssistant). Ignores `hint`: nothing calls
+  // this with both today (see renderBody's own module comment on `hint`
+  // being otherwise unreachable), and mixing the two would need the
+  // markdown fragment squeezed into .body-content's flex row instead of
+  // owning the whole body element.
+  if (markdown && typeof content === 'string') {
+    body.className = 'body markdown-body';
+    body.textContent = '';
+    body.append(renderMarkdown(content));
     return;
   }
   if (hint) {
@@ -748,7 +730,7 @@ export function renderBody(body, content, hint = null) {
 // node instead. `container` always stays the scroll-position/registry
 // reference regardless of where the block physically lands, since `parent`
 // is always a descendant of it.
-function appendBlock(container, cls, roleLabel, text, actions = [], parent = container, hint = null, meta = null, timestampMs = null) {
+function appendBlock(container, cls, roleLabel, text, actions = [], parent = container, hint = null, meta = null, timestampMs = null, markdown = false) {
   const wasAtBottom = isScrolledToBottom(container);
 
   const wrap = document.createElement('div');
@@ -790,7 +772,7 @@ function appendBlock(container, cls, roleLabel, text, actions = [], parent = con
 
   const body = document.createElement('div');
   body.className = 'body';
-  renderBody(body, text, hint);
+  renderBody(body, text, hint, markdown);
 
   wrap.append(roleRow, body);
   parent.append(wrap);

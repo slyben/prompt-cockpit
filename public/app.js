@@ -1879,8 +1879,34 @@ function setState(state) {
   if (document.hidden && previousState === 'running' && state === 'idle') {
     tabChrome.setNeedsAttention(true);
   }
+  // Prompt suggestion (compose.js): computed once per completed turn, same
+  // running->idle edge as the tab-attention ping above, not on every 'idle'
+  // (would just be recomputing from the same last reply on states that were
+  // never running - e.g. the initial idle right after connect, where
+  // there's no assistant reply yet to suggest from anyway).
+  if (previousState === 'running' && state === 'idle') {
+    compose.setSuggestion(computePromptSuggestion());
+  } else if (state === 'running') {
+    compose.clearSuggestion(); // stale the moment a new turn starts, whether it came from accepting the suggestion or typing something else
+  }
   previousState = state;
   tabChrome.setState(state);
+}
+
+// Heuristic source for the prompt-suggestion ghost text: the last assistant
+// reply's first open checklist item (`- [ ] ...`), if it wrote one - mirrors
+// how the DeepSeek/Claude Code screenshot this was modeled on showed a
+// "Your move:" list and suggested its first item. Reads the DOM, same as
+// copyLastBtn above and for the same reason (stream-view.js keeps no
+// separate client-side message array - the DOM is the one place already
+// correct across every ingestion path). No open checkbox in the reply ->
+// null -> compose.js just falls back to its default placeholder text.
+function computePromptSuggestion() {
+  const replies = streamEl.querySelectorAll('.msg.assistant .body');
+  const last = replies[replies.length - 1];
+  if (!last) return null;
+  const match = (last.textContent || '').match(/^\s*[-*]\s*\[ \]\s*(.+)$/m);
+  return match ? match[1].trim() : null;
 }
 
 // Reconnect-on-reload (MVP3): if this browser tab already had a live

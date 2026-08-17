@@ -728,6 +728,7 @@
   }
   .detail-pane-placeholder { color: var(--muted); padding: 12px 0; }
   .detail-pane-note { color: var(--muted); opacity: 0.75; font-size: 11px; margin-top: 4px; white-space: normal; }
+  .detail-pane-section-label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 2px; }
   /* Trajectory-style fixed one-line tool-call row (replaces the old
      click-to-expand collapsible block for tool calls/results - see
      stream-view.js's appendToolCallRow/updateToolCallRow). No wrapping: only
@@ -843,39 +844,46 @@
      (and pre-wrap still lets it wrap) if a long preview and the hint
      can't both fit on one line. */
   .msg .body.with-hint .body-content { flex: 0 1 auto; min-width: 0; white-space: pre-wrap; word-break: break-word; }
-  /* Overrides .expand-hint's own margin-left: auto (which pins the
-     group-summary row's hint to the far right, which stays as-is) - here
-     it would undo the flex: 0 1 auto above by pulling the hint back out
-     to the edge. */
+  /* Overrides .expand-hint's own margin-left: auto - here it would undo the
+     flex: 0 1 auto above by pulling the hint back out to the edge. */
   .msg .body.with-hint .expand-hint { margin-left: 0; }
   /* group summary's own text (stream-view.js's openGroup) - flex-grow: 0
-     so it sits at its own content width with the cost (.usage-meta)
-     immediately after it on the left, instead of stretching to shove the
-     cost out to the right edge next to .expand-hint. Still flex-shrink: 1
-     and ellipsizes under pressure, so a long chain of tool names (e.g.
-     "Edit → Edit → TaskUpdate → ...") can't push .expand-hint off the
-     right edge of the row and force the whole stream to scroll
-     horizontally. */
+     so it sits at its own content width on the left, instead of stretching
+     to shove the trailing $/in/out/time cluster (.group-usage-meta +
+     .group-time) off the row. Still flex-shrink: 1 and ellipsizes under
+     pressure, so a long chain of tool names (e.g. "Edit → Edit →
+     TaskUpdate → ...") can't push that cluster off the right edge of the
+     row and force the whole stream to scroll horizontally. */
   .msg .role .role-text { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  /* Shared by both spots a "click to expand"/"click to collapse" hint can
-     appear (a group's role row, or a content-with-hint body row) - dim and
-     small always, regardless of the row's own hover/expanded color (an
-     element's own `color` wins over an inherited one no matter which rule
-     is more specific), and never wraps onto a second line.
+  /* Dim/small/right-pinned/no-wrap treatment shared by .expand-hint
+     (renderBody's exported hint param - currently unreachable, see the
+     comment above) and .group-time (a group row's wall-clock "fired at"
+     time, stream-view.js's openGroup - replaced the old "click to
+     expand"/"click to collapse" hint text there 2026-08-18: more useful at
+     a glance, and the row's still just as clickable without saying so).
      Deliberately its own class, NOT .hint - .hint is already taken by the
      settings modal's circular "?" tooltip icon (width/height/border-radius/
      display:inline-flex above), and same-specificity same-name rules don't
      fully override each other: the icon's box-shape properties were
      leaking through and squeezing this text into an invisible 15px circle,
      which is what caused it to visually overlap the cost text next to it. */
-  .expand-hint {
+  .expand-hint, .group-time {
     flex: none;
-    margin-left: auto; /* pins it to the row's right edge - .role-text/.usage-meta sit together on the left instead of being pushed apart */
     color: var(--muted);
     opacity: 0.6;
     font-size: 10.5px;
     white-space: nowrap;
   }
+  .expand-hint { margin-left: auto; } /* the only trailing element on its row - pins itself to the right edge */
+  /* .group-usage-meta (not .group-time) carries the auto margin - it's the
+     one that gets pushed to the right edge, and .group-time just sits
+     immediately after it in source order (a small fixed gap, not another
+     auto margin - two auto-margins on the same row would each grab space
+     independently and end up spread apart instead of sitting together), so
+     the pair reads as one right-justified "$0.02, 2 in, 5 out  3:41 PM"
+     cluster. */
+  .group-usage-meta { margin-left: auto; }
+  .group-time { margin-left: 8px; }
   .msg.user .body { background: #22314f; border-color: #2f4670; }
   .msg.tool .body { font-family: ui-monospace, monospace; font-size: 12.5px; }
   .msg.system .body { color: var(--muted); font-size: 12px; padding: 2px 10px; }
@@ -897,6 +905,54 @@
      color so the transcript is scannable at a glance instead of one shade
      of gray for everything but errors. */
   .msg.assistant .role { color: #d97757; } /* Anthropic orange, "claude" */
+
+  /* Markdown-rendered assistant reply (markdown.js) - .body's own
+     white-space: pre-wrap (above) is undone here since block elements
+     (p/ul/ol/blockquote/pre) now own their own spacing instead of relying
+     on preserved newlines; without this every blank line in the source
+     doubles up with each element's own margin. */
+  .msg.assistant .body.markdown-body { white-space: normal; }
+  .markdown-body > *:first-child { margin-top: 0; }
+  .markdown-body > *:last-child { margin-bottom: 0; }
+  .markdown-body p { margin: 0 0 8px; white-space: pre-wrap; }
+  .markdown-body h1, .markdown-body h2, .markdown-body h3,
+  .markdown-body h4, .markdown-body h5, .markdown-body h6 {
+    margin: 14px 0 6px;
+    line-height: 1.3;
+    color: var(--text);
+  }
+  .markdown-body h1 { font-size: 1.35em; }
+  .markdown-body h2 { font-size: 1.2em; }
+  .markdown-body h3 { font-size: 1.08em; }
+  .markdown-body h4, .markdown-body h5, .markdown-body h6 { font-size: 1em; }
+  .markdown-body ul, .markdown-body ol { margin: 0 0 8px; padding-left: 22px; }
+  .markdown-body li { margin: 2px 0; }
+  .markdown-body li > p { margin: 0; display: inline; }
+  .markdown-body blockquote {
+    margin: 0 0 8px;
+    padding: 2px 10px;
+    border-left: 3px solid var(--border);
+    color: var(--muted);
+  }
+  .markdown-body hr { border: none; border-top: 1px solid var(--border); margin: 10px 0; }
+  .markdown-body code {
+    font-family: ui-monospace, monospace;
+    font-size: 0.92em;
+    background: rgba(255,255,255,0.08);
+    border-radius: 3px;
+    padding: 1px 4px;
+  }
+  .markdown-body pre {
+    margin: 0 0 8px;
+    padding: 8px 10px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    overflow-x: auto;
+  }
+  .markdown-body pre code { background: none; padding: 0; font-size: 12.5px; white-space: pre; }
+  .markdown-body a { color: var(--accent); text-decoration: none; }
+  .markdown-body a:hover { text-decoration: underline; }
   .msg.user .role { color: var(--accent); } /* "you" */
   .msg.tool[data-tool-kind="read"] .role { color: #56c2d6; }
   .msg.tool[data-tool-kind="edit"] .role { color: var(--ok); }
