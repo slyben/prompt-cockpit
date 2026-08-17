@@ -115,6 +115,22 @@ export function initTurnChart({ panel, svg, metricSelect, scrollContainer, exclu
   let hasDragged = false;
   const CLICK_MOVE_THRESHOLD = 3; // px of mouse movement before a mousedown/mouseup pair stops counting as a click
 
+  // Every scrollToFrac() call below is immediately followed by its own
+  // updateSlider() rather than leaning on scrollContainer's 'scroll'
+  // listener (above) to eventually catch up. Two real bugs otherwise: (1) a
+  // plain click (mousedown+mouseup, no movement) on the slider track used to
+  // do nothing at all - scrollToFrac only ever ran inside the mousemove
+  // handler, never on mousedown itself, unlike the bars below. (2) during an
+  // actual fast drag, the browser throttles/coalesces native 'scroll' events
+  // to roughly one per animation frame, which can visibly lag behind a burst
+  // of mousemove events - the transcript (scrolled by the browser's own
+  // machinery, not this code) keeps pace with the mouse while the thumb
+  // appears frozen mid-drag and only catches up once movement settles. Bug
+  // report: "slider doesn't slide the graph, only the text scrolls."
+  // Calling updateSlider() synchronously here removes that dependency
+  // entirely - the scroll listener's own updateSlider() call is now
+  // redundant but harmless (e.g. still covers scroll-wheel/keyboard
+  // scrolling, which never goes through scrollToFrac).
   svg.addEventListener('mousedown', (e) => {
     dragging = true;
     dragOrigin = 'bars';
@@ -123,6 +139,7 @@ export function initTurnChart({ panel, svg, metricSelect, scrollContainer, exclu
     dragStartX = e.clientX;
     dragStartY = e.clientY;
     scrollToFrac(fracOf(svg, e));
+    updateSlider();
   });
   sliderTrack.addEventListener('mousedown', (e) => {
     dragging = true;
@@ -132,11 +149,14 @@ export function initTurnChart({ panel, svg, metricSelect, scrollContainer, exclu
     dragStartX = e.clientX;
     dragStartY = e.clientY;
     e.preventDefault(); // matches the old overlay rect's own preventDefault - stops text-selection drag artifacts
+    scrollToFrac(fracOf(sliderTrack, e));
+    updateSlider();
   });
   window.addEventListener('mousemove', (e) => {
     if (!dragging) return;
     if (Math.abs(e.clientX - dragStartX) > CLICK_MOVE_THRESHOLD || Math.abs(e.clientY - dragStartY) > CLICK_MOVE_THRESHOLD) hasDragged = true;
     scrollToFrac(fracOf(dragEl, e));
+    updateSlider();
   });
   window.addEventListener('mouseup', (e) => {
     if (dragging && dragOrigin === 'bars' && !hasDragged) selectFromEvent(e);

@@ -159,6 +159,46 @@ test('fileSuggestions skips an extra folder\'s walk when it is already inside cw
   }
 });
 
+test('fileSuggestions still walks an extra folder nested under an ignored dir name, since the cwd walk never actually visits it', async () => {
+  const root = await makeFixtureProject();
+  try {
+    // Path containment alone would call this "already inside cwd" and skip
+    // it, but the cwd walk prunes `build/` entirely (IGNORED_DIRS) - so
+    // without the fix this folder's own files never appear anywhere.
+    const artifactsDir = path.join(root, 'build', 'artifacts');
+    await mkdir(artifactsDir, { recursive: true });
+    await writeFile(path.join(artifactsDir, 'report.png'), 'x');
+
+    const results = await fileSuggestions(root, '', [{ id: 'artifacts', path: artifactsDir }]);
+    assert.ok(
+      results.some((r) => r.source === 'artifacts' && r.path.endsWith('report.png')),
+      'folder under an ignored dir name must still be walked, not silently skipped as "already covered"'
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('fileSuggestions does not mistake a folder whose name merely contains an ignored-dir substring for a pruned one', async () => {
+  const root = await makeFixtureProject();
+  try {
+    // "dist-notes" contains "dist" but is not the ignored dir itself -
+    // segment-based matching must not prune it.
+    const notesDir = path.join(root, 'src', 'dist-notes');
+    await mkdir(notesDir, { recursive: true });
+    await writeFile(path.join(notesDir, 'note.png'), 'x');
+
+    const results = await fileSuggestions(root, '', [{ id: 'notes', path: notesDir }]);
+    // Already covered by the cwd walk (src/dist-notes isn't pruned), so it
+    // should come back tagged 'cwd', not be double-walked under 'notes'.
+    const matches = results.filter((r) => r.path === path.join('src', 'dist-notes', 'note.png'));
+    assert.equal(matches.length, 1);
+    assert.equal(matches[0].source, 'cwd');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('workspaceDiff returns real `git diff` output for a modified tracked file', async () => {
   const root = await makeFixtureProject();
   try {

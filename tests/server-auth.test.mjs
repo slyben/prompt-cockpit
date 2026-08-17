@@ -506,6 +506,45 @@ test('POST /api/sessions/:id/auto-continue has already persisted to disk by the 
   }
 });
 
+// The generic 'a session-scoped route rejects a missing or wrong token'
+// test above only exercises /mode - it proves the shared checkToken() gate
+// in handleSessionRoute works, but every route added since (model/thinking/
+// mcp-toggle/mcp-reconnect/reload-plugins/plugin-enabled) was only ever
+// exercised with a valid token (backlog.md: no 401 coverage on these
+// specifically). Parametrized here rather than six near-identical tests,
+// since the thing being proven - "this route is behind the same gate" - is
+// identical for all six; a bad token never reaches the route's own body
+// parsing or registry call either way.
+const NEWER_ROUTES = [
+  { action: 'model', body: { model: 'claude-opus-4' } },
+  { action: 'thinking', body: { maxThinkingTokens: 1024 } },
+  { action: 'mcp-toggle', body: { name: 'example', enabled: false } },
+  { action: 'mcp-reconnect', body: { name: 'example' } },
+  { action: 'reload-plugins', body: {} },
+  { action: 'plugin-enabled', body: { pluginKey: 'formatter@anthropic-tools', enabled: true } },
+];
+
+for (const { action, body } of NEWER_ROUTES) {
+  test(`POST /api/sessions/:id/${action} rejects a missing or wrong token`, async () => {
+    registry._reset();
+    const row = registry.createSession({ cwd: '/tmp', startSessionImpl: fakeStartSession });
+
+    const noToken = await fetch(`${ORIGIN}/api/sessions/${row.id}/${action}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    assert.equal(noToken.status, 401);
+
+    const wrongToken = await fetch(`${ORIGIN}/api/sessions/${row.id}/${action}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: 'Bearer definitely-wrong' },
+      body: JSON.stringify(body),
+    });
+    assert.equal(wrongToken.status, 401);
+  });
+}
+
 function assertRejectedUpgrade(ws) {
   return new Promise((resolve, reject) => {
     ws.on('open', () => {

@@ -117,8 +117,13 @@ async function listWindowsDrives() {
 // Server-side directory browser for the launcher's "Browse" button. Regular
 // browsers don't expose real filesystem paths from a file picker (no pty,
 // no Electron here), so the client navigates by asking the server to list
-// subdirectories instead - same trust boundary as everything else in this
-// tool (loopback-only, token-gated).
+// subdirectories instead. NOT token-gated (server.js's /api/browse route
+// has no per-session token to check pre-launch) - protected only by the
+// Origin/Host spoof check applied to every request, which deliberately
+// allows a missing Origin (for curl). Any local process can enumerate the
+// filesystem this way, including other drives via DRIVES_SENTINEL. Low
+// severity for a local dev tool, but don't overstate the protection here -
+// see backlog.md if tightening this is ever prioritized.
 export async function listDirectory(dirPath) {
   if (dirPath === DRIVES_SENTINEL) {
     const drives = await listWindowsDrives();

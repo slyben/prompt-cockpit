@@ -182,8 +182,10 @@ async function handleRequest(req, res) {
     // "history pane... via getSessionMessages()") - no per-session token
     // like the live-session routes below, since there's no registry row to
     // hold one for a session this cockpit process never started. Same auth
-    // boundary as /api/resumable and /api/browse: Origin/Host, checked once
-    // for every request at the top of handleRequest.
+    // boundary as /api/resumable and /api/browse: Origin/Host only, checked
+    // once for every request at the top of handleRequest - not token-gated
+    // (see session-launcher.js's listDirectory comment for why that matters
+    // more for /api/browse, which can enumerate the whole filesystem).
     const cwd = url.searchParams.get('cwd') || process.cwd();
     const provider = url.searchParams.get('provider') === 'grok' ? 'grok' : 'claude';
     try {

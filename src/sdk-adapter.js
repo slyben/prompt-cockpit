@@ -107,9 +107,20 @@ export async function fileSuggestions(cwd, queryText, extraFolders) {
   for (const folder of folders) {
     if (!folder || !folder.path || !folder.id) continue;
     // Skip if already inside (or equal to) cwd - the walk above already
-    // covers that case and a second pass would just duplicate it.
+    // covers that case and a second pass would just duplicate it. But the
+    // cwd walk prunes dot-dirs and IGNORED_DIRS entirely (see walk() above),
+    // so a folder nested under one of those - e.g. `<cwd>/build/artifacts`
+    // or `<cwd>/.screenshots` - was never actually visited despite being
+    // "inside cwd" by plain path containment. Walk relToCwd's own segments
+    // (not folder.path's leaf name) so a folder that merely lives *next to*
+    // an ignored name, e.g. `<cwd>/src/dist-notes`, isn't wrongly treated as
+    // pruned just because "dist" is a substring.
     const relToCwd = path.relative(cwd, folder.path);
-    const alreadyCovered = !relToCwd.startsWith('..') && !path.isAbsolute(relToCwd);
+    const insideCwd = relToCwd === '' || (!relToCwd.startsWith('..') && !path.isAbsolute(relToCwd));
+    const prunedByCwdWalk = insideCwd && relToCwd
+      .split(path.sep)
+      .some((segment) => segment.startsWith('.') || IGNORED_DIRS.has(segment));
+    const alreadyCovered = insideCwd && !prunedByCwdWalk;
     if (alreadyCovered) continue;
     const folderResults = await listFlatFolderNewestFirst(
       folder.path,
