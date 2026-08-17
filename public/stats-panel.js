@@ -72,16 +72,17 @@ export function initStatsPanel({ el }) {
   }
 
   // Same shape as ~/.claude/statusline-command.py's context segment: a
-  // 10-cell `[####------] 38K/200K` bar, colored by *remaining* room (green
-  // >50% left, yellow 20-50%, red <20%) rather than a bare percentage - the
-  // point of the reference tool's version is that the bar shape reads at a
-  // glance without parsing the number at all.
+  // 10-cell `[####------] 38K/200K` bar, colored relative to
+  // context.autoCompact.warnPercent (src/context-usage.js - the SDK's real
+  // auto-compact threshold when confirmed plausible, else the same 80%
+  // this used to hardcode as `remaining < 20`). Yellow starts 30 points
+  // before red, preserving the original 50/80 relationship when warn===80.
   function contextBar(context) {
     const pct = context.percentage || 0;
-    const remaining = 100 - pct;
+    const warnPercent = context.autoCompact?.warnPercent ?? 80;
     const filled = Math.min(10, Math.max(0, Math.round(pct / 10)));
     const bar = '[' + '#'.repeat(filled) + '-'.repeat(10 - filled) + ']';
-    const colorClass = remaining < 20 ? 'ctx-red' : remaining < 50 ? 'ctx-yellow' : 'ctx-green';
+    const colorClass = pct >= warnPercent ? 'ctx-red' : pct >= warnPercent - 30 ? 'ctx-yellow' : 'ctx-green';
     const used = fmtTokWhole(context.totalTokens || 0);
     const total = fmtTokWhole(context.maxTokens || 0);
     return `<span class="${colorClass}" title="Context window used">${bar} ${used}/${total}</span>`;

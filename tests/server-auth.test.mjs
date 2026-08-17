@@ -12,6 +12,7 @@ import path from 'node:path';
 import * as registry from '../src/session-registry.js';
 import { setSessionDefaults } from '../src/session-defaults.js';
 import { settingsPath } from '../src/settings-file.js';
+import { readAllowRules, addAllowRule } from '../src/permission-rules.js';
 
 process.env.PORT = process.env.PORT || '4319';
 const { server, PORT, HOST, seedSessionDefaults } = await import('../src/server.js');
@@ -46,7 +47,17 @@ function fakeStartSession() {
     interrupt: async () => { lastInterruptCalled = true; },
     setMode: async (m) => m,
     getMode: () => 'default',
-    resolveApproval: () => false,
+    // Mirrors session.js's real resolveApproval shape closely enough for
+    // route-level tests: `requestId: 'unknown-request-id'` simulates a
+    // stale/already-resolved request (the one case a fixed toolName can't
+    // represent), everything else "succeeds" against a fake 'Bash' tool
+    // call so the approval-decision route's alwaysAllow persistence logic
+    // (server.js) has something real to react to.
+    resolveApproval: (requestId, decision) => {
+      if (requestId === 'unknown-request-id') return false;
+      const scope = decision?.alwaysAllow === true ? 'session' : (decision?.alwaysAllow || null);
+      return { resolved: true, toolName: 'Bash', scope };
+    },
     query: {
       setModel: async () => {},
       setEffort: async () => {},
@@ -79,6 +90,16 @@ test('GET /api/resumable returns an array without needing auth (loopback-only, n
   const res = await fetch(`${ORIGIN}/api/resumable`);
   assert.equal(res.status, 200);
   assert.ok(Array.isArray(await res.json()));
+});
+
+test('GET /api/history/:sessionId/markdown on an unknown session id returns an empty-transcript markdown, not an error (same graceful-empty behavior as the underlying SDK read), no auth required (same boundary as /api/history)', async () => {
+  const sessionId = 'definitely-not-a-real-session-id';
+  const res = await fetch(`${ORIGIN}/api/history/${sessionId}/markdown?cwd=/tmp`);
+  assert.equal(res.status, 200);
+  assert.match(res.headers.get('content-type'), /^text\/markdown/);
+  assert.match(res.headers.get('content-disposition'), new RegExp(`attachment; filename="session-${sessionId}\\.md"`));
+  const body = await res.text();
+  assert.match(body, new RegExp(`^# Session transcript - ${sessionId}`));
 });
 
 test('POST /api/sessions rejects a cwd that is not a directory', async () => {
@@ -227,6 +248,159 @@ test('POST /api/sessions/:id/model sets the model and returns it', async () => {
   });
   assert.equal(res.status, 200);
   assert.deepEqual(await res.json(), { model: 'claude-opus-4' });
+});
+
+test('POST /api/sessions/:id/title returns 409 when the session has no claude session id yet', async () => {
+  registry._reset();
+  const row = registry.createSession({ cwd: '/tmp', startSessionImpl: fakeStartSession }); // no `resume` -> claudeSessionId stays null
+  const res = await fetch(`${ORIGIN}/api/sessions/${row.id}/title`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${row.token}` },
+    body: JSON.stringify({ title: 'too early' }),
+  });
+  assert.equal(res.status, 409);
+});
+
+test('POST /api/sessions/:id/title sets the live name and persists it to settings.local.json, once claudeSessionId is known', async () => {
+  registry._reset();
+  const cwd = await makeTmpCwd();
+  try {
+    const row = registry.createSession({ cwd, resume: 'transcript-session-1', startSessionImpl: fakeStartSession });
+    const res = await fetch(`${ORIGIN}/api/sessions/${row.id}/title`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${row.token}` },
+      body: JSON.stringify({ title: 'My renamed session' }),
+    });
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), { title: 'My renamed session' });
+    assert.equal(registry.get(row.id).name, 'My renamed session');
+    const onDisk = JSON.parse(await readFile(settingsPath(cwd), 'utf-8'));
+    assert.equal(onDisk.sessionTitles['transcript-session-1'].title, 'My renamed session');
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test('POST /api/session-title rejects an invalid cwd, and persists a title for a past session (no live registry row) otherwise', async () => {
+  const invalid = await fetch(`${ORIGIN}/api/session-title`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ cwd: '/definitely/not/a/real/directory', sessionId: 'abc', title: 'x' }),
+  });
+  assert.equal(invalid.status, 400);
+
+  const cwd = await makeTmpCwd();
+  try {
+    const res = await fetch(`${ORIGIN}/api/session-title`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ cwd, sessionId: 'past-session-1', title: 'a past session title' }),
+    });
+    assert.equal(res.status, 200);
+    const onDisk = JSON.parse(await readFile(settingsPath(cwd), 'utf-8'));
+    assert.equal(onDisk.sessionTitles['past-session-1'].title, 'a past session title');
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test('GET/DELETE /api/sessions/:id/permissions reject a missing or wrong token', async () => {
+  registry._reset();
+  const row = registry.createSession({ cwd: '/tmp', startSessionImpl: fakeStartSession });
+
+  const getNoToken = await fetch(`${ORIGIN}/api/sessions/${row.id}/permissions`);
+  assert.equal(getNoToken.status, 401);
+
+  const deleteWrongToken = await fetch(`${ORIGIN}/api/sessions/${row.id}/permissions`, {
+    method: 'DELETE',
+    headers: { 'content-type': 'application/json', authorization: 'Bearer definitely-wrong' },
+    body: JSON.stringify({ rule: 'Bash' }),
+  });
+  assert.equal(deleteWrongToken.status, 401);
+});
+
+test('GET /api/sessions/:id/permissions returns the persisted allow list, DELETE removes a rule', async () => {
+  registry._reset();
+  const cwd = await makeTmpCwd();
+  try {
+    const row = registry.createSession({ cwd, startSessionImpl: fakeStartSession });
+    const auth = { 'content-type': 'application/json', authorization: `Bearer ${row.token}` };
+
+    await addAllowRule(cwd, 'Bash');
+    await addAllowRule(cwd, 'Read');
+
+    const listRes = await fetch(`${ORIGIN}/api/sessions/${row.id}/permissions`, { headers: auth });
+    assert.equal(listRes.status, 200);
+    assert.deepEqual((await listRes.json()).allow.sort(), ['Bash', 'Read']);
+
+    const deleteRes = await fetch(`${ORIGIN}/api/sessions/${row.id}/permissions`, {
+      method: 'DELETE',
+      headers: auth,
+      body: JSON.stringify({ rule: 'Bash' }),
+    });
+    assert.equal(deleteRes.status, 200);
+    assert.deepEqual((await deleteRes.json()).allow, ['Read']);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test('POST /api/sessions/:id/approval-decision rejects an invalid alwaysAllow value', async () => {
+  registry._reset();
+  const row = registry.createSession({ cwd: '/tmp', startSessionImpl: fakeStartSession });
+  const res = await fetch(`${ORIGIN}/api/sessions/${row.id}/approval-decision`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${row.token}` },
+    body: JSON.stringify({ requestId: 'x', decision: 'allow', alwaysAllow: 'forever' }),
+  });
+  assert.equal(res.status, 400);
+});
+
+test('POST /api/sessions/:id/approval-decision on an unknown requestId returns 404', async () => {
+  registry._reset();
+  const row = registry.createSession({ cwd: '/tmp', startSessionImpl: fakeStartSession });
+  const res = await fetch(`${ORIGIN}/api/sessions/${row.id}/approval-decision`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${row.token}` },
+    body: JSON.stringify({ requestId: 'unknown-request-id', decision: 'allow' }),
+  });
+  assert.equal(res.status, 404);
+  assert.deepEqual(await res.json(), { resolved: false });
+});
+
+test('POST /api/sessions/:id/approval-decision with alwaysAllow: "project" persists a rule to settings.local.json', async () => {
+  registry._reset();
+  const cwd = await makeTmpCwd();
+  try {
+    const row = registry.createSession({ cwd, startSessionImpl: fakeStartSession });
+    const res = await fetch(`${ORIGIN}/api/sessions/${row.id}/approval-decision`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${row.token}` },
+      body: JSON.stringify({ requestId: 'req-1', decision: 'allow', alwaysAllow: 'project' }),
+    });
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), { resolved: true });
+    assert.deepEqual(await readAllowRules(cwd), ['Bash']); // the fake resolveApproval always reports toolName: 'Bash'
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test('POST /api/sessions/:id/approval-decision with alwaysAllow: "session" does not persist anything', async () => {
+  registry._reset();
+  const cwd = await makeTmpCwd();
+  try {
+    const row = registry.createSession({ cwd, startSessionImpl: fakeStartSession });
+    const res = await fetch(`${ORIGIN}/api/sessions/${row.id}/approval-decision`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${row.token}` },
+      body: JSON.stringify({ requestId: 'req-1', decision: 'allow', alwaysAllow: 'session' }),
+    });
+    assert.equal(res.status, 200);
+    assert.deepEqual(await readAllowRules(cwd), []);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
 });
 
 test('POST /api/sessions/:id/thinking accepts a valid budget/display and rejects invalid ones', async () => {
@@ -522,6 +696,8 @@ const NEWER_ROUTES = [
   { action: 'mcp-reconnect', body: { name: 'example' } },
   { action: 'reload-plugins', body: {} },
   { action: 'plugin-enabled', body: { pluginKey: 'formatter@anthropic-tools', enabled: true } },
+  { action: 'title', body: { title: 'My renamed session' } },
+  { action: 'approval-decision', body: { requestId: 'x', decision: 'allow' } },
 ];
 
 for (const { action, body } of NEWER_ROUTES) {

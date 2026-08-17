@@ -120,13 +120,15 @@ export function startSession({ cwd, resume, model, permissionMode, turnIndexOffs
   const inputQueue = createInputQueue();
   let currentMode = permissionMode || 'default';
   const pendingApprovals = new Map(); // requestId -> { resolve(PermissionResult), toolName }
-  // Permission "always allow this pattern" (backlog.md), scoped to the
-  // smallest durable version: per-tool-name, in-memory, for the rest of
-  // THIS session only - no persistence to settings.local.json's real
-  // `permissions` block and no input/cwd pattern matching, both flagged in
-  // the backlog as needing their own design call this doesn't attempt.
-  // Checked in canUseTool right alongside AUTO_ALLOW_MODES below; populated
-  // only by resolveApproval() when a decision's `alwaysAllow` flag is set.
+  // Permission "always allow this tool" (backlog.md), per-tool-name only
+  // (no input/cwd pattern matching - still flagged as needing its own
+  // design call, unattempted here). Two scopes share this same in-memory
+  // set so *this* session gets the immediate effect either way: 'session'
+  // lives only as long as this process does; 'project' additionally gets
+  // persisted to settings.local.json's `permissions.allow` by server.js
+  // (src/permission-rules.js) once resolveApproval() reports which scope
+  // was chosen - cwd-scoping for free, since that file is already one per
+  // project. Checked in canUseTool right alongside AUTO_ALLOW_MODES below.
   const alwaysAllowTools = new Set();
   // Real pushInput() calls only - the priming sentinel below bypasses this.
   // Seeded with `turnIndexOffset` (the registry counts real user turns
@@ -372,20 +374,28 @@ export function startSession({ cwd, resume, model, permissionMode, turnIndexOffs
   // `decision` is a PermissionResult plus an optional cockpit-only
   // `alwaysAllow` flag (server.js's /approval-decision route): {behavior:
   // 'allow', updatedInput?, alwaysAllow?} or {behavior:'deny', message?}.
-  // Returns false if the request already resolved or never existed (stale
-  // UI, double-click).
+  // `alwaysAllow` is a scope string, `'session'` or `'project'` - `true` is
+  // also accepted and coerced to `'session'` for compatibility with the
+  // plain-boolean version this replaces. Either scope takes effect in this
+  // session's own alwaysAllowTools immediately; `'project'` additionally
+  // tells the caller (via the returned `scope`) to persist it, since this
+  // module has no filesystem knowledge of its own (session-registry.js's
+  // boundary - see permission-rules.js).
+  // Returns `{ resolved: true, toolName, scope }` normally, or `false` if
+  // the request already resolved or never existed (stale UI, double-click).
   function resolveApproval(requestId, decision) {
     const entry = pendingApprovals.get(requestId);
     if (!entry) return false;
     pendingApprovals.delete(requestId);
-    if (decision?.alwaysAllow && decision.behavior === 'allow') {
+    const scope = decision?.alwaysAllow === true ? 'session' : decision?.alwaysAllow;
+    if ((scope === 'session' || scope === 'project') && decision.behavior === 'allow') {
       alwaysAllowTools.add(entry.toolName);
     }
     // Stripped before it reaches the SDK - alwaysAllow is cockpit-only
     // bookkeeping, not part of the real PermissionResult shape.
     const { alwaysAllow, ...sdkDecision } = decision || {};
     entry.resolve(sdkDecision);
-    return true;
+    return { resolved: true, toolName: entry.toolName, scope: scope || null };
   }
 
   return {

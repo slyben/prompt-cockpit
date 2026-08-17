@@ -42,6 +42,13 @@ export function setAutoCollapsePreviousGroup(enabled) {
   autoCollapsePreviousGroup = enabled;
 }
 
+// "3:41 PM" for the role row; the full date/time lives in the span's title
+// tooltip (appendBlock) - same split app.js's formatRelativeTime uses for
+// the resume list.
+function formatClock(ms) {
+  return new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
 const SILENT_SYSTEM_SUBTYPES = new Set([
   'hook_started',
   'hook_response',
@@ -157,18 +164,29 @@ export function prependHistory(container, messages, options = {}) {
   updateCollapsedHints(container); // finalize hint ownership now that everything's merged in true document order
 }
 
-export function renderMessage(container, message, { onRewindClick, hasFileCheckpointing = true, turnIndexUnreliable = false, turnPointIndex = null, assistantLabel = 'Claude', rewindLabel } = {}) {
+// receivedAtMs: the cockpit's own receive-time (Date.now() at the moment
+// app.js got this message over the websocket), used whenever the SDK's own
+// message.timestamp is absent (older emitters, or the Grok provider, which
+// has no timestamp field at all - see src/grok-messages.js). The SDK's own
+// field is "for display only, do not order messages by this field" per its
+// doc comment, which is exactly the use made of it here. history-pane.js
+// passes no receivedAtMs, so a transcript with no recorded timestamp simply
+// shows none rather than a fabricated "just now".
+export function renderMessage(container, message, { onRewindClick, hasFileCheckpointing = true, turnIndexUnreliable = false, turnPointIndex = null, assistantLabel = 'Claude', rewindLabel, receivedAtMs = null } = {}) {
   if (!collapsibleBlocksByContainer.has(container)) resetStreamView(container);
+
+  const parsed = message.timestamp ? Date.parse(message.timestamp) : NaN;
+  const timestampMs = Number.isFinite(parsed) ? parsed : receivedAtMs;
 
   switch (message.type) {
     case 'system':
-      return renderSystem(container, message);
+      return renderSystem(container, message, timestampMs);
     case 'assistant':
-      return renderAssistant(container, message, turnPointIndex, assistantLabel);
+      return renderAssistant(container, message, turnPointIndex, assistantLabel, timestampMs);
     case 'user':
-      return renderUser(container, message, turnIndexUnreliable ? null : onRewindClick, hasFileCheckpointing, rewindLabel);
+      return renderUser(container, message, turnIndexUnreliable ? null : onRewindClick, hasFileCheckpointing, rewindLabel, timestampMs);
     case 'result':
-      return renderResult(container, message);
+      return renderResult(container, message, timestampMs);
     case 'rate_limit_event':
       return; // noise - not actionable per-turn
     default:
@@ -176,26 +194,26 @@ export function renderMessage(container, message, { onRewindClick, hasFileCheckp
   }
 }
 
-function renderSystem(container, message) {
+function renderSystem(container, message, timestampMs = null) {
   if (SILENT_SYSTEM_SUBTYPES.has(message.subtype)) return;
 
   if (message.subtype === 'init') {
     if (seenInitByContainer.get(container)) return; // priming sentinel causes a harmless second init
     seenInitByContainer.set(container, true);
     closeGroup(container);
-    appendBlock(container, 'system', 'Session', `model: ${message.model}  ·  cwd: ${message.cwd}  ·  mode: ${message.permissionMode}`);
+    appendBlock(container, 'system', 'Session', `model: ${message.model}  ·  cwd: ${message.cwd}  ·  mode: ${message.permissionMode}`, [], {}, container, null, null, timestampMs);
     return;
   }
 
   if (message.subtype === 'permission_denied') {
     closeGroup(container); // a denial interrupts whatever tool run was in progress
-    appendBlock(container, 'error', `${message.tool_name} Denied`, message.decision_reason || message.message || 'permission denied');
+    appendBlock(container, 'error', `${message.tool_name} Denied`, message.decision_reason || message.message || 'permission denied', [], {}, container, null, null, timestampMs);
     return;
   }
   // other system subtypes: silent by default, see module comment
 }
 
-function renderAssistant(container, message, turnPointIndex = null, assistantLabel = 'Claude') {
+function renderAssistant(container, message, turnPointIndex = null, assistantLabel = 'Claude', timestampMs = null) {
   const blocks = message.message && message.message.content;
   if (!Array.isArray(blocks)) return;
   // One API call produced every block below - the SDK doesn't sub-divide
@@ -207,7 +225,7 @@ function renderAssistant(container, message, turnPointIndex = null, assistantLab
   for (const block of blocks) {
     if (block.type === 'text') {
       closeGroup(container); // real reply - whatever tool run preceded it is done
-      const wrap = appendBlock(container, 'assistant', assistantLabel, block.text, [], {}, container, null, usage); // the actual reply - never collapsed
+      const wrap = appendBlock(container, 'assistant', assistantLabel, block.text, [], {}, container, null, usage, timestampMs); // the actual reply - never collapsed
       // Text-only turns (no tool_use blocks) otherwise never get tagged, so
       // clicking their bar in turn-chart.js just clears whatever highlight
       // was showing and does nothing (B7) - tag this one too. It's not
@@ -345,7 +363,7 @@ function summarizeToolInput(name, input) {
   return `${name}(${key}: ${JSON.stringify(truncated)})`;
 }
 
-function renderUser(container, message, onRewindClick, hasFileCheckpointing, rewindLabel) {
+function renderUser(container, message, onRewindClick, hasFileCheckpointing, rewindLabel, timestampMs = null) {
   const content = message.message && message.message.content;
   if (message.isSynthetic) return; // priming sentinel, not a real turn
 
@@ -366,7 +384,7 @@ function renderUser(container, message, onRewindClick, hasFileCheckpointing, rew
     const actions = onRewindClick && message.turnIndex
       ? [{ label, onClick: () => onRewindClick(message.turnIndex) }]
       : [];
-    appendBlock(container, 'user', 'You', content, actions);
+    appendBlock(container, 'user', 'You', content, actions, {}, container, null, null, timestampMs);
     return;
   }
   if (Array.isArray(content)) {
@@ -378,7 +396,7 @@ function renderUser(container, message, onRewindClick, hasFileCheckpointing, rew
         appendCollapsibleBlock(container, 'tool', 'Tool: Result', flattenToolResult(block.content), undefined, parent);
       } else if (block.type === 'text') {
         closeGroup(container);
-        appendBlock(container, 'user', 'You', block.text);
+        appendBlock(container, 'user', 'You', block.text, [], {}, container, null, null, timestampMs);
       }
     }
   }
@@ -394,10 +412,10 @@ function flattenToolResult(content) {
   return JSON.stringify(content);
 }
 
-function renderResult(container, message) {
+function renderResult(container, message, timestampMs = null) {
   closeGroup(container); // the turn is over - nothing can extend the run anymore
   if (message.subtype === 'success') return; // state pill already shows idle/running
-  appendBlock(container, 'error', 'Turn Error', message.error || 'unknown error');
+  appendBlock(container, 'error', 'Turn Error', message.error || 'unknown error', [], {}, container, null, null, timestampMs);
 }
 
 // A run of consecutive tool call/result pairs, collapsed to one summary row
@@ -648,7 +666,7 @@ function renderBody(body, content, hint = null) {
 // node instead. `container` always stays the scroll-position/registry
 // reference regardless of where the block physically lands, since `parent`
 // is always a descendant of it.
-function appendBlock(container, cls, roleLabel, text, actions = [], { collapsible = false } = {}, parent = container, hint = null, meta = null) {
+function appendBlock(container, cls, roleLabel, text, actions = [], { collapsible = false } = {}, parent = container, hint = null, meta = null, timestampMs = null) {
   const wasAtBottom = isScrolledToBottom(container);
 
   const wrap = document.createElement('div');
@@ -664,6 +682,18 @@ function appendBlock(container, cls, roleLabel, text, actions = [], { collapsibl
     metaSpan.className = 'usage-meta';
     metaSpan.textContent = meta;
     roleRow.append(metaSpan);
+  }
+  // Always rendered (not gated behind the setting here) so toggling
+  // "show timestamps" in Settings is instant and retroactive across the
+  // whole transcript - it's the container's .show-timestamps class
+  // (index.html) that actually controls visibility, not this element's
+  // presence. Hidden by default via that same CSS rule.
+  if (timestampMs != null) {
+    const timeSpan = document.createElement('span');
+    timeSpan.className = 'msg-time';
+    timeSpan.textContent = formatClock(timestampMs);
+    timeSpan.title = new Date(timestampMs).toLocaleString();
+    roleRow.append(timeSpan);
   }
   for (const action of actions) {
     const btn = document.createElement('button');

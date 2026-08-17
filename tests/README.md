@@ -2,7 +2,8 @@
 
 `npm test` runs the unit suite (`session-registry.test.mjs`, `session-launcher.test.mjs`,
 `server-auth.test.mjs`, `permissions.test.mjs`, `sdk-adapter.test.mjs`,
-`session-history.test.mjs`, `session.test.mjs`, `event-log.test.mjs`, `usage.test.mjs`) via
+`session-history.test.mjs`, `session.test.mjs`, `event-log.test.mjs`, `usage.test.mjs`,
+`context-usage.test.mjs`) via
 Node's built-in test runner. Fast, free, no network calls, no Claude CLI
 spawned - the registry tests inject a stubbed `startSessionImpl`, and
 `session.test.mjs` injects a stubbed `queryImpl` (same pattern, one level
@@ -34,7 +35,113 @@ updates as it runs; two sessions open at once each show their own numbers;
 via the resume list's "View" button, with no rewind affordance since
 there's no live registry row backing it.
 
-## AskUserQuestion fix
+## Auto-compact status precision
+
+`context-usage.test.mjs` covers the pure transform in `src/context-usage.js`
+directly: `normalizeAutoCompactThreshold`'s three unit interpretations
+(fraction, percent, absolute token count via `maxTokens`), its
+plausibility-band rejection (both an out-of-band percent and an
+out-of-band token/maxTokens conversion), the one-time-warn latch, and
+`contextPayload`'s `source: 'sdk' | 'fallback'` branching. The round trip
+one layer up (`refreshContextUsage` calling the real SDK `getContextUsage()`,
+and `usagePayload` forwarding its result) is still hand-verified only, per
+the MVP4 note above - only the transform itself is unit-covered. Verified
+by hand: `compactBtn`'s red state and tooltip, and `stats-panel.js`'s
+context bar color, both track `context.autoCompact.warnPercent` instead of
+the old independently-hardcoded 80/20/50 constants.
+
+## Message timestamps toggle
+
+Entirely client-side (`public/settings.js`, `public/stream-view.js`,
+`public/app.js`, `public/history-pane.js`) - hand-verified only, per the
+"hand-verified only" convention above. Checked: the Settings checkbox
+retroactively stamps/unstamps every message already on screen (a CSS class
+toggle, not a re-render); a resumed live Claude session shows real
+per-message clock times with the full date in the tooltip; a live Grok
+session (no `timestamp` field on its messages) shows receive-time instead;
+a past session opened via the resume list's "View" button shows real times
+when the transcript has them and none when it doesn't (no fabricated "now"
+on old messages); the setting persists across a reload.
+
+## Copy-last-reply / export-session
+
+`transcript-markdown.test.mjs` covers `src/transcript-markdown.js`'s
+`messagesToMarkdown` directly: every message type (user text, assistant
+text/thinking/tool_use, tool_result, a result error, an unknown type),
+heading structure, the truncation marker, and fence-widening when content
+already contains a run of backticks. `server-auth.test.mjs` covers the
+`/api/history/:sessionId/markdown` route's content-type and
+content-disposition headers and its graceful-empty behavior on an unknown
+session id (same as the underlying SDK read - it doesn't throw, so neither
+does this route).
+
+**Not covered by unit tests, hand-verified only:** `#copyLastBtn`/
+`#exportBtn` (`public/app.js`) and the history pane's export link
+(`public/history-pane.js`). Verified via Playwright against this session's
+own real transcript: the export link's href carries the right session
+id/cwd/provider and downloading it returns real transcript content with
+the correct headers; copy-last-reply reads the *last* `.msg.assistant
+.body` node specifically (not the first) and writes its exact text to the
+clipboard.
+
+## Persistent session title
+
+`session-titles.test.mjs` covers `src/session-titles.js` directly:
+`setSessionTitle`/`getSessionTitle` round-trip (with trimming and a
+120-char cap), an empty/whitespace title deleting the entry rather than
+storing `""`, sibling `sessionDefaults`/`enabledPlugins` keys surviving a
+title write, a concurrency case interleaving `setSessionTitle` with
+`setSessionDefaults`/`setPluginEnabled` on the same cwd (same shape as
+`session-defaults.test.mjs`'s own), and `attachTitles`'s join logic in
+isolation (matching session, no titles for that cwd, `cwd: null`, unknown
+session id within a cwd that has other titles). `server-auth.test.mjs`
+covers both new routes: `POST /api/sessions/:id/title`'s 401 (parametrized
+alongside the other newer routes), 409 when `claudeSessionId` isn't known
+yet, and its happy path persisting to `settings.local.json`; and
+`POST /api/session-title`'s 400 on an invalid cwd and its happy path for a
+past session with no live registry row.
+
+**Not covered by unit tests, hand-verified only:** the resume list's rename
+button and the live-session rename prompt (`public/app.js`). Verified via
+Playwright against this session's own real transcript: renaming from the
+resume list updates the primary line immediately, survives a full page
+reload (confirmed both in the DOM and by reading the resulting
+`settings.local.json` directly), and the original transcript-derived label
+survives as the row's tooltip rather than being discarded.
+
+## Permission always-allow, wider scope
+
+`permission-rules.test.mjs` covers `src/permission-rules.js` directly:
+`formatRule`'s bare-vs-parenthesized shapes, `addAllowRule`/`readAllowRules`
+round-trip, dedupe on exact string match, `removeAllowRule` (including the
+no-op case for an unknown rule), `permissions.deny`/`ask` and
+`sessionDefaults` surviving a write, and a concurrency case interleaving
+`addAllowRule` with `setSessionDefaults` on the same cwd (same shape as
+`session-defaults.test.mjs`/`session-titles.test.mjs`'s own). `session.test.mjs`
+extends the existing `canUseTool`/`resolveApproval` coverage for both new
+scope strings (`'session'` and `'project'` both auto-allow in-session
+immediately; the legacy boolean `true` still coerces to `'session'`; a
+deny never carries a scope even if `alwaysAllow` were set; an unknown
+requestId returns `false`). `server-auth.test.mjs` covers the route layer:
+401 on the two new `permissions` routes (parametrized alongside the other
+newer routes for `approval-decision`, plus dedicated GET/DELETE 401
+coverage since the shared parametrized list is POST-only), 400 on an
+invalid `alwaysAllow` value, 404 on an unknown approval requestId, and that
+`alwaysAllow: 'project'` persists a rule to `settings.local.json` while
+`'session'` does not.
+
+**Not covered by unit tests, hand-verified only (partially):** the approval
+banner's `<select>` and the Settings modal's revoke list
+(`public/app.js`/`index.html`) - Playwright confirmed both render with the
+correct structure (the select's three options, the rules-list container).
+The full live flow (choosing "always in this project" on a real approval,
+seeing it land in the Settings list, revoking it) is not hand-verified
+live - reaching a real approval prompt requires a live CLI session
+mid-tool-call, which isn't a quick manual pass - but every step of that
+flow's server-side logic (scope persistence, the list GET, the revoke
+DELETE) is exercised by the integration tests above against the real
+`server.js` route dispatch, just with a stubbed session in place of a live
+CLI process.
 
 Root cause (found by an investigation agent, confirmed against the running
 process and the CLI's own tool definition): `AskUserQuestion` is an ordinary

@@ -190,7 +190,7 @@ test('a real turn interrupted before producing anything (num_turns:0) still sett
   assert.ok(messages.some((m) => m.type === 'result' && m.num_turns === 0));
 });
 
-test('resolveApproval with alwaysAllow:true auto-allows the same tool for the rest of the session', async () => {
+test('resolveApproval with alwaysAllow:true (legacy boolean) coerces to scope "session" and auto-allows the same tool for the rest of the session', async () => {
   const approvalRequests = [];
   const { session, getOptions } = startFakeSession({
     onApprovalRequest: (req) => approvalRequests.push(req),
@@ -200,7 +200,10 @@ test('resolveApproval with alwaysAllow:true auto-allows the same tool for the re
   assert.equal(approvalRequests.length, 1);
   const requestId = approvalRequests[0].requestId;
 
-  assert.equal(session.resolveApproval(requestId, { behavior: 'allow', updatedInput: { command: 'ls' }, alwaysAllow: true }), true);
+  assert.deepEqual(
+    session.resolveApproval(requestId, { behavior: 'allow', updatedInput: { command: 'ls' }, alwaysAllow: true }),
+    { resolved: true, toolName: 'Bash', scope: 'session' },
+  );
   const firstResult = await first;
   // alwaysAllow must never reach the SDK as part of the real PermissionResult.
   assert.deepEqual(firstResult, { behavior: 'allow', updatedInput: { command: 'ls' } });
@@ -215,8 +218,31 @@ test('resolveApproval with alwaysAllow:true auto-allows the same tool for the re
   // name, not a blanket switch.
   const third = getOptions().canUseTool('Write', { path: 'x' }, {});
   assert.equal(approvalRequests.length, 2);
-  session.resolveApproval(approvalRequests[1].requestId, { behavior: 'deny', message: 'no' });
+  const denyResult = session.resolveApproval(approvalRequests[1].requestId, { behavior: 'deny', message: 'no' });
+  assert.deepEqual(denyResult, { resolved: true, toolName: 'Write', scope: null }); // deny never sets a scope, even if alwaysAllow were passed
   assert.deepEqual(await third, { behavior: 'deny', message: 'no' });
+});
+
+test('resolveApproval with alwaysAllow: "project" also auto-allows for the rest of the session (persistence is server.js\'s job, not session.js\'s)', async () => {
+  const approvalRequests = [];
+  const { session, getOptions } = startFakeSession({
+    onApprovalRequest: (req) => approvalRequests.push(req),
+  });
+
+  const first = getOptions().canUseTool('Read', { file_path: 'x' }, {});
+  const requestId = approvalRequests[0].requestId;
+  const result = session.resolveApproval(requestId, { behavior: 'allow', updatedInput: { file_path: 'x' }, alwaysAllow: 'project' });
+  assert.deepEqual(result, { resolved: true, toolName: 'Read', scope: 'project' });
+  await first;
+
+  const second = await getOptions().canUseTool('Read', { file_path: 'y' }, {});
+  assert.equal(approvalRequests.length, 1); // still just the one prompt - project scope also takes immediate in-session effect
+  assert.deepEqual(second, { behavior: 'allow', updatedInput: { file_path: 'y' } });
+});
+
+test('resolveApproval on an unknown/already-resolved requestId returns false', () => {
+  const { session } = startFakeSession({ onApprovalRequest: () => {} });
+  assert.equal(session.resolveApproval('nonexistent', { behavior: 'allow', alwaysAllow: 'session' }), false);
 });
 
 test('resolveApproval without alwaysAllow does not remember the decision past this one call', async () => {

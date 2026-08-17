@@ -4,7 +4,7 @@
 // don't reinvent it", just applied to this project's own renderer instead.
 import { renderMessage, resetStreamView } from '/stream-view.js';
 
-export function initHistoryPane({ modal, body, closeButton, titleEl }) {
+export function initHistoryPane({ modal, body, closeButton, titleEl, exportButton }) {
   closeButton.addEventListener('click', close);
   modal.addEventListener('click', (event) => {
     if (event.target === modal) close();
@@ -19,8 +19,9 @@ export function initHistoryPane({ modal, body, closeButton, titleEl }) {
     titleEl.textContent = label || sessionId;
     body.innerHTML = '<span class="tool-pending">Loading...</span>';
     modal.style.display = 'flex';
+    const qs = new URLSearchParams({ cwd: cwd || '', provider: provider || 'claude' });
+    if (exportButton) exportButton.href = `/api/history/${sessionId}/markdown?${qs}`;
     try {
-      const qs = new URLSearchParams({ cwd: cwd || '', provider: provider || 'claude' });
       const res = await fetch(`/api/history/${sessionId}?${qs}`);
       if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.statusText);
       const { messages } = await res.json();

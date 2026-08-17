@@ -27,6 +27,7 @@ const DEFAULTS = {
   turnChartMetric: 'cost',
   turnChartExcludeCacheMisses: false,
   taskPanelEnabled: false,
+  showMessageTimestamps: false,
 };
 
 function makeFolderId() {
@@ -93,10 +94,12 @@ export function initSettings({
   onBrowseFolder,
   turnChartCheckbox,
   taskPanelCheckbox,
+  timestampsCheckbox,
   closeSessionButton,
   onAutoCollapseChange,
   onTurnChartEnabledChange,
   onTaskPanelEnabledChange,
+  onTimestampsChange,
   onCloseSession,
   onOpen,
 }) {
@@ -119,9 +122,11 @@ export function initSettings({
   autoCollapseCheckbox.checked = settings.autoCollapsePreviousGroup;
   turnChartCheckbox.checked = settings.turnChartEnabled;
   taskPanelCheckbox.checked = settings.taskPanelEnabled;
+  timestampsCheckbox.checked = settings.showMessageTimestamps;
   onAutoCollapseChange(settings.autoCollapsePreviousGroup);
   onTurnChartEnabledChange(settings.turnChartEnabled);
   onTaskPanelEnabledChange(settings.taskPanelEnabled);
+  onTimestampsChange(settings.showMessageTimestamps);
   renderCustomFolders();
 
   // "searchable in @" implies this already works out of the box, so a user
@@ -216,6 +221,10 @@ export function initSettings({
 
   turnChartCheckbox.addEventListener('change', () => setTurnChartEnabled(turnChartCheckbox.checked));
   taskPanelCheckbox.addEventListener('change', () => setTaskPanelEnabled(taskPanelCheckbox.checked));
+  timestampsCheckbox.addEventListener('change', () => {
+    persist({ showMessageTimestamps: timestampsCheckbox.checked });
+    onTimestampsChange(timestampsCheckbox.checked);
+  });
 
   closeSessionButton.addEventListener('click', () => {
     close();

@@ -14,6 +14,9 @@ import { fileSuggestions, workspaceDiff } from './sdk-adapter.js';
 import { PERMISSION_MODES } from './permissions.js';
 import { fetchSessionHistory } from './session-history.js';
 import { fetchGrokSessionHistory } from './grok-history.js';
+import { messagesToMarkdown } from './transcript-markdown.js';
+import { getSessionTitle, setSessionTitle, attachTitles, readSessionTitles } from './session-titles.js';
+import { readAllowRules, addAllowRule, removeAllowRule, formatRule } from './permission-rules.js';
 import { isSafeGrokArg } from './grok-acp.js';
 import { defaultScreenshotDir } from './os-defaults.js';
 import { setPluginEnabled, readEnabledPlugins } from './plugin-settings.js';
@@ -102,7 +105,18 @@ async function handleRequest(req, res) {
   if (url.pathname === '/api/resumable' && req.method === 'GET') {
     const provider = url.searchParams.get('provider') === 'grok' ? 'grok' : 'claude';
     const sessions = provider === 'grok' ? await listGrokSessions() : await listResumableSessions();
-    return respondJson(res, 200, sessions);
+    // Joins in any durable title (session-titles.js) a past session was
+    // given from the resume list or a prior tab - one settings.local.json
+    // read per distinct cwd (capped at listResumableSessions' own 30-session
+    // limit, so at most a handful), not one per session. Best-effort: a
+    // failed read for one cwd just leaves that cwd's sessions untitled
+    // rather than 500ing the whole list.
+    const distinctCwds = [...new Set(sessions.map((s) => s.cwd).filter(Boolean))];
+    const titlesByCwd = new Map();
+    await Promise.all(distinctCwds.map(async (cwd) => {
+      titlesByCwd.set(cwd, await readSessionTitles(cwd).catch(() => ({})));
+    }));
+    return respondJson(res, 200, attachTitles(sessions, titlesByCwd));
   }
 
   if (url.pathname === '/api/sessions' && req.method === 'GET') {
@@ -129,6 +143,12 @@ async function handleRequest(req, res) {
     if (model && !isSafeGrokArg(model)) {
       return respondJson(res, 400, { error: `invalid model: ${model}` });
     }
+    // A resume carries forward whatever durable title (session-titles.js)
+    // this transcript was given, so the header label/tab title show it
+    // immediately instead of waiting on a rename. body.name always wins
+    // when given (currently no client path sends it, but the field exists
+    // on createSession - see session-registry.js).
+    const name = body.name || (body.resume ? await getSessionTitle(cwd, body.resume).catch(() => null) : null);
     let effort;
     if (provider === 'grok' && typeof body.effort === 'string' && body.effort) {
       if (!registry.GROK_EFFORTS.includes(body.effort)) {
@@ -136,7 +156,7 @@ async function handleRequest(req, res) {
       }
       effort = body.effort;
     }
-    const row = registry.createSession({ cwd, resume: body.resume, name: body.name, model, provider, effort, history });
+    const row = registry.createSession({ cwd, resume: body.resume, name, model, provider, effort, history });
     await seedSessionDefaults(row); // thinking budget/auto-continue carried forward from this cwd's last-used values (session-defaults.js)
     return respondJson(res, 201, {
       id: row.id,
@@ -195,6 +215,53 @@ async function handleRequest(req, res) {
       return respondJson(res, 200, { messages });
     } catch (err) {
       return respondJson(res, 404, { error: String(err.message || err) });
+    }
+  }
+
+  const historyMarkdownRoute = url.pathname.match(/^\/api\/history\/([^/]+)\/markdown$/);
+  if (historyMarkdownRoute && req.method === 'GET') {
+    // Same auth boundary and cwd/provider handling as the JSON /api/history
+    // route right above - this is that same read, just formatted for the
+    // "export .md" button (app.js/history-pane.js) instead of the live
+    // stream renderer.
+    const cwd = url.searchParams.get('cwd') || process.cwd();
+    const provider = url.searchParams.get('provider') === 'grok' ? 'grok' : 'claude';
+    const sessionId = historyMarkdownRoute[1];
+    try {
+      const messages = provider === 'grok'
+        ? await fetchGrokSessionHistory(sessionId, cwd)
+        : await fetchSessionHistory(sessionId, cwd);
+      const markdown = messagesToMarkdown(messages, {
+        title: `Session transcript - ${sessionId}`,
+        cwd,
+        sessionId,
+        assistantLabel: provider === 'grok' ? 'Grok' : 'Claude',
+      });
+      res.writeHead(200, {
+        'content-type': 'text/markdown; charset=utf-8',
+        'content-disposition': `attachment; filename="session-${sessionId}.md"`,
+      });
+      return res.end(markdown);
+    } catch (err) {
+      return respondJson(res, 404, { error: String(err.message || err) });
+    }
+  }
+
+  if (url.pathname === '/api/session-title' && req.method === 'POST') {
+    // Renames a *past* session from the resume list, where there's no live
+    // registry row (and so no session token) to gate on - same Origin/Host-
+    // only boundary as /api/history just above. isValidCwd guards against
+    // an arbitrary path being used to probe/write outside a real project.
+    const body = await readJsonBody(req);
+    const cwd = typeof body.cwd === 'string' ? body.cwd : '';
+    const sessionId = typeof body.sessionId === 'string' ? body.sessionId : '';
+    if (!isValidCwd(cwd)) return respondJson(res, 400, { error: `not a directory: ${cwd}` });
+    if (!sessionId) return respondJson(res, 400, { error: 'sessionId is required' });
+    try {
+      await setSessionTitle(cwd, sessionId, body.title);
+      return respondJson(res, 200, { title: (body.title || '').trim().slice(0, 120) || null });
+    } catch (err) {
+      return respondJson(res, 500, { error: String(err.message || err) });
     }
   }
 
@@ -371,6 +438,62 @@ async function handleSessionRoute(req, res, url, id, action) {
     }
   }
 
+  if (action === 'permissions' && req.method === 'GET') {
+    // Backs the Settings modal's "Always-allowed tools in this project"
+    // list (public/settings.js) - the durable rules addAllowRule wrote via
+    // the approval-decision route above.
+    try {
+      return respondJson(res, 200, { allow: await readAllowRules(row.cwd) });
+    } catch (err) {
+      return respondJson(res, 500, { error: String(err.message || err) });
+    }
+  }
+
+  if (action === 'permissions' && req.method === 'DELETE') {
+    // Revoke path for a persisted allow rule - ships in the same increment
+    // as the rule ever being writable at all (permission-rules.js's module
+    // comment), since a standing security decision with no way to undo it
+    // isn't durable, it's just stuck.
+    const body = await readJsonBody(req);
+    if (typeof body.rule !== 'string' || !body.rule) {
+      return respondJson(res, 400, { error: 'rule is required' });
+    }
+    try {
+      await removeAllowRule(row.cwd, body.rule);
+      return respondJson(res, 200, { allow: await readAllowRules(row.cwd) });
+    } catch (err) {
+      return respondJson(res, 500, { error: String(err.message || err) });
+    }
+  }
+
+  if (action === 'title' && req.method === 'POST') {
+    // Renames the live session (header label, tab title via app.js) *and*
+    // persists it (session-titles.js) so it survives to the next resume -
+    // same "live effect first, best-effort persist" shape as the
+    // 'thinking'/'auto-continue' routes below. Needs row.claudeSessionId to
+    // persist against (the transcript's own session id, latched once the
+    // SDK's first system/init message arrives) - too early to have one is
+    // the same "session exists but the CLI hasn't reported in yet" window
+    // rewind()/loadEarlierHistory() already guard against, so this uses the
+    // same signal (throw a clear error) rather than silently no-op-ing.
+    const body = await readJsonBody(req);
+    const title = typeof body.title === 'string' ? body.title : '';
+    if (!row.claudeSessionId) {
+      return respondJson(res, 409, { error: 'session has no claude session id yet - try again once it has started' });
+    }
+    try {
+      await registry.setSessionName(id, title.trim() || null);
+      try {
+        await setSessionTitle(row.cwd, row.claudeSessionId, title);
+      } catch {
+        // ignore - best-effort persistence, see 'thinking' route's comment
+      }
+      return respondJson(res, 200, { title: title.trim() || null });
+    } catch (err) {
+      return respondJson(res, 500, { error: String(err.message || err) });
+    }
+  }
+
   if (action === 'effort' && req.method === 'POST') {
     const body = await readJsonBody(req);
     if (!registry.GROK_EFFORTS.includes(body.effort)) {
@@ -442,16 +565,31 @@ async function handleSessionRoute(req, res, url, id, action) {
 
   if (action === 'approval-decision' && req.method === 'POST') {
     const body = await readJsonBody(req);
-    // `alwaysAllow` (backlog.md's permission "always allow this pattern",
-    // scoped to per-tool-name/this-session-only) rides along on the same
-    // decision object session.js's resolveApproval already receives -
-    // stripped back off before it's ever handed to the SDK as the actual
-    // PermissionResult (see that function).
+    // `alwaysAllow` (backlog.md's permission "always allow this tool")
+    // rides along on the same decision object session.js's resolveApproval
+    // already receives - stripped back off before it's ever handed to the
+    // SDK as the actual PermissionResult (see that function). `false`/
+    // `undefined` means "just this once"; `true` is accepted for backward
+    // compatibility and coerced to `'session'`.
+    if (![undefined, false, true, 'session', 'project'].includes(body.alwaysAllow)) {
+      return respondJson(res, 400, { error: `invalid alwaysAllow: ${body.alwaysAllow}` });
+    }
     const decision = body.decision === 'allow'
-      ? { behavior: 'allow', updatedInput: body.updatedInput, alwaysAllow: Boolean(body.alwaysAllow) }
+      ? { behavior: 'allow', updatedInput: body.updatedInput, alwaysAllow: body.alwaysAllow }
       : { behavior: 'deny', message: body.message || 'Not approved by user.' };
-    const resolved = registry.resolveApproval(id, body.requestId, decision);
-    return respondJson(res, resolved ? 200 : 404, { resolved });
+    const result = registry.resolveApproval(id, body.requestId, decision);
+    if (result && result.scope === 'project') {
+      // Best-effort, own try/catch: the live allow already took effect
+      // (session.js's alwaysAllowTools, above) regardless of whether this
+      // write succeeds - same "live effect first, persistence is a bonus"
+      // shape as the 'thinking'/'auto-continue' routes.
+      try {
+        await addAllowRule(row.cwd, formatRule({ toolName: result.toolName }));
+      } catch {
+        // ignore - see comment above
+      }
+    }
+    return respondJson(res, result ? 200 : 404, { resolved: Boolean(result) });
   }
 
   if (action === 'rewind' && req.method === 'POST') {

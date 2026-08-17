@@ -25,6 +25,7 @@ import { resolveGrokPromptIndex } from './grok-rewind.js';
 import { fetchSessionHistory, countWithinTokenBudget, countRealUserTurns, INITIAL_HISTORY_TOKEN_BUDGET } from './session-history.js';
 import { createEventLog, append as appendEvent, replay as replayEvents } from './event-log.js';
 import { createUsageAccumulator, costForUsage } from './usage.js';
+import { contextPayload } from './context-usage.js';
 
 const sessions = new Map();
 
@@ -312,6 +313,14 @@ export async function interruptTurn(id) {
 // so every connected tab sees the switch.
 export async function setModel(id, model) {
   return queryPassthrough(id, (row) => row.handle.query.setModel(model), { model: model || null });
+}
+
+// Same shape as setModel above, except the "one query() method" is a no-op:
+// row.name is purely cockpit-side bookkeeping (session-titles.js persists
+// the durable copy; server.js's rename route calls both), the SDK has
+// nothing analogous to tell.
+export async function setSessionName(id, name) {
+  return queryPassthrough(id, async () => {}, { name });
 }
 
 // Same shape as setModel above: one Query method (setMaxThinkingTokens),
@@ -934,9 +943,7 @@ function usagePayload(row) {
   return {
     type: 'cockpit:usage',
     usage: row.usageAcc.snapshot(),
-    context: row.contextUsage
-      ? { totalTokens: row.contextUsage.totalTokens, maxTokens: row.contextUsage.maxTokens, percentage: row.contextUsage.percentage }
-      : null,
+    context: contextPayload(row.contextUsage),
     rateLimits: row.rateLimits, // null until refreshRateLimits succeeds at least once, or forever if the experimental API is unavailable
   };
 }

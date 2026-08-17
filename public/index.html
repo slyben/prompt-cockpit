@@ -419,6 +419,18 @@
     font-size: 11px;
   }
   #resumeList .viewHistoryBtn:hover { color: var(--text); border-color: var(--accent); }
+  #resumeList .renameResumeBtn {
+    flex: none;
+    margin: 0;
+    padding: 4px 8px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--muted);
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 12px;
+  }
+  #resumeList .renameResumeBtn:hover { color: var(--text); border-color: var(--accent); }
 
   #approvalBanner {
     display: none;
@@ -630,6 +642,23 @@
     font-size: 10px;
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
+  }
+  /* Per-message clock, same role-row slot as .usage-meta - rendered by
+     stream-view.js on every block, hidden unless the container carries
+     .show-timestamps (Settings toggle, public/settings.js) so flipping the
+     setting is instant and retroactive across the whole transcript instead
+     of only affecting messages rendered after the flip. */
+  .msg-time {
+    display: none;
+    color: var(--muted);
+    opacity: 0.6;
+    font-size: 10px;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+  #stream.show-timestamps .msg-time,
+  #historyBody.show-timestamps .msg-time {
+    display: inline;
   }
   .msg .body {
     white-space: pre-wrap;
@@ -1184,7 +1213,7 @@
     justify-content: flex-end;
     gap: 8px;
   }
-  .modal-box button {
+  .modal-box button, .modal-box footer a {
     padding: 6px 12px;
     border-radius: 6px;
     border: 1px solid var(--border);
@@ -1193,6 +1222,7 @@
     cursor: pointer;
     font-size: 13px;
   }
+  .modal-box footer a { text-decoration: none; display: inline-block; }
   .modal-box button.primary { background: var(--accent); border-color: var(--accent); color: white; }
 
   #dirPath { font-family: ui-monospace, monospace; font-size: 12px; color: var(--muted); word-break: break-all; }
@@ -1221,6 +1251,7 @@
   <header>
     <strong id="appTitle">Prompt Cockpit</strong>
     <span id="sessionLabel"></span>
+    <span id="sessionLabelError" class="mcp-error" style="display:none"></span>
     <span id="rateLimitBanner" class="rate-limit-banner" style="display:none"></span>
     <div class="spacer"></div>
     <label id="autoContinueLabel" style="display:none" title="Same as the desktop app's checkbox: when the plan usage limit rejects a turn, automatically send Continue once it resets">
@@ -1271,15 +1302,24 @@
     <div id="approvalPlain">
       <strong id="approvalHeading"></strong>
       <pre id="approvalDetail"></pre>
-      <!-- Backlog.md's permission "always allow this pattern" gap, scoped to
-           the smallest durable version: per-tool-name, for the rest of THIS
-           session only - no persistence to settings.local.json, no input/
-           cwd pattern matching (both flagged in the backlog as needing their
-           own design call). Label text is filled in per-request (app.js's
-           showApprovalRequest) with the actual tool name. Hidden by default
-           since #approvalPlain itself is hidden for AskUserQuestion, which
-           always needs a real per-call answer regardless of this checkbox. -->
-      <label id="alwaysAllowLabel"><input type="checkbox" id="alwaysAllowBtn" /> Always allow <span id="alwaysAllowToolName"></span> this session</label>
+      <!-- Backlog.md's permission "always allow this tool" gap, per-tool-name
+           only (no input/cwd pattern matching - still flagged as needing its
+           own design call). "Always in this project" persists to
+           settings.local.json's permissions.allow (src/permission-rules.js) -
+           the CLI's own rule engine picks it up on the next session start and
+           this cockpit never has to prompt for that tool in this project
+           again; revoke it from the Settings modal's General tab. Tool name
+           filled in per-request (app.js's showApprovalRequest). Hidden by
+           default since #approvalPlain itself is hidden for AskUserQuestion,
+           which always needs a real per-call answer regardless of this. -->
+      <label id="alwaysAllowLabel">
+        Always allow <span id="alwaysAllowToolName"></span>
+        <select id="alwaysAllowScope">
+          <option value="">just this once</option>
+          <option value="session">rest of this session</option>
+          <option value="project">always in this project</option>
+        </select>
+      </label>
       <!-- Plan review (backlog.md's "preview + comment/revise, not just
            approve/reject" - Grok CLI's /view-plan equivalent). Shown only
            for ExitPlanMode (showApprovalRequest); a plain Bash/Write
@@ -1390,6 +1430,8 @@
          message, same path as typing it - there is no separate SDK method
          for it. Hidden until a session exists, same as diffBtn/collapseAllBtn. -->
     <button id="compactBtn" style="display:none" title="Run /compact now to free up context">Compact</button>
+    <button id="copyLastBtn" style="display:none" title="Copy Claude's most recent reply">Copy reply</button>
+    <button id="exportBtn" style="display:none" title="Download the whole transcript as markdown">Export .md</button>
   </div>
   <div id="compose">
     <div id="composeResizeHandle" title="Drag to resize"></div>
@@ -1448,6 +1490,7 @@
       <header class="modal-body"><strong id="historyTitle"></strong></header>
       <div class="modal-body" id="historyBody" style="display:flex;flex-direction:column;gap:6px;"></div>
       <footer>
+        <a id="historyExportBtn" download title="Download this transcript as markdown">Export .md</a>
         <button id="historyCloseBtn">Close</button>
       </footer>
     </div>
@@ -1480,6 +1523,18 @@
             </div>
             <ul id="customFoldersList" class="settings-list"></ul>
           </div>
+          <div class="settings-section">
+            <div class="settings-section-header">
+              <strong>Always-allowed tools in this project</strong>
+            </div>
+            <!-- Populated from GET /api/sessions/:id/permissions on every
+                 modal open (app.js's onOpen, same lazy-refresh pattern as
+                 mcpPanel/pluginPanel) - src/permission-rules.js's
+                 settings.local.json-backed list, revocable per-row. Empty
+                 by default: this list only grows via "always in this
+                 project" on an approval prompt (#alwaysAllowScope above). -->
+            <ul id="permissionRulesList" class="settings-list"></ul>
+          </div>
           <label class="settings-row">
             <input type="checkbox" id="turnChartEnabledBtn" />
             <span>Show the per-turn cost graph above the compose box</span>
@@ -1487,6 +1542,10 @@
           <label class="settings-row">
             <input type="checkbox" id="taskPanelEnabledBtn" />
             <span>Show the task list above the compose box</span>
+          </label>
+          <label class="settings-row">
+            <input type="checkbox" id="showTimestampsBtn" />
+            <span>Show a timestamp on each message</span>
           </label>
           <div id="thinkingControlsGroup">
             <label class="settings-row">

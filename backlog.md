@@ -28,11 +28,6 @@ items are removed from this list rather than marked DONE - check git log on
 `feature/session-qol-controls` for what already landed (cancel-the-running-turn
 was first).
 
-- [2026-08-17] [M] Not started - auto-compact status precision. The Compact button/warning (shipped) triggers off the same `remaining < 20%` threshold stats-panel.js's context bar already turns red at - deliberately not off the SDK's own `getContextUsage().isAutoCompactEnabled`/`autoCompactThreshold` fields, since their units relative to `percentage` (confirmed 0-100) aren't confirmed anywhere in this codebase or its tests. If/when confirmed live, switch the trigger to the CLI's real threshold instead of the assumed 80%.
-- [2026-08-17] [M] Not started - permission always-allow, wider scope. Shipped 2026-08-17 scoped to the smallest durable version: per-tool-name, in-memory, for the rest of the current session only (session.js's alwaysAllowTools, checked in canUseTool alongside AUTO_ALLOW_MODES). Not done: tool+cwd or input-pattern scoping, and persisting the choice to settings.local.json's `permissions` block so it survives a resume/reconnect - both still need their own design call before building.
-- [2026-08-17] [M] Not started - copy-last-reply / export-session. No button for either; select-to-copy in the stream (app.js's mouseup handler, the terminal-style copy-on-select) is the only copy path today. Copy-last is one button; export is a markdown dump of what the history pane already has.
-- [2026-08-17] [L] Not started - message timestamps toggle in Settings. Stream messages show none today; only the resume list has coarse "how long ago".
-- [2026-08-17] [L] Not started - persistent session title (cockpit-side title map keyed by cwd+session id). Click-to-rename today only changes the browser tab; the resume list still shows raw cwd/label since the Claude JSONL transcript has no title field of its own (unlike Grok's summary.json).
 - [2026-08-17] [L] Not started - image paste/attachments. Deferred deliberately (see plan doc) - drop-target.js is path-only on purpose since a browser tab can't see a dropped file's real path. query() does accept image content blocks per the SDK, but this needs a real server-side upload or file-read path, not another compose-side hack. Scoped as its own mini-project, not a quick win.
 
 ## [L] Cosmetic

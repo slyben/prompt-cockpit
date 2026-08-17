@@ -44,6 +44,8 @@ const effortBtn = document.getElementById('effortBtn');
 const effortErrorEl = document.getElementById('effortError');
 const diffBtn = document.getElementById('diffBtn');
 const compactBtn = document.getElementById('compactBtn');
+const copyLastBtn = document.getElementById('copyLastBtn');
+const exportBtn = document.getElementById('exportBtn');
 const collapseAllBtn = document.getElementById('collapseAllBtn');
 const autoContinueLabel = document.getElementById('autoContinueLabel');
 const autoContinueBtn = document.getElementById('autoContinueBtn');
@@ -56,7 +58,7 @@ const approvalHeading = document.getElementById('approvalHeading');
 const approvalDetail = document.getElementById('approvalDetail');
 const approveBtn = document.getElementById('approveBtn');
 const rejectBtn = document.getElementById('rejectBtn');
-const alwaysAllowBtn = document.getElementById('alwaysAllowBtn');
+const alwaysAllowScope = document.getElementById('alwaysAllowScope');
 const alwaysAllowToolName = document.getElementById('alwaysAllowToolName');
 const planReviewControls = document.getElementById('planReviewControls');
 const planFeedbackText = document.getElementById('planFeedbackText');
@@ -133,6 +135,7 @@ const historyPane = initHistoryPane({
   body: document.getElementById('historyBody'),
   closeButton: document.getElementById('historyCloseBtn'),
   titleEl: document.getElementById('historyTitle'),
+  exportButton: document.getElementById('historyExportBtn'),
 });
 
 let ws = null;
@@ -152,6 +155,15 @@ let availableAgents = []; // Query.supportedAgents(), fetched once on connect - 
 let selectedAgentName = null;
 let currentModel = null; // set from cockpit:hello/state - see applySession
 let currentProvider = 'claude';
+let currentCwd = null; // set from cockpit:hello/state - see applySession; used by the export-session route
+// The transcript's own session id (session-registry.js's row.claudeSessionId),
+// not the cockpit registry's own `sessionId` - the export route reads the
+// on-disk transcript, which is keyed by this one. Null until the SDK's
+// first system/init message reports it (same "not yet known" window
+// row.claudeSessionId itself has server-side), so #exportBtn stays disabled
+// until then rather than pointing at a 404.
+let currentClaudeSessionId = null;
+let currentSessionName = null; // session.name - the durable title (session-titles.js), if this session has one
 
 function sessionProviderLabel() {
   return currentProvider === 'grok' ? 'Grok' : 'Claude';
@@ -615,6 +627,7 @@ const settings = initSettings({
   onBrowseFolder: (onSelect) => dirBrowser.open('', onSelect),
   turnChartCheckbox: document.getElementById('turnChartEnabledBtn'),
   taskPanelCheckbox: document.getElementById('taskPanelEnabledBtn'),
+  timestampsCheckbox: document.getElementById('showTimestampsBtn'),
   closeSessionButton: closeSessionBtn,
   onAutoCollapseChange: setAutoCollapsePreviousGroup,
   onTurnChartEnabledChange: (enabled) => {
@@ -624,6 +637,14 @@ const settings = initSettings({
   onTaskPanelEnabledChange: (enabled) => {
     taskPanel.setEnabled(enabled);
     taskPanelToggleBtn.classList.toggle('on', enabled);
+  },
+  // Toggles the CSS class both stream-view.js render targets read
+  // (index.html) - retroactive, so flipping this instantly stamps/unstamps
+  // every message already on screen instead of only new ones.
+  onTimestampsChange: (enabled) => {
+    streamEl.classList.toggle('show-timestamps', enabled);
+    const historyBody = document.getElementById('historyBody');
+    if (historyBody) historyBody.classList.toggle('show-timestamps', enabled);
   },
   onCloseSession: closeSession,
   // No session yet (modal shouldn't really be reachable pre-session, but
@@ -639,14 +660,78 @@ const settings = initSettings({
       pluginsLoadedForSession = true;
       pluginPanel.refresh();
     }
+    refreshPermissionRulesList();
   },
 });
 
+const permissionRulesListEl = document.getElementById('permissionRulesList');
+
+// Read-only status GET, same "safe to re-run every open" reasoning as
+// mcpPanel.refresh() above - reflects whatever the approval banner's
+// "always in this project" scope has written since the modal was last open.
+async function refreshPermissionRulesList() {
+  permissionRulesListEl.innerHTML = '';
+  if (!sessionId) return;
+  try {
+    const res = await fetch(`/api/sessions/${sessionId}/permissions`, { headers: authHeaders() });
+    if (!res.ok) return;
+    const { allow } = await res.json();
+    for (const rule of allow || []) {
+      const li = document.createElement('li');
+      li.className = 'custom-folder-row'; // reuses the @-folder list's row/remove-button styling, same shape
+
+      const label = document.createElement('span');
+      label.className = 'cmd-name';
+      label.textContent = rule;
+      li.append(label);
+
+      const removeBtn = document.createElement('button');
+      removeBtn.type = 'button';
+      removeBtn.className = 'custom-folder-remove';
+      removeBtn.textContent = '−';
+      removeBtn.title = `Revoke always-allow for ${rule}`;
+      removeBtn.addEventListener('click', async () => {
+        await fetch(`/api/sessions/${sessionId}/permissions`, {
+          method: 'DELETE',
+          headers: { 'content-type': 'application/json', ...authHeaders() },
+          body: JSON.stringify({ rule }),
+        });
+        refreshPermissionRulesList();
+      });
+      li.append(removeBtn);
+
+      permissionRulesListEl.append(li);
+    }
+  } catch {
+    // offline/blocked - list just stays empty until the next open, not fatal
+  }
+}
+
+const sessionLabelErrorEl = document.getElementById('sessionLabelError');
+
 sessionLabelEl.addEventListener('click', () => {
   if (!sessionId) return;
-  const next = prompt('Rename this tab:', '');
+  // Pre-filled with whatever durable title (session-titles.js) this
+  // session already has, so re-opening the prompt to tweak a title doesn't
+  // start from blank - `prompt()`'s own default-value arg does this for
+  // free, no extra state needed beyond what applySession already tracks.
+  const next = prompt('Rename this session:', currentSessionName || '');
   if (next === null) return; // cancelled
   tabChrome.rename(next);
+  sessionLabelErrorEl.style.display = 'none';
+  fetch(`/api/sessions/${sessionId}/title`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ title: next }),
+  }).then(async (res) => {
+    if (res.ok) return;
+    const body = await res.json().catch(() => ({}));
+    sessionLabelErrorEl.textContent = `Rename didn't save: ${body.error || res.statusText}`;
+    sessionLabelErrorEl.style.display = 'inline';
+  }).catch(() => {
+    sessionLabelErrorEl.textContent = "Rename didn't save (offline?) - it'll only last this tab.";
+    sessionLabelErrorEl.style.display = 'inline';
+  });
 });
 
 function returnToLauncher() {
@@ -694,6 +779,12 @@ function returnToLauncher() {
   diffBtn.style.display = 'none';
   compactBtn.style.display = 'none';
   compactBtn.classList.remove('compact-urgent');
+  copyLastBtn.style.display = 'none';
+  exportBtn.style.display = 'none';
+  currentCwd = null;
+  currentClaudeSessionId = null;
+  currentSessionName = null;
+  sessionLabelErrorEl.style.display = 'none';
   stopBtn.style.display = 'none';
   disarmStop();
   closeSessionBtn.style.display = 'none';
@@ -865,6 +956,18 @@ document.addEventListener('keydown', (event) => {
 // fires after the selection is finalized, so `getSelection()` here sees the
 // same range the user just drew. A collapsed selection (a plain click, no
 // drag) has an empty string and is silently ignored.
+// Shared "copy succeeded" feedback - a cursor/button-anchored toast that
+// fades in and back out. Originally inline in the mouseup handler below;
+// pulled out so #copyLastBtn's click-to-copy can show the identical toast
+// instead of inventing a second copy-feedback UI.
+function showCopyToast(x, y) {
+  copyToast.style.left = `${x + 8}px`;
+  copyToast.style.top = `${y - 8}px`;
+  copyToast.classList.add('show');
+  clearTimeout(copyToast._hideTimer);
+  copyToast._hideTimer = setTimeout(() => copyToast.classList.remove('show'), 700);
+}
+
 streamEl.addEventListener('mouseup', (event) => {
   const selection = window.getSelection();
   const text = selection.toString();
@@ -876,16 +979,38 @@ streamEl.addEventListener('mouseup', (event) => {
   // catches without needing to walk the whole selected range.
   if (!streamEl.contains(selection.anchorNode) || !streamEl.contains(selection.focusNode)) return;
   navigator.clipboard.writeText(text).then(() => {
-    copyToast.style.left = `${event.clientX + 8}px`;
-    copyToast.style.top = `${event.clientY - 8}px`;
-    copyToast.classList.add('show');
-    clearTimeout(copyToast._hideTimer);
-    copyToast._hideTimer = setTimeout(() => copyToast.classList.remove('show'), 700);
+    showCopyToast(event.clientX, event.clientY);
   }).catch(() => {
     // Clipboard write can fail (no permission, insecure context) - silently
     // leave the browser's own native selection/copy as the fallback rather
     // than surfacing an error for what's a convenience feature.
   });
+});
+
+// Copy the most recent assistant reply's text - reads the DOM (not a
+// client-side message array; stream-view.js doesn't keep one, see its
+// module comment) since the DOM is the one place already correct across
+// every ingestion path (live sdk:message, prependHistory, and the
+// cockpit:gap full resend). Assistant text blocks are never collapsible
+// (stream-view.js's renderAssistant), so .body always holds the full text,
+// nothing truncated to worry about.
+copyLastBtn.addEventListener('click', () => {
+  const replies = streamEl.querySelectorAll('.msg.assistant .body');
+  const last = replies[replies.length - 1];
+  if (!last) return;
+  const rect = copyLastBtn.getBoundingClientRect();
+  navigator.clipboard.writeText(last.textContent || '').then(() => {
+    showCopyToast(rect.left, rect.bottom);
+  }).catch(() => {});
+});
+
+// Export the whole transcript as markdown - a plain navigation, not a
+// fetch+Blob dance, since the /markdown route sets content-disposition:
+// attachment itself (src/server.js), so the browser just downloads it.
+exportBtn.addEventListener('click', () => {
+  if (!sessionId || !currentClaudeSessionId) return;
+  const params = new URLSearchParams({ cwd: currentCwd || '', provider: currentProvider || 'claude' });
+  window.location.href = `/api/history/${currentClaudeSessionId}/markdown?${params}`;
 });
 
 // Cancel the in-flight turn - Grok CLI's Esc/Ctrl+C equivalent (see
@@ -1013,7 +1138,7 @@ approveBtn.addEventListener('click', () => {
   // is cleared once the request is gone, and reading it after the await
   // would race a fast-arriving next approval request for a different tool.
   const note = pendingApprovalToolName === 'ExitPlanMode' ? planNoteText.value.trim() : '';
-  sendApprovalDecision('allow', undefined, alwaysAllowBtn.checked).then(() => {
+  sendApprovalDecision('allow', undefined, alwaysAllowScope.value || undefined).then(() => {
     // Plan review's "append more before approving" (backlog.md) - queued as
     // a real follow-up turn right after approving (same ws 'input' path
     // compose.js uses, so it lands in the visible queue if a turn's already
@@ -1054,7 +1179,7 @@ async function sendApprovalDecision(decision, updatedInput, alwaysAllow, message
   approvalBanner.style.display = 'none';
   questionForm.style.display = 'none';
   questionForm.innerHTML = '';
-  alwaysAllowBtn.checked = false;
+  alwaysAllowScope.value = '';
   planReviewControls.style.display = 'none';
   pendingApprovalRequestId = null;
   pendingApprovalToolName = null;
@@ -1144,7 +1269,13 @@ async function loadResumable() {
     const info = document.createElement('div');
     info.className = 'resume-info';
     const title = document.createElement('div');
-    title.textContent = s.label || s.sessionId;
+    // A durable title (session-titles.js, joined server-side into s.title)
+    // takes over the primary line; the transcript-derived label (the old
+    // primary text) drops to the title tooltip instead of disappearing, so
+    // a renamed session doesn't lose the "what was this actually about"
+    // context the first message used to carry.
+    title.textContent = s.title || s.label || s.sessionId;
+    if (s.title && s.label) title.title = s.label;
     const cwd = document.createElement('div');
     cwd.className = 'cwd';
     cwd.textContent = s.cwd || s.projectDirName;
@@ -1160,15 +1291,34 @@ async function loadResumable() {
       info.append(time);
     }
     info.addEventListener('click', () => startSession({ cwd: s.cwd, resume: s.sessionId, provider }));
+    const renameBtn = document.createElement('button');
+    renameBtn.className = 'renameResumeBtn';
+    renameBtn.textContent = '✎';
+    renameBtn.title = 'Rename this session';
+    renameBtn.addEventListener('click', async (event) => {
+      event.stopPropagation();
+      const next = prompt('Rename this session:', s.title || '');
+      if (next === null) return;
+      try {
+        await fetch('/api/session-title', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ cwd: s.cwd, sessionId: s.sessionId, title: next }),
+        });
+        loadResumable();
+      } catch {
+        // offline/blocked - the list just keeps showing the old title, not fatal
+      }
+    });
     const viewBtn = document.createElement('button');
     viewBtn.className = 'viewHistoryBtn';
     viewBtn.textContent = 'View';
     viewBtn.title = 'Read-only transcript, no live session started';
     viewBtn.addEventListener('click', (event) => {
       event.stopPropagation();
-      historyPane.open({ sessionId: s.sessionId, cwd: s.cwd, label: s.label, provider });
+      historyPane.open({ sessionId: s.sessionId, cwd: s.cwd, label: s.title || s.label, provider });
     });
-    li.append(info, viewBtn);
+    li.append(info, renameBtn, viewBtn);
     resumeListEl.append(li);
   }
 }
@@ -1305,6 +1455,8 @@ function connect(id, token, { reconnect = false } = {}) {
   autoContinueLabel.style.display = 'flex';
   diffBtn.style.display = 'inline-block';
   compactBtn.style.display = 'inline-block';
+  copyLastBtn.style.display = 'inline-block';
+  exportBtn.style.display = 'inline-block';
   closeSessionBtn.style.display = 'inline-block';
   settingsBtn.style.display = 'inline-block';
 
@@ -1352,7 +1504,7 @@ function connect(id, token, { reconnect = false } = {}) {
       // bar in turn-chart.js find the tool blocks that produced it.
       const hasUsagePoint = payload.message.type === 'assistant' && payload.message._usageInfo;
       const turnPointIndex = hasUsagePoint ? turnChart.nextPointIndex() : null;
-      renderMessage(streamEl, payload.message, { onRewindClick, hasFileCheckpointing, turnIndexUnreliable, turnPointIndex, assistantLabel: sessionProviderLabel(), rewindLabel: rewindButtonLabel() });
+      renderMessage(streamEl, payload.message, { onRewindClick, hasFileCheckpointing, turnIndexUnreliable, turnPointIndex, assistantLabel: sessionProviderLabel(), rewindLabel: rewindButtonLabel(), receivedAtMs: Date.now() });
       // One bar per priced assistant turn (turn-chart.js) - same
       // message._usageInfo session-registry.js already stashes for
       // stream-view.js's inline "$0.0X, N in, M out" labels, just fed to
@@ -1373,12 +1525,20 @@ function connect(id, token, { reconnect = false } = {}) {
       showApprovalRequest(payload.request);
     } else if (payload.type === 'cockpit:usage') {
       statsPanel.update(payload.usage, payload.context, payload.rateLimits);
-      // Same red-zone threshold stats-panel.js's own context bar already
-      // uses (remaining < 20%) - not the SDK's isAutoCompactEnabled/
-      // autoCompactThreshold (units unconfirmed against `percentage`'s 0-100
-      // scale; not worth risking a wrong-scale false alarm over).
+      // context.autoCompact comes from src/context-usage.js server-side:
+      // the SDK's real threshold when it's confirmed plausible, else the
+      // same 80% fallback this used to hardcode. warnPercent/source drive
+      // both this button and stats-panel.js's contextBar coloring, so the
+      // two stop being independently-hardcoded constants.
       const pct = payload.context ? payload.context.percentage || 0 : 0;
-      compactBtn.classList.toggle('compact-urgent', pct >= 80);
+      const autoCompact = payload.context?.autoCompact;
+      const warnPercent = autoCompact?.warnPercent ?? 80;
+      compactBtn.classList.toggle('compact-urgent', pct >= warnPercent);
+      if (autoCompact) {
+        compactBtn.title = autoCompact.enabled
+          ? `Run /compact now to free up context (auto-compact fires around ${Math.round(warnPercent)}%${autoCompact.source === 'fallback' ? ', assumed' : ''})`
+          : 'Run /compact now to free up context (auto-compact is off for this session)';
+      }
     } else if (payload.type === 'cockpit:queue') {
       // Always the full current queue (session-registry.js's broadcastQueue
       // never sends a delta), sent on every attach and again on every real
@@ -1418,7 +1578,7 @@ function showApprovalRequest(request) {
   questionForm.style.display = 'none';
   questionForm.innerHTML = '';
   approvalPlain.style.display = 'flex';
-  alwaysAllowBtn.checked = false; // never carry a stale check into a different tool's request
+  alwaysAllowScope.value = ''; // never carry a stale scope into a different tool's request
   alwaysAllowToolName.textContent = request.toolName;
   pendingApprovalToolName = request.toolName;
 
@@ -1434,7 +1594,7 @@ function showApprovalRequest(request) {
 
   // Plan review (backlog.md) - preview + comment/revise, only for
   // ExitPlanMode. planFeedbackText/planNoteText always reset on a new
-  // request, same as alwaysAllowBtn above, so neither field leaks between
+  // request, same as alwaysAllowScope above, so neither field leaks between
   // this plan and whatever comes after it.
   planReviewControls.style.display = isPlan ? 'flex' : 'none';
   planFeedbackText.value = '';
@@ -1549,10 +1709,19 @@ function shortenCwd(cwd) {
 function applySession(session) {
   promptHistory.setCwd(session.cwd); // no-ops if unchanged - safe on every cockpit:state broadcast, not just the first
   currentProvider = session.provider === 'grok' ? 'grok' : 'claude';
+  currentCwd = session.cwd;
+  currentClaudeSessionId = session.claudeSessionId || null;
+  exportBtn.disabled = !currentClaudeSessionId;
+  currentSessionName = session.name || null;
   const providerLabel = sessionProviderLabel();
-  sessionLabelEl.textContent = `${shortenCwd(session.cwd)}  ·  ${providerLabel}${session.tabCount > 1 ? `  ·  ${session.tabCount} tabs` : ''}`;
-  sessionLabelEl.title = `${session.cwd} - click to rename this browser tab`; // full path survives on hover once the label itself is truncated
-  if (!tabChrome.isUserNamed()) tabChrome.setAutoName(session.cwd.split('/').filter(Boolean).pop() || session.cwd);
+  // A durable title (session.name, set via the rename prompt below or
+  // carried forward from a resumed transcript - session-titles.js) takes
+  // over the label entirely; otherwise the usual cwd/provider/tab-count
+  // summary.
+  sessionLabelEl.textContent = currentSessionName
+    || `${shortenCwd(session.cwd)}  ·  ${providerLabel}${session.tabCount > 1 ? `  ·  ${session.tabCount} tabs` : ''}`;
+  sessionLabelEl.title = `${session.cwd} - click to rename this session`; // full path survives on hover once the label itself is truncated
+  if (!tabChrome.isUserNamed()) tabChrome.setAutoName(currentSessionName || session.cwd.split('/').filter(Boolean).pop() || session.cwd);
   setState(session.state);
   currentMode = session.mode;
   currentModel = session.model;
