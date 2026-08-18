@@ -172,6 +172,14 @@ export function renderMessage(container, message, { onRewindClick, hasFileCheckp
       return renderResult(container, message, timestampMs);
     case 'rate_limit_event':
       return; // noise - not actionable per-turn
+    case 'cockpit:delegate-sent':
+      // MVP5 cross-session delegation (backlog.md) - cockpit-only marker,
+      // never a real SDK message, appended straight to the origin's own
+      // eventLog by session-registry.js's delegateTask so it survives
+      // reconnect. Minimal/textual per the confirmed v1 scope - no special
+      // styling beyond the existing 'system' block class.
+      closeGroup(container);
+      return appendBlock(container, 'system', 'Delegated', `-> Asked ${message.targetName}: ${message.text}`, [], container, null, null, timestampMs);
     default:
       return; // large open-ended SDKMessage union; unhandled types stay silent
   }
@@ -208,6 +216,15 @@ function renderAssistant(container, message, turnPointIndex = null, assistantLab
   for (const block of blocks) {
     if (block.type === 'text') {
       closeGroup(container); // real reply - whatever tool run preceded it is done
+      // Grok streams agent_message_chunk one token at a time. Append to the
+      // last assistant card instead of opening a new one per word.
+      if (appendToLastStreamBlock(container, 'assistant', block.text, true)) {
+        if (turnPointIndex != null) {
+          const last = container.lastElementChild;
+          if (last) last.dataset.turnPoint = String(turnPointIndex);
+        }
+        continue;
+      }
       const wrap = appendBlock(container, 'assistant', assistantLabel, block.text, [], container, null, usage, timestampMs, true); // the actual reply - never collapsed; markdown-rendered (see markdown.js)
       // Text-only turns (no tool_use blocks) otherwise never get tagged, so
       // clicking their bar in turn-chart.js just clears whatever highlight
@@ -218,6 +235,10 @@ function renderAssistant(container, message, turnPointIndex = null, assistantLab
     } else if (block.type === 'thinking') {
       closeGroup(container); // keeps DOM order honest: thinking always precedes the calls that follow it
       if (!block.thinking || !block.thinking.trim()) continue; // signature-only/empty thinking blocks - nothing to show
+      // Same token-stream problem as text: Grok thought chunks are often
+      // one word (sometimes "word\n") each. A new .msg.thinking per chunk
+      // is what made thinking render as one word per line.
+      if (appendToLastStreamBlock(container, 'thinking', block.thinking, false)) continue;
       appendBlock(container, 'thinking', 'Thinking', block.thinking, [], container, null, usage, timestampMs); // always fully rendered now, no collapse/expand affordance (see module comment)
     } else if (block.type === 'tool_use') {
       // Same live-vs-historical split as appendToolCallRow's own startedAtMs
@@ -475,6 +496,29 @@ function summarizeToolInput(name, input) {
   return `${key}: ${JSON.stringify(truncated)}`;
 }
 
+// MVP5 cross-session delegation: session-registry.js wraps both directions
+// of the exchange in a self-identifying tag before pushing them as a plain
+// user turn - <delegated_task from="..."> going out (delegateTask), and
+// <delegated_result from="..." task="..."> coming back (relayDelegationResult).
+// Without unwrapping here, the bubble would show "You" for a turn neither
+// side's human actually typed. Body text was escaped server-side (escapeBody/
+// escapeAttr) only to stop it from spoofing the wrapper's own boundaries for
+// the model reading it - safe, and expected, to unescape purely for display.
+const DELEGATED_TASK_RE = /^<delegated_task from="([^"]*)">\n([\s\S]*)\n<\/delegated_task>$/;
+const DELEGATED_RESULT_RE = /^<delegated_result from="([^"]*)" task="[^"]*"(?: status="error")?>\n([\s\S]*)\n<\/delegated_result>$/;
+
+function unescapeDelegated(s) {
+  return String(s).replace(/&lt;/g, '<').replace(/&quot;/g, '"').replace(/&amp;/g, '&');
+}
+
+function delegatedLabelAndText(text) {
+  const taskMatch = DELEGATED_TASK_RE.exec(text);
+  if (taskMatch) return { label: unescapeDelegated(taskMatch[1]), text: unescapeDelegated(taskMatch[2]) };
+  const resultMatch = DELEGATED_RESULT_RE.exec(text);
+  if (resultMatch) return { label: unescapeDelegated(resultMatch[1]), text: unescapeDelegated(resultMatch[2]) };
+  return null;
+}
+
 function renderUser(container, message, onRewindClick, hasFileCheckpointing, rewindLabel, timestampMs = null, toolOpts = {}) {
   const content = message.message && message.message.content;
   if (message.isSynthetic) return; // priming sentinel, not a real turn
@@ -496,7 +540,8 @@ function renderUser(container, message, onRewindClick, hasFileCheckpointing, rew
     const actions = onRewindClick && message.turnIndex
       ? [{ label, onClick: () => onRewindClick(message.turnIndex) }]
       : [];
-    appendBlock(container, 'user', 'You', content, actions, container, null, null, timestampMs);
+    const delegated = delegatedLabelAndText(content);
+    appendBlock(container, 'user', delegated ? delegated.label : 'You', delegated ? delegated.text : content, actions, container, null, null, timestampMs);
     return;
   }
   if (Array.isArray(content)) {
@@ -529,7 +574,8 @@ function renderUser(container, message, onRewindClick, hasFileCheckpointing, rew
         toolOpts.onToolResultArrived?.(container, block.tool_use_id);
       } else if (block.type === 'text') {
         closeGroup(container);
-        appendBlock(container, 'user', 'You', block.text, [], container, null, null, timestampMs);
+        const delegated = delegatedLabelAndText(block.text);
+        appendBlock(container, 'user', delegated ? delegated.label : 'You', delegated ? delegated.text : block.text, [], container, null, null, timestampMs);
       }
     }
   }
@@ -730,6 +776,50 @@ export function renderBody(body, content, hint = null, markdown = false) {
 // node instead. `container` always stays the scroll-position/registry
 // reference regardless of where the block physically lands, since `parent`
 // is always a descendant of it.
+// Grok streams BPE pieces (Rac + oon). Inventing a space between every
+// bare pair is what turned "Racoon" into "Rac oon". A single trailing
+// newline is the one case that is a word boundary rather than a
+// paragraph. Keep this in sync with src/grok-messages.js joinStreamText.
+function joinStreamText(existing, next) {
+  const left = existing ?? '';
+  const right = next ?? '';
+  if (!left) return right;
+  if (!right) return left;
+  let a = left;
+  if (a.endsWith('\n') && !a.endsWith('\n\n') && !right.startsWith('\n')) {
+    a = a.slice(0, -1);
+    if (/\s$/.test(a) || /^\s/.test(right) || /^[,.;:!?')\]}]/.test(right)) {
+      return a + right;
+    }
+    return `${a} ${right}`;
+  }
+  return a + right;
+}
+
+// If the last block in `container` is already the same kind of streamed
+// assistant/thinking card, append `text` onto it and return true. Used
+// while Grok is still mid-thought / mid-reply so we don't stack a new
+// .msg per token.
+function appendToLastStreamBlock(container, cls, text, markdown) {
+  const last = container.lastElementChild;
+  if (!last || !last.classList.contains('msg') || !last.classList.contains(cls)) return false;
+  const body = last.querySelector('.body');
+  if (!body) return false;
+  const wasAtBottom = isScrolledToBottom(container);
+  if (markdown) {
+    const prev = Object.prototype.hasOwnProperty.call(body.dataset, 'rawText')
+      ? body.dataset.rawText
+      : (body.textContent ?? '');
+    const next = joinStreamText(prev, text);
+    body.dataset.rawText = next;
+    renderBody(body, next, null, true);
+  } else {
+    body.textContent = joinStreamText(body.textContent ?? '', text);
+  }
+  if (wasAtBottom) container.scrollTop = container.scrollHeight;
+  return true;
+}
+
 function appendBlock(container, cls, roleLabel, text, actions = [], parent = container, hint = null, meta = null, timestampMs = null, markdown = false) {
   const wasAtBottom = isScrolledToBottom(container);
 
@@ -773,6 +863,10 @@ function appendBlock(container, cls, roleLabel, text, actions = [], parent = con
   const body = document.createElement('div');
   body.className = 'body';
   renderBody(body, text, hint, markdown);
+  // Live Grok text chunks re-render markdown from this raw string (see
+  // appendToLastStreamBlock). Without it, later tokens would be joined
+  // onto the already-rendered visible text and lose the source form.
+  if (markdown && typeof text === 'string') body.dataset.rawText = text;
 
   wrap.append(roleRow, body);
   parent.append(wrap);

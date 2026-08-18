@@ -35,6 +35,16 @@ test('messagesToMarkdown tucks thinking into a <details> block', () => {
   assert.match(md, /<\/details>/);
 });
 
+test('messagesToMarkdown coalesces consecutive one-word thinking chunks', () => {
+  const messages = ['The\n', 'user\n', 'asked.'].map((thinking) => ({
+    type: 'assistant',
+    message: { role: 'assistant', content: [{ type: 'thinking', thinking }] },
+  }));
+  const md = messagesToMarkdown(messages);
+  assert.equal((md.match(/<details>/g) || []).length, 1);
+  assert.match(md, /The user asked\./);
+});
+
 test('messagesToMarkdown skips an empty/signature-only thinking block', () => {
   const messages = [{ type: 'assistant', message: { role: 'assistant', content: [{ type: 'thinking', thinking: '   ' }] } }];
   const md = messagesToMarkdown(messages);

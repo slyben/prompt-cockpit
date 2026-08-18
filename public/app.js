@@ -31,6 +31,7 @@ const sessionLabelEl = document.getElementById('sessionLabel');
 const stateLabelEl = document.getElementById('stateLabel');
 const stateIconEl = document.getElementById('stateIcon');
 const cwdInput = document.getElementById('cwdInput');
+const startNameInput = document.getElementById('startNameInput');
 const startBtn = document.getElementById('startBtn');
 const startProviderSelect = document.getElementById('startProviderSelect');
 const startModelSelect = document.getElementById('startModelSelect');
@@ -198,6 +199,17 @@ let currentSessionName = null; // session.name - the durable title (session-titl
 function sessionProviderLabel() {
   return currentProvider === 'grok' ? 'Grok' : 'Claude';
 }
+
+// Compose-box addressee: the session's own name when it has one (launcher
+// "Name" field / rename), otherwise Claude or Grok. Used by the placeholder
+// so a Grok tab never still says "Message Claude...".
+function sessionAddressName() {
+  return currentSessionName || sessionProviderLabel();
+}
+
+function composePlaceholder() {
+  return `Message ${sessionAddressName()}... (Enter to send, Shift+Enter for newline, @ for files, / for commands)`;
+}
 let cachedModels = null; // Query.supportedModels() result, fetched once per session on first /model - see fetchModels
 // Whether the plugin panel has already paid its one reload cost for this
 // session (B2) - opening Settings repeatedly used to re-run reload-plugins
@@ -355,6 +367,31 @@ const compose = initCompose({
   sendGroupEl: document.getElementById('composeSendGroup'),
   onSend: (text) => {
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    // MVP5 cross-session delegation (backlog.md) - `/ask <Name>: <text>`,
+    // colon required, name is everything up to the first colon (trimmed).
+    // Checked before the agent-prefix logic below: a delegate command must
+    // never get wrapped in a Task-tool instruction or sent as a plain
+    // 'input' turn - it's routed to a different session entirely.
+    const trimmed = text.trim();
+    const delegateMatch = /^\/ask\s+([^:]+):\s*([\s\S]+)$/i.exec(trimmed);
+    if (delegateMatch) {
+      const targetName = delegateMatch[1].trim();
+      const task = delegateMatch[2].trim();
+      ws.send(JSON.stringify({ type: 'delegate', targetName, text: task }));
+      return;
+    }
+    // A malformed /ask (missing the colon, or nothing after it) must not
+    // fall through to the plain-input path below - that would ship the
+    // literal text "/ask ..." to this session's own model, which has no way
+    // to know it's a misfired cockpit command and tries to resolve it as one
+    // of ITS OWN slash commands instead (confirmed in review: shows "Unknown
+    // command: /ask. Did you mean /fast?", which is actively misleading -
+    // this was never headed for the model at all). Caught here, before it
+    // ever reaches the websocket, with the actual fix spelled out.
+    if (/^\/ask\b/i.test(trimmed)) {
+      alert('To send to a session, use: /ask <Name>: <text>\n(e.g. "/ask Grok: send to session Grok this text")');
+      return;
+    }
     // Sticky agent prefix (see selectedAgentName above) - a plain
     // instruction, not an SDK-enforced setting, so it's visible in the
     // transcript like anything else you'd type by hand. Never applied to a
@@ -1293,10 +1330,10 @@ async function onRewindClick(turnIndex) {
   const fileNote = hasFileCheckpointing
     ? 'Also reverts files to this point.'
     : currentProvider === 'grok'
-      ? 'Later turns in this session are dropped. Files on disk are left as-is.'
+      ? 'Files on disk are left as-is. This session stays open.'
       : 'This session has no file snapshots (resumed session) - conversation only, files are untouched.';
   const lead = currentProvider === 'grok'
-    ? 'Fork back to here? Reopens this Grok session at this turn.'
+    ? 'Fork back to here? Opens a new Grok session at this turn.'
     : 'Rewind here? Opens a new session forked at this point.';
   if (!confirm(`${lead} ${fileNote}`)) return;
   const res = await fetch(`/api/sessions/${sessionId}/rewind`, {
@@ -1441,14 +1478,18 @@ startBtn.addEventListener('click', () => {
   // never having picked one, not a literal 'default' string the SDK would
   // have to resolve.
   const model = startModelSelect.value || undefined;
-  startSession({ cwd, model, provider: selectedProvider() });
+  // MVP5 cross-session delegation (backlog.md) - name is what another
+  // session addresses this one by via `/ask <Name>: ...`. Optional: an
+  // unnamed session just can't be delegated to, same as today.
+  const name = startNameInput.value.trim() || undefined;
+  startSession({ cwd, model, provider: selectedProvider(), name });
 });
 
-async function startSession({ cwd, resume, model, provider }) {
+async function startSession({ cwd, resume, model, provider, name }) {
   const res = await fetch('/api/sessions', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ cwd, resume, model, provider }),
+    body: JSON.stringify({ cwd, resume, model, provider, name }),
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
@@ -1638,6 +1679,14 @@ function connect(id, token, { reconnect = false } = {}) {
       // just re-running the same GET refresh() does on open is simpler
       // than adding a second render path for one push message.
       if (document.getElementById('settingsModal').style.display !== 'none') mcpPanel.refresh();
+    } else if (payload.type === 'cockpit:delegate-error') {
+      // MVP5 cross-session delegation (backlog.md) - server.js sends this
+      // straight back on the origin's own socket when delegateTask throws
+      // (unknown name, self-delegation, cross-cwd). No durable eventLog
+      // entry for this one (unlike the success marker) - it's a synchronous
+      // rejection of something that never actually got sent anywhere, so
+      // there's nothing for a reconnecting tab to replay.
+      alert(`Could not ask "${payload.targetName}": ${payload.error}`);
     } else if (payload.type === 'cockpit:queue') {
       // Always the full current queue (session-registry.js's broadcastQueue
       // never sends a delta), sent on every attach and again on every real
@@ -1812,6 +1861,8 @@ function applySession(session) {
   currentClaudeSessionId = session.claudeSessionId || null;
   exportBtn.disabled = !currentClaudeSessionId;
   currentSessionName = session.name || null;
+  compose.setDefaultPlaceholder(composePlaceholder());
+  copyLastBtn.title = `Copy ${sessionAddressName()}'s most recent reply`;
   const providerLabel = sessionProviderLabel();
   // A durable title (session.name, set via the rename prompt below or
   // carried forward from a resumed transcript - session-titles.js) takes

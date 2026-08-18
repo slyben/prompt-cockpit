@@ -910,6 +910,10 @@
     color: var(--muted);
     font-style: italic;
     font-size: 12.5px;
+    /* Grok thought tokens often include a trailing newline. pre-wrap would
+       keep those as one word per line even after chunks are concatenated.
+       Collapse them so thinking reads as wrapped prose. */
+    white-space: normal;
   }
 
   /* Role/tool color coding, terminal-style - each kind gets its own label
@@ -1527,6 +1531,7 @@
       <button id="browseBtn">Browse</button>
     </div>
     <div class="start-row">
+      <input id="startNameInput" type="text" placeholder="Name (e.g. Claude)" title="MVP5: lets another session /ask this one by name" />
       <select id="startModelSelect">
         <option value="">Default model</option>
         <option value="sonnet">Sonnet</option>
@@ -1708,7 +1713,7 @@
          message, same path as typing it - there is no separate SDK method
          for it. Hidden until a session exists, same as diffBtn. -->
     <button id="compactBtn" style="display:none" title="Run /compact now to free up context">Compact</button>
-    <button id="copyLastBtn" style="display:none" title="Copy Claude's most recent reply">Copy reply</button>
+    <button id="copyLastBtn" style="display:none" title="Copy the most recent reply">Copy reply</button>
     <button id="exportBtn" style="display:none" title="Download the whole transcript as markdown">Export .md</button>
   </div>
   <div id="compose">
@@ -1729,7 +1734,7 @@
          (.cmd-name/.cmd-desc, dropdown positioning) under its own id, same
          as modelSuggestions already does under commandSuggestions'. -->
     <ul id="historySuggestions"></ul>
-    <textarea id="composeInput" placeholder="Message Claude... (Enter to send, Shift+Enter for newline, @ for files, / for commands)"></textarea>
+    <textarea id="composeInput" placeholder="Message... (Enter to send, Shift+Enter for newline, @ for files, / for commands)"></textarea>
     <div id="composeSendGroup">
       <select id="modeBtn" style="display:none" title="Pick a mode directly, or press Shift+Tab to cycle"></select>
       <!-- Query.setMaxThinkingTokens(tokens, display) moved entirely into the

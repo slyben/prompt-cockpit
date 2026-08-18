@@ -4,7 +4,7 @@ import { createReadStream, existsSync, readdirSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import path from 'node:path';
 import { grokSessionsRoot } from './grok-launcher.js';
-import { acpUpdateToMessages } from './grok-messages.js';
+import { acpUpdateToMessages, coalesceAssistantMessages } from './grok-messages.js';
 
 const MAX_LINES = 5000;
 
@@ -31,7 +31,7 @@ export async function fetchGrokSessionHistory(sessionId, cwd, sessionsDir = grok
     messages.push(...acpUpdateToMessages(update, sessionId));
   }
   rl.close();
-  return messages;
+  return coalesceAssistantMessages(messages);
 }
 
 // Session ids are directory names under ~/.grok/sessions/<cwd>/. Reject

@@ -150,6 +150,19 @@ async function handleRequest(req, res) {
     // when given (currently no client path sends it, but the field exists
     // on createSession - see session-registry.js).
     const name = body.name || (body.resume ? await getSessionTitle(cwd, body.resume).catch(() => null) : null);
+    // MVP5 cross-session delegation (backlog.md) addresses sessions by name
+    // within a cwd, so names must be unique there. This is a fast-fail only
+    // - it avoids wasting the effort validation/history fetch on a request
+    // that's doomed anyway - NOT the authoritative check: two concurrent
+    // requests for the same name could both pass this one (it runs before
+    // createSession, with nothing stopping a second request's own check
+    // from also running before either has created a row). createSession
+    // itself is what actually prevents the collision (session-registry.js -
+    // no `await` between its own check and the row being added), caught
+    // below via err.code.
+    if (name && registry.findByName(cwd, name)) {
+      return respondJson(res, 409, { error: `a session named "${name}" already exists in this project` });
+    }
     let effort;
     if (provider === 'grok' && typeof body.effort === 'string' && body.effort) {
       if (!registry.GROK_EFFORTS.includes(body.effort)) {
@@ -157,7 +170,13 @@ async function handleRequest(req, res) {
       }
       effort = body.effort;
     }
-    const row = registry.createSession({ cwd, resume: body.resume, name, model, provider, effort, history });
+    let row;
+    try {
+      row = registry.createSession({ cwd, resume: body.resume, name, model, provider, effort, history });
+    } catch (err) {
+      if (err.code === 'ERR_NAME_TAKEN') return respondJson(res, 409, { error: err.message });
+      throw err;
+    }
     await seedSessionDefaults(row); // thinking budget/auto-continue carried forward from this cwd's last-used values (session-defaults.js)
     return respondJson(res, 201, {
       id: row.id,
@@ -501,6 +520,18 @@ async function handleSessionRoute(req, res, url, id, action) {
     if (!row.claudeSessionId) {
       return respondJson(res, 409, { error: 'session has no claude session id yet - try again once it has started' });
     }
+    // Same MVP5 uniqueness requirement as the POST /api/sessions route above
+    // - a rename must not collide with another live session's name in the
+    // same cwd either. Fast-fail only, same caveat as the create route's own
+    // pre-check - registry.setSessionName below is the authoritative,
+    // race-free check (err.code === 'ERR_NAME_TAKEN', caught below).
+    const trimmedTitle = title.trim() || null;
+    if (trimmedTitle) {
+      const existing = registry.findByName(row.cwd, trimmedTitle);
+      if (existing && existing.id !== id) {
+        return respondJson(res, 409, { error: `a session named "${trimmedTitle}" already exists in this project` });
+      }
+    }
     try {
       await registry.setSessionName(id, title.trim() || null);
       try {
@@ -510,6 +541,7 @@ async function handleSessionRoute(req, res, url, id, action) {
       }
       return respondJson(res, 200, { title: title.trim() || null });
     } catch (err) {
+      if (err.code === 'ERR_NAME_TAKEN') return respondJson(res, 409, { error: err.message });
       return respondJson(res, 500, { error: String(err.message || err) });
     }
   }
@@ -631,6 +663,7 @@ async function handleSessionRoute(req, res, url, id, action) {
           cwd: row.cwd,
           resume: result.forkedSessionId,
           model: row.model,
+          effort: row.effort,
           permissionMode: row.mode,
           provider: row.provider,
           history: forkedHistory,
@@ -830,6 +863,19 @@ wss.on('connection', (ws, req, id, since) => {
       registry.sendNow(id, payload.queueId).catch((err) => {
         console.error(`sendNow failed for ${id}:`, err);
       });
+    }
+    // MVP5 cross-session delegation (backlog.md) - `/ask <Name>: <text>`
+    // parsed client-side (app.js's onSend) into this payload shape. Errors
+    // (unknown name, self-delegation, cross-cwd) are synchronous throws
+    // from delegateTask - sent straight back on THIS socket (the origin's
+    // own), not broadcast, since only the tab that typed the bad command
+    // needs to see it.
+    if (payload.type === 'delegate' && typeof payload.targetName === 'string' && typeof payload.text === 'string' && payload.text.length > 0) {
+      try {
+        registry.delegateTask(id, payload.targetName, payload.text);
+      } catch (err) {
+        ws.send(JSON.stringify({ type: 'cockpit:delegate-error', targetName: payload.targetName, error: String(err.message || err) }));
+      }
     }
   });
 

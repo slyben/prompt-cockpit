@@ -1,36 +1,55 @@
 # Prompt Cockpit
 
-A browser app for driving agent coding sessions - "I don't prompt a terminal directly, I use an app to prompt a specific session" - plus a live cost/token readout, borrowed from `claude-realtime-usage`.
-
-The cockpit drives Claude Code sessions through `@anthropic-ai/claude-agent-sdk` and Grok sessions through the Grok CLI's JSON-RPC stdio interface, rendering the message stream itself. It does not wrap a pty and pipe raw bytes to `xterm.js`.
+A local browser UI for driving a Claude Code or Grok session against a project folder. You pick a provider and a directory, type in the compose box, and the cockpit renders the stream, tool calls, diffs, and a live cost/token strip. It talks to the CLIs over their APIs. It does not wrap a terminal.
 
 ![Prompt Cockpit session view with live cost graph](docs/screenshot.jpg)
+
+## What you need
+
+- **Node.js 18+**
+- At least one logged-in coding agent on this machine:
+  - **Claude**: [Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed, then `claude login`
+  - **Grok**: the `grok` binary on `PATH` (or set `GROK_BIN`), then `grok login`
+- The cockpit does not store API keys. It drives whatever login the CLI already has.
+
+The server binds to `127.0.0.1` only. Do not expose it to the network.
 
 ## Run
 
 ```
-npm install   # first time only, to fetch dependencies
+npm install   # first time only
 npm start
 ```
 
-Open `http://localhost:4317` (set `PORT` to use a different port).
+Open [http://localhost:4317](http://localhost:4317). Set `PORT` if 4317 is taken (`PORT=4318 npm start`).
 
-## Requirements
+## First session
 
-The cockpit does not manage auth itself - it just drives CLIs that are already logged in on the machine running the server:
+1. Choose **Claude** or **Grok** in the launcher.
+2. Point it at a project folder (type a path, pick a recent one, or Browse).
+3. Optionally name the session (needed later if another session will `/ask` it) and pick a model. Leave the model on Default to use the CLI's usual one.
+4. Click **Start**.
+5. Type a prompt and send. Approvals (plan exit, gated tools) show up as a banner above the compose box.
 
-- **Claude**: the `@anthropic-ai/claude-agent-sdk` uses your existing Claude Code login (`claude login`).
-- **Grok**: the `grok` binary must be on `PATH` (or set `GROK_BIN`) and already logged in; session history is read from `~/.grok/sessions`.
+**Resume** lists past sessions for the selected provider. **Start** resumes live; **View** opens the transcript read-only.
+
+A Claude tab and a Grok tab can run at the same time. A session keeps the provider it was started with. You cannot open a Claude transcript as a Grok session, or the other way around.
+
+## Once you are in a session
+
+- **Mode cycle** (Shift+Tab on the compose box, or the mode control) - default / plan / accept-edits and the rest of the CLI's modes.
+- **Rewind** on a user turn - opens a new session forked at that point. The original stays. Claude can also revert files when this process started the session fresh. Grok is conversation-only (files on disk stay as they are).
+- **`@`** in the compose box - file autocomplete in the project.
+- **Cost strip** - spend, tokens in/out, cache hit rate, context used. Grok also has an effort picker instead of Claude's thinking-token budget.
+- **`/ask Name: …`** - send a task to another named session in the same folder. The answer comes back as a queued turn.
+
+Settings (gear) covers MCP servers, plugins, permission rules, and UI prefs. On Grok, MCP/plugin toggles go through the Grok CLI (`grok inspect` / `grok mcp` / `grok plugin`) and may need a new session before the agent picks them up.
 
 ## Status
 
-- **MVP1 - a session in a browser.** Shipped.
-- **MVP2 - plan mode, mode cycling, rewind, `@` autocomplete, diff viewer.** Shipped.
-- **MVP3 - client robustness** (reconnect, tab chrome, activity state). Shipped.
-- **MVP4 - live stats panel.** Shipped. Header strip: cost, tokens in/out, cache hit rate, context percentage, live off the message stream. Read-only history viewer for any past session via the resume list's "View" button. Grok backend wired in alongside Claude Code at the end of this milestone.
-- MVP5-MVP7 (Windows-hosted sessions, cross-session messaging, phone approvals) not started.
+MVP1-MVP5 shipped (session in a browser, plan/rewind/`@`/diffs, reconnect, live stats, Grok backend, cross-session `/ask`). MVP6-MVP7 (Windows-hosted sessions over SSH, phone approvals) are not started.
 
-See `tests/README.md` for what is covered by automated tests versus hand-verified only.
+See `tests/README.md` for automated vs hand-verified coverage, and `backlog.md` for open follow-ups.
 
 ## License
 

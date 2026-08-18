@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { acpUpdateToMessages, turnResultMessage, pickPermissionOption, grokPermissionAction } from '../src/grok-messages.js';
+import { acpUpdateToMessages, turnResultMessage, pickPermissionOption, grokPermissionAction, joinStreamText, coalesceAssistantMessages } from '../src/grok-messages.js';
 
 test('agent_message_chunk becomes an assistant text message', () => {
   const msgs = acpUpdateToMessages({
@@ -95,6 +95,45 @@ test('turn_completed becomes an assistant message with model + usage', () => {
   assert.equal(msgs[0].message.usage.input_tokens, 10);
   assert.equal(msgs[0].message.usage.output_tokens, 4);
   assert.equal(msgs[0].message.usage.cache_read_input_tokens, 2);
+});
+
+test('joinStreamText treats a single trailing newline as a token boundary', () => {
+  assert.equal(joinStreamText('The\n', 'user\n'), 'The user\n');
+  assert.equal(joinStreamText('The user\n', 'wants'), 'The user wants');
+  assert.equal(joinStreamText('para 1\n\n', 'para 2'), 'para 1\n\npara 2');
+  assert.equal(joinStreamText('Hello', ' world'), 'Hello world');
+  assert.equal(joinStreamText('Hello ', 'world'), 'Hello world');
+  assert.equal(joinStreamText('end', '.'), 'end.');
+});
+
+test('joinStreamText does not invent spaces between bare BPE pieces', () => {
+  assert.equal(joinStreamText('Rac', 'oon'), 'Racoon');
+  assert.equal(joinStreamText('un', 'committed'), 'uncommitted');
+  assert.equal(joinStreamText('"', 'output'), '"output');
+  assert.equal(joinStreamText('summary', '/'), 'summary/');
+  assert.equal(joinStreamText('summary/', 'documentation'), 'summary/documentation');
+});
+
+test('coalesceAssistantMessages merges consecutive thinking tokens into one block', () => {
+  const chunks = ['The\n', 'user\n', 'wants\n', 'this.'].map((thinking) => (
+    acpUpdateToMessages({ sessionUpdate: 'agent_thought_chunk', content: { text: thinking } }, 's')[0]
+  ));
+  const merged = coalesceAssistantMessages(chunks);
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].message.content[0].type, 'thinking');
+  assert.equal(merged[0].message.content[0].thinking, 'The user wants this.');
+});
+
+test('coalesceAssistantMessages does not merge thinking across a tool call', () => {
+  const msgs = [
+    ...acpUpdateToMessages({ sessionUpdate: 'agent_thought_chunk', content: { text: 'hmm' } }, 's'),
+    ...acpUpdateToMessages({ sessionUpdate: 'tool_call', toolCallId: 'c1', toolName: 'read_file' }, 's'),
+    ...acpUpdateToMessages({ sessionUpdate: 'agent_thought_chunk', content: { text: 'ok' } }, 's'),
+  ];
+  const merged = coalesceAssistantMessages(msgs);
+  assert.equal(merged.length, 3);
+  assert.equal(merged[0].message.content[0].thinking, 'hmm');
+  assert.equal(merged[2].message.content[0].thinking, 'ok');
 });
 
 test('usage and usage_update do not become cost-bearing messages', () => {

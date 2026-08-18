@@ -382,6 +382,13 @@ export function startSession({ cwd, resume, model, permissionMode, turnIndexOffs
     onMessage({ ...wireMessage, turnIndex: turnCounter, queueId });
     onStateChange('running');
     if (queued) onQueueChange?.(inputQueue.list());
+    // MVP5 cross-session delegation (backlog.md): the registry needs this to
+    // correlate a specific pushed turn with its eventual `result` message
+    // (and with later queue-remove/-reorder/-send-now calls) - positional
+    // FIFO alone breaks the moment removeQueued/reorderQueue touch a queue
+    // that has a delegated turn sitting in it. Purely additive - every
+    // existing caller that ignores the return value keeps working.
+    return queueId;
   }
 
   // Queue pane operations (backlog.md) - all no-ops (false/[]) once the

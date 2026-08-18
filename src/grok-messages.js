@@ -143,6 +143,57 @@ export function turnResultMessage(sessionId, stopReason) {
   };
 }
 
+// Grok streams BPE pieces (Rac + oon). Inventing a space between every
+// bare pair is what turned "Racoon" into "Rac oon". A single trailing
+// newline is the one case that is a word boundary rather than a
+// paragraph; a real blank line (\n\n) is kept. Keep this in sync with
+// public/stream-view.js joinStreamText.
+export function joinStreamText(existing, next) {
+  const left = existing ?? '';
+  const right = next ?? '';
+  if (!left) return right;
+  if (!right) return left;
+  let a = left;
+  if (a.endsWith('\n') && !a.endsWith('\n\n') && !right.startsWith('\n')) {
+    a = a.slice(0, -1);
+    if (/\s$/.test(a) || /^\s/.test(right) || /^[,.;:!?')\]}]/.test(right)) {
+      return a + right;
+    }
+    return `${a} ${right}`;
+  }
+  return a + right;
+}
+
+function canMergeAssistant(prev, msg) {
+  if (!prev || !msg || prev.type !== 'assistant' || msg.type !== 'assistant') return false;
+  const a = prev.message && prev.message.content;
+  const b = msg.message && msg.message.content;
+  if (!Array.isArray(a) || !Array.isArray(b) || a.length !== 1 || b.length !== 1) return false;
+  if (a[0].type !== b[0].type) return false;
+  return a[0].type === 'thinking' || a[0].type === 'text';
+}
+
+// Collapse a run of single-block assistant thinking/text messages into one
+// so history, export, and any batch replay don't render one card per token.
+export function coalesceAssistantMessages(messages) {
+  const out = [];
+  for (const msg of messages || []) {
+    const prev = out[out.length - 1];
+    if (canMergeAssistant(prev, msg)) {
+      const prevBlock = prev.message.content[0];
+      const nextBlock = msg.message.content[0];
+      if (prevBlock.type === 'thinking') {
+        prevBlock.thinking = joinStreamText(prevBlock.thinking, nextBlock.thinking);
+      } else {
+        prevBlock.text = joinStreamText(prevBlock.text, nextBlock.text);
+      }
+      continue;
+    }
+    out.push(msg);
+  }
+  return out;
+}
+
 export function pickPermissionOption(options, allow) {
   const list = Array.isArray(options) ? options : [];
   const wanted = allow ? ['allow_once', 'allow_always'] : ['reject_once', 'reject_always'];

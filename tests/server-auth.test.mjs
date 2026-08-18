@@ -721,6 +721,73 @@ for (const { action, body } of NEWER_ROUTES) {
   });
 }
 
+// MVP5 cross-session delegation (backlog.md) - names must be unique within
+// a cwd so `/ask <Name>: ...` addressing is unambiguous. Only the 409 path
+// is exercised over real HTTP: it's caught before registry.createSession
+// ever runs, so no real CLI process gets spawned. The success path (a
+// distinct name creating fine) isn't re-tested here - it would spawn a real
+// session via the default startSessionImpl, same reason every other test in
+// this file avoids a bare POST /api/sessions without a validation failure.
+test('POST /api/sessions rejects a name already used by another live session in the same cwd', async () => {
+  registry._reset();
+  const cwd = process.cwd();
+  registry.createSession({ cwd, name: 'Grok', startSessionImpl: fakeStartSession });
+
+  const res = await fetch(`${ORIGIN}/api/sessions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ cwd, name: 'grok' }), // case-insensitive collision
+  });
+  assert.equal(res.status, 409);
+  assert.match((await res.json()).error, /already exists/);
+});
+
+test('POST /api/sessions/:id/title rejects renaming to a name already used by another live session in the same cwd', async () => {
+  registry._reset();
+  const cwd = '/tmp';
+  registry.createSession({ cwd, name: 'Grok', startSessionImpl: fakeStartSession });
+  const row = registry.createSession({ cwd, resume: 'transcript-session-x', name: 'Claude', startSessionImpl: fakeStartSession });
+
+  const res = await fetch(`${ORIGIN}/api/sessions/${row.id}/title`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${row.token}` },
+    body: JSON.stringify({ title: 'Grok' }),
+  });
+  assert.equal(res.status, 409);
+  assert.match((await res.json()).error, /already exists/);
+  assert.equal(registry.get(row.id).name, 'Claude', 'the rejected rename must not have taken effect');
+});
+
+// End-to-end over a real websocket: a bad `/ask` target must produce a
+// visible error back on the SAME socket that sent it, not silence and not a
+// broadcast every other tab would also see.
+test('a delegate ws payload with an unknown target name gets a cockpit:delegate-error back on the same socket', async () => {
+  registry._reset();
+  const row = registry.createSession({ cwd: '/tmp', name: 'Claude', startSessionImpl: fakeStartSession });
+
+  const ws = new WebSocket(`ws://${HOST}:${PORT}/ws?id=${row.id}&token=${row.token}`, {
+    headers: { Origin: ORIGIN },
+  });
+  try {
+    await new Promise((resolve, reject) => {
+      ws.on('open', resolve);
+      ws.on('error', reject);
+    });
+    const errorPromise = new Promise((resolve) => {
+      ws.on('message', (raw) => {
+        const payload = JSON.parse(raw.toString('utf8'));
+        if (payload.type === 'cockpit:delegate-error') resolve(payload);
+      });
+    });
+    ws.send(JSON.stringify({ type: 'delegate', targetName: 'NoSuchName', text: 'hi' }));
+    const errorPayload = await errorPromise;
+    assert.equal(errorPayload.targetName, 'NoSuchName');
+    assert.match(errorPayload.error, /no session named/);
+  } finally {
+    ws.close();
+  }
+});
+
 function assertRejectedUpgrade(ws) {
   return new Promise((resolve, reject) => {
     ws.on('open', () => {

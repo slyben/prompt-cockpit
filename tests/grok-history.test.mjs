@@ -14,6 +14,8 @@ test('fetchGrokSessionHistory maps updates.jsonl into sdk messages', async () =>
   await writeFile(path.join(dir, 'summary.json'), JSON.stringify({ info: { id, cwd } }));
   await writeFile(path.join(dir, 'updates.jsonl'), [
     JSON.stringify({ params: { update: { sessionUpdate: 'user_message_chunk', content: { type: 'text', text: 'hi' } } } }),
+    JSON.stringify({ params: { update: { sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text: 'The\n' } } } }),
+    JSON.stringify({ params: { update: { sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text: 'plan\n' } } } }),
     JSON.stringify({ params: { update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'pong' } } } }),
     JSON.stringify({ params: { update: { sessionUpdate: 'turn_completed', usage: { inputTokens: 10, outputTokens: 2 } } } }),
   ].join('\n') + '\n');
@@ -23,8 +25,11 @@ test('fetchGrokSessionHistory maps updates.jsonl into sdk messages', async () =>
     assert.equal(messages[0].type, 'user');
     assert.equal(messages[0].message.content, 'hi');
     assert.equal(messages[1].type, 'assistant');
-    assert.equal(messages[1].message.content[0].text, 'pong');
-    assert.equal(messages[2].message.usage.input_tokens, 10);
+    assert.equal(messages[1].message.content[0].type, 'thinking');
+    assert.equal(messages[1].message.content[0].thinking, 'The plan\n');
+    assert.equal(messages[2].type, 'assistant');
+    assert.equal(messages[2].message.content[0].text, 'pong');
+    assert.equal(messages[3].message.usage.input_tokens, 10);
     assert.equal(findSessionDir(id, cwd, root), dir);
   } finally {
     await rm(root, { recursive: true, force: true });

@@ -33,8 +33,13 @@ export function initCompose({ textarea, sendButton, onSend, resizeHandle, stream
   // it into the box (still editable, not sent); Enter on an empty box with a
   // live suggestion accepts *and* sends in one step, matching Claude Code's
   // "tab still accepts for editing" / "Enter accepts and submits" split.
-  const defaultPlaceholder = textarea.placeholder;
+  let defaultPlaceholder = textarea.placeholder;
   let currentSuggestion = null;
+
+  function setDefaultPlaceholder(text) {
+    defaultPlaceholder = text || defaultPlaceholder;
+    if (!currentSuggestion) textarea.placeholder = defaultPlaceholder;
+  }
 
   function setSuggestion(text) {
     currentSuggestion = text || null;
@@ -217,6 +222,7 @@ export function initCompose({ textarea, sendButton, onSend, resizeHandle, stream
       textarea.disabled = !enabled;
       sendButton.disabled = !enabled;
     },
+    setDefaultPlaceholder,
     setSuggestion,
     clearSuggestion,
   };

@@ -1,13 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { startGrokSession } from '../src/grok-session.js';
+import { startGrokSession, rewindGrokSession } from '../src/grok-session.js';
 
 function flush() {
   return new Promise((resolve) => setImmediate(resolve));
 }
 
-function fakeConnect({ failInit = false, sessionId = 'grok-sess-1' } = {}) {
+function fakeConnect({ failInit = false, sessionId = 'grok-sess-1', hangPrompt = null } = {}) {
   const proc = new EventEmitter();
   const requests = [];
   const permissionHandler = { fn: null };
@@ -16,6 +16,14 @@ function fakeConnect({ failInit = false, sessionId = 'grok-sess-1' } = {}) {
     request: async (method, params) => {
       requests.push({ method, params });
       if (failInit && method === 'initialize') throw new Error('auth failed');
+      if (method === 'session/prompt' && hangPrompt && hangPrompt.hold !== false) {
+        return new Promise((resolve) => {
+          hangPrompt.resolve = (result) => {
+            hangPrompt.hold = false;
+            resolve(result || { stopReason: 'end_turn' });
+          };
+        });
+      }
       if (method === 'session/new') {
         return {
           sessionId,
@@ -29,6 +37,17 @@ function fakeConnect({ failInit = false, sessionId = 'grok-sess-1' } = {}) {
       if (method === '_x.ai/rewind/points') return { rewind_points: [{ prompt_index: 0 }, { prompt_index: 2 }] };
       if (method === '_x.ai/rewind/execute') return { success: true, target_prompt_index: params.target_prompt_index };
       if (method === 'session/set_model' || method === '_x.ai/session/set_model') return { modelId: params.modelId };
+      if (method === 'session/set_mode') return { modeId: params.modeId };
+      if (method === '_x.ai/session/fork') {
+        return {
+          newSessionId: params.newSessionId,
+          parentSessionId: params.sourceSessionId,
+          newCwd: params.newCwd,
+          chatMessagesCopied: 0,
+          updatesCopied: 0,
+          planStateCopied: false,
+        };
+      }
       if (method === 'session/set_config_option' || method === 'session/set_effort' || method === '_x.ai/session/set_effort') {
         return { effort: params.effort || (params.configOption && params.configOption.value) };
       }
@@ -103,6 +122,62 @@ test('ACP tool updates are forwarded as sdk messages', async () => {
   });
   assert.equal(messages.at(-1).type, 'assistant');
   assert.equal(messages.at(-1).message.content[0].text, 'hi');
+});
+
+test('live user_message_chunk is dropped because pushInput already echoed it', async () => {
+  const { session, messages, fake } = startFake();
+  await flush();
+  await flush();
+  session.pushInput('hello grok');
+  await flush();
+  await flush();
+  const usersBefore = messages.filter((m) => m.type === 'user');
+  fake.notificationHandler.fn('session/update', {
+    update: { sessionUpdate: 'user_message_chunk', content: { text: 'hello grok' } },
+  });
+  const usersAfter = messages.filter((m) => m.type === 'user');
+  assert.equal(usersBefore.length, 1);
+  assert.equal(usersAfter.length, 1);
+});
+
+test('duplicate pushInput while a prompt is in flight is dropped', async () => {
+  const hangPrompt = {};
+  const { session, messages, fake } = startFake({}, { hangPrompt });
+  await flush();
+  await flush();
+  session.pushInput('same text');
+  await flush();
+  await flush();
+  session.pushInput('same text');
+  await flush();
+  await flush();
+  const prompts = fake.requests.filter((r) => r.method === 'session/prompt');
+  assert.equal(prompts.length, 1);
+  assert.equal(messages.filter((m) => m.type === 'user').length, 1);
+  hangPrompt.resolve();
+  await flush();
+  await flush();
+});
+
+test('a new pushInput while a prompt is in flight cancels the current turn', async () => {
+  const hangPrompt = {};
+  const { session, fake } = startFake({}, { hangPrompt });
+  await flush();
+  await flush();
+  session.pushInput('first');
+  await flush();
+  await flush();
+  session.pushInput('second');
+  await flush();
+  await flush();
+  assert.ok(fake.requests.some((r) => r.notify && r.method === 'session/cancel'));
+  hangPrompt.resolve({ stopReason: 'cancelled' });
+  await flush();
+  await flush();
+  const prompts = fake.requests.filter((r) => r.method === 'session/prompt');
+  assert.equal(prompts.length, 2);
+  assert.equal(prompts[0].params.prompt[0].text, 'first');
+  assert.equal(prompts[1].params.prompt[0].text, 'second');
 });
 
 test('resume uses session/load instead of session/new', async () => {
@@ -233,7 +308,47 @@ test('supportedModels comes from session/new; setModel and setEffort hit ACP', a
   await session.query.setModel('grok-4.6');
   await session.query.setEffort('low');
   assert.ok(fake.requests.some((r) => r.method === 'session/set_model' && r.params.modelId === 'grok-4.6'));
-  assert.ok(fake.requests.some((r) => r.method === 'session/set_config_option'));
+  assert.ok(fake.requests.some((r) => r.method === 'session/set_mode' && r.params.modeId === 'low'));
+});
+
+test('forkAt copies via _x.ai/session/fork then rewinds the child', async () => {
+  const rewindCalls = [];
+  const { session, fake } = startFake({
+    rewindExistingImpl: async (opts) => {
+      rewindCalls.push(opts);
+      return { success: true, target_prompt_index: opts.promptIndex };
+    },
+  });
+  await flush();
+  await flush();
+  const forked = await session.forkAt(2);
+  const forkReq = fake.requests.find((r) => r.method === '_x.ai/session/fork');
+  assert.ok(forkReq);
+  assert.equal(forkReq.params.sourceSessionId, 'grok-sess-1');
+  assert.equal(forkReq.params.sourceCwd, 'D:\\tmp');
+  assert.equal(forkReq.params.newCwd, 'D:\\tmp');
+  assert.equal(typeof forkReq.params.newSessionId, 'string');
+  assert.equal(forked.newSessionId, forkReq.params.newSessionId);
+  assert.equal(rewindCalls.length, 1);
+  assert.equal(rewindCalls[0].sessionId, forked.newSessionId);
+  assert.equal(rewindCalls[0].promptIndex, 2);
+  assert.equal(rewindCalls[0].cwd, 'D:\\tmp');
+});
+
+test('rewindGrokSession loads the target id then executes rewind', async () => {
+  const fake = fakeConnect({ sessionId: 'child-1' });
+  const result = await rewindGrokSession({
+    cwd: 'D:\\tmp',
+    sessionId: 'child-1',
+    promptIndex: 2,
+    connectImpl: () => fake.connection,
+  });
+  assert.equal(result.target_prompt_index, 2);
+  assert.equal(fake.requests[0].method, 'initialize');
+  assert.equal(fake.requests[1].method, 'session/load');
+  assert.equal(fake.requests[1].params.sessionId, 'child-1');
+  assert.equal(fake.requests[2].method, '_x.ai/rewind/execute');
+  assert.equal(fake.requests[2].params.target_prompt_index, 2);
 });
 
 test('listRewindPoints and rewindTo call the underscore ACP methods', async () => {

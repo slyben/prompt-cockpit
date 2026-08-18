@@ -1,8 +1,45 @@
 // Long-lived Grok session via `grok agent stdio` (ACP). Same handle shape
 // as session.js so the registry can treat both providers the same.
+import { randomUUID } from 'node:crypto';
 import { spawnGrokAgent, killGrokProcess } from './grok-acp.js';
 import { acpUpdateToMessages, turnResultMessage, pickPermissionOption, grokPermissionAction } from './grok-messages.js';
 import { createGrokExtensions } from './grok-extensions.js';
+
+const CLIENT_INFO = { name: 'claude-prompt-cockpit', version: '0.1.0' };
+
+// Fork copies the parent onto disk; the child is not loaded in the parent
+// agent process (`_x.ai/rewind/points` on the new id returns Resource not
+// found). Rewind the child in a short-lived ACP connection so
+// fetchGrokSessionHistory sees the truncated transcript before the new
+// cockpit row is created.
+export async function rewindGrokSession({
+  cwd,
+  sessionId,
+  promptIndex,
+  connectImpl = spawnGrokAgent,
+}) {
+  if (!sessionId) throw new Error('grok session id required');
+  const connection = connectImpl({ cwd });
+  try {
+    await connection.client.request('initialize', {
+      protocolVersion: 1,
+      clientCapabilities: {},
+      clientInfo: CLIENT_INFO,
+    });
+    await connection.client.request('session/load', { sessionId, cwd, mcpServers: [] });
+    return await connection.client.request('_x.ai/rewind/execute', {
+      sessionId,
+      target_prompt_index: promptIndex,
+    });
+  } finally {
+    connection.client.rejectAll(new Error('rewind helper closed'));
+    try {
+      killGrokProcess(connection.proc);
+    } catch {
+      // already dead
+    }
+  }
+}
 
 function unsupported(name) {
   return async () => {
@@ -27,6 +64,7 @@ export function startGrokSession({
   onApprovalRequest,
   connectImpl = spawnGrokAgent,
   grokExtensionsImpl,
+  rewindExistingImpl = rewindGrokSession,
 }) {
   const grokExtensions = grokExtensionsImpl || createGrokExtensions({ cwd });
   let currentMode = permissionMode || 'default';
@@ -40,6 +78,12 @@ export function startGrokSession({
   const pendingApprovals = new Map();
   let approvalSeq = 0;
   let promptTail = Promise.resolve();
+  let promptInFlight = false;
+  // Last text accepted by pushInput that has not yet finished its
+  // session/prompt. Used to drop a duplicate Enter while that turn is
+  // still queued or running - mid-turn that minted two promptIndexes
+  // for one message (promptIndex 2 and 3, same body, ~4s apart).
+  let openPromptText = null;
 
   let resolveReady;
   let rejectReady;
@@ -75,6 +119,13 @@ export function startGrokSession({
         const update = params.update || (params.sessionUpdate ? params : null);
         if (!update) return;
         if (method !== 'session/update' && method !== 'x.ai/session/update') return;
+        // Claude never streams the prompt back, so session.js local-echoes.
+        // Grok does emit user_message_chunk for the same turn pushInput
+        // already echoed. Forwarding it painted a second "You" bubble on
+        // every Enter (confirmed against this session's updates.jsonl:
+        // one promptIndex, two bubbles). History still reads the chunk
+        // from disk via grok-history.js - this is live-only.
+        if (update.sessionUpdate === 'user_message_chunk') return;
         for (const message of acpUpdateToMessages(update, sessionId, { model })) onMessage(message);
       });
 
@@ -83,7 +134,7 @@ export function startGrokSession({
       await client.request('initialize', {
         protocolVersion: 1,
         clientCapabilities: {},
-        clientInfo: { name: 'claude-prompt-cockpit', version: '0.1.0' },
+        clientInfo: CLIENT_INFO,
       });
 
       if (resume) {
@@ -160,18 +211,28 @@ export function startGrokSession({
   async function runPrompt(text) {
     await ready;
     if (closed || !connection) return;
-    const result = await connection.client.request('session/prompt', {
-      sessionId,
-      prompt: [{ type: 'text', text }],
-    });
-    const stopReason = (result && result.stopReason) || 'end_turn';
-    pendingTurns = Math.max(0, pendingTurns - 1);
-    onMessage(turnResultMessage(sessionId, stopReason));
-    onStateChange(pendingTurns > 0 ? 'running' : 'idle');
+    promptInFlight = true;
+    try {
+      const result = await connection.client.request('session/prompt', {
+        sessionId,
+        prompt: [{ type: 'text', text }],
+      });
+      const stopReason = (result && result.stopReason) || 'end_turn';
+      pendingTurns = Math.max(0, pendingTurns - 1);
+      if (openPromptText === text && pendingTurns === 0) openPromptText = null;
+      onMessage(turnResultMessage(sessionId, stopReason));
+      onStateChange(pendingTurns > 0 ? 'running' : 'idle');
+    } finally {
+      promptInFlight = false;
+    }
   }
 
   function pushInput(text) {
     if (closed) return;
+    // Same body already queued or running: a second Enter (or Grok treating
+    // mid-turn session/prompt as queue+send-now plus our chained retry)
+    // must not mint another user turn.
+    if (openPromptText === text && pendingTurns > 0) return;
     const wireMessage = {
       type: 'user',
       message: { role: 'user', content: text },
@@ -179,11 +240,17 @@ export function startGrokSession({
     };
     turnCounter += 1;
     pendingTurns += 1;
+    openPromptText = text;
     onMessage({ ...wireMessage, turnIndex: turnCounter });
     onStateChange('running');
+    // Cancel the in-flight prompt so the next session/prompt is not
+    // delivered on top of a still-running turn (that path cancelled the
+    // old turn and then recorded the new text twice).
+    if (promptInFlight) interrupt();
     promptTail = promptTail.then(() => runPrompt(text)).catch((err) => {
       if (closed) return;
       pendingTurns = Math.max(0, pendingTurns - 1);
+      if (pendingTurns === 0) openPromptText = null;
       onStateChange('error');
       onError(err);
     });
@@ -258,6 +325,28 @@ export function startGrokSession({
     });
   }
 
+  // Conversation-only fork: copy this session to a new id, then truncate
+  // the copy at `promptIndex`. The parent session is left intact.
+  async function forkAt(promptIndex) {
+    await ready;
+    if (closed || !connection || !sessionId) throw new Error('grok session is not ready');
+    const newSessionId = randomUUID();
+    const result = await connection.client.request('_x.ai/session/fork', {
+      sourceSessionId: sessionId,
+      sourceCwd: cwd,
+      newCwd: cwd,
+      newSessionId,
+    });
+    const childId = (result && result.newSessionId) || newSessionId;
+    await rewindExistingImpl({
+      cwd,
+      sessionId: childId,
+      promptIndex,
+      connectImpl,
+    });
+    return { ...result, newSessionId: childId };
+  }
+
   // Queue-pane operations (backlog.md) aren't meaningful here yet: grok
   // sessions serialize pushInput() calls through `promptTail` (a plain
   // promise chain), not a pull-based queue a turn can sit "in" and be
@@ -280,6 +369,7 @@ export function startGrokSession({
     resolveApproval,
     listRewindPoints,
     rewindTo,
+    forkAt,
     getMode: () => currentMode,
     query: {
       supportedModels: async () => availableModels.map((m) => ({
@@ -298,10 +388,10 @@ export function startGrokSession({
       },
       setEffort: async (next) => {
         await ready;
-        await tryAcp([
-          'session/set_config_option',
-          '_x.ai/session/set_effort',
-        ], { sessionId, configOption: { id: 'reasoning_effort', value: next }, effort: next });
+        // Grok advertises effort tiers as sessionConfig options with
+        // category "mode" (low/medium/high/xhigh). session/set_mode is
+        // the live ACP call; set_config_option rejects these ids.
+        await connection.client.request('session/set_mode', { sessionId, modeId: next });
         currentEffort = next;
       },
       setMaxThinkingTokens: unsupported('setMaxThinkingTokens'),

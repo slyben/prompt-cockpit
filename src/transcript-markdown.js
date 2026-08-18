@@ -9,6 +9,7 @@
 // (what counts as "the reply", how a tool call is labeled, thinking
 // tucked away by default) intentionally mirror stream-view.js's, they're
 // just not the same code.
+import { coalesceAssistantMessages } from './grok-messages.js';
 
 const MAX_BLOCK_CHARS = 2000;
 const TRUNCATED_SUFFIX = '\n… (truncated)';
@@ -83,7 +84,7 @@ export function messagesToMarkdown(messages, { title = 'Session transcript', cwd
   meta.push(`exported: ${new Date().toISOString()}`);
   lines.push(meta.join('  ·  '), '');
 
-  for (const message of messages || []) {
+  for (const message of coalesceAssistantMessages(messages || [])) {
     switch (message.type) {
       case 'assistant':
         renderAssistantMessage(lines, message, assistantLabel);
