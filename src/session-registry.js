@@ -172,6 +172,15 @@ export function createSession({ cwd, resume, name, model, permissionMode, histor
       row.queue = queue;
       broadcastQueue(id);
     },
+    // MCP "needs-auth" badge (backlog.md) - no row field to keep in sync,
+    // same as toggleMcpServer/reconnectMcpServer below: session.js's
+    // getMcpAuthPending() is the only source of truth, this just tells any
+    // open MCP panel to re-fetch it (mcp-panel.js is poll-on-open/refresh-
+    // button only otherwise - see its own module comment - so without this
+    // push a panel left open through an auth flow would sit on a stale
+    // "needs-auth" badge with no link until the user thought to hit refresh).
+    onMcpAuthRequest: () => broadcastMcpAuth(id),
+    onMcpAuthResolved: () => broadcastMcpAuth(id),
   });
 
   return row;
@@ -438,11 +447,26 @@ export async function rewind(id, turnIndex, { dryRun = false } = {}) {
 
 // Read-only passthrough, same as supportedModels/supportedAgents in
 // server.js - no row field tracks MCP state, so there's nothing to mutate
-// or broadcast here.
+// or broadcast here (broadcastMcpAuth below is the exception, fired
+// directly off session.js's onMcpAuthRequest/onMcpAuthResolved instead of
+// from a row mutation, same "push without a row field" shape as
+// toggleMcpServer/reconnectMcpServer). Merges in `authUrl`/`authMessage` for
+// any server session.js's onElicitation caught a URL-mode auth request for -
+// McpServerStatus itself has no such field (name/status/error only), and
+// `status: 'needs-auth'` alone gives the panel nothing to link to. Grok
+// sessions have no getMcpAuthPending (grok-session.js's handle doesn't
+// expose one - grok-extensions.js's mcpServerStatus() stub has no
+// elicitation concept), hence the guard.
 export async function getMcpServerStatus(id) {
   const row = sessions.get(id);
   if (!row) throw new Error(`unknown session: ${id}`);
-  return row.handle.query.mcpServerStatus();
+  const servers = await row.handle.query.mcpServerStatus();
+  if (typeof row.handle.getMcpAuthPending !== 'function') return servers;
+  const pending = new Map(row.handle.getMcpAuthPending().map((p) => [p.name, p]));
+  return servers.map((server) => {
+    const auth = pending.get(server.name);
+    return auth ? { ...server, authUrl: auth.url, authMessage: auth.message } : server;
+  });
 }
 
 // Same shape as setPermissionMode/setModel above: call the SDK method,
@@ -779,6 +803,19 @@ function broadcastQueue(id) {
   const row = sessions.get(id);
   if (!row) return;
   broadcast(id, queuePayload(row));
+}
+
+// MCP "needs-auth" badge (backlog.md) - fired from session.js's
+// onMcpAuthRequest/onMcpAuthResolved (see createSession above). Unlike every
+// other broadcast* here, there's no row field to read a payload off - the
+// merged {authUrl} list only exists behind the async getMcpServerStatus()
+// round trip (session.js's mcpAuthPending Map plus a fresh SDK status call),
+// so this awaits that instead of building a payload from `row` directly.
+async function broadcastMcpAuth(id) {
+  const row = sessions.get(id);
+  if (!row) return;
+  const servers = await getMcpServerStatus(id).catch(() => null);
+  if (servers) broadcast(id, { type: 'cockpit:mcp-auth', servers });
 }
 
 // Queue pane operations (backlog.md) - all three just forward to the

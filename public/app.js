@@ -1628,6 +1628,16 @@ function connect(id, token, { reconnect = false } = {}) {
           ? `Run /compact now to free up context (auto-compact fires around ${Math.round(warnPercent)}%${autoCompact.source === 'fallback' ? ', assumed' : ''})`
           : 'Run /compact now to free up context (auto-compact is off for this session)';
       }
+    } else if (payload.type === 'cockpit:mcp-auth') {
+      // MCP "needs-auth" badge (backlog.md) - session-registry.js pushes
+      // this whenever session.js's onElicitation catches a URL-mode auth
+      // request or its completion notice, so a settings modal left open
+      // through the flow doesn't sit on a stale badge until the next
+      // manual open/refresh. Server already re-fetched the merged list
+      // (payload.servers), but mcpPanel has no setServers() of its own -
+      // just re-running the same GET refresh() does on open is simpler
+      // than adding a second render path for one push message.
+      if (document.getElementById('settingsModal').style.display !== 'none') mcpPanel.refresh();
     } else if (payload.type === 'cockpit:queue') {
       // Always the full current queue (session-registry.js's broadcastQueue
       // never sends a delta), sent on every attach and again on every real

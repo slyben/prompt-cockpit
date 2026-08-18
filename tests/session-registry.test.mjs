@@ -31,15 +31,22 @@ function fakeWs() {
 // SDK responses of the same-named Query methods - omitted (the default)
 // still returns a sane empty-ish value rather than throwing, since most
 // tests here don't care about MCP/plugin state at all.
-function fakeStartSession({ rejectModes = new Set(), usageExperimental, mcpStatus, reloadPluginsResult } = {}) {
+// `withMcpAuthPending`, when true, gives the stub's handle a
+// getMcpAuthPending() (mirrors session.js's own real one) so
+// getMcpServerStatus's authUrl-merge logic has something to merge -
+// omitted (the default) mimics grok-session.js's handle, which has no such
+// method at all (session-registry.js's typeof guard is what this is for).
+function fakeStartSession({ rejectModes = new Set(), usageExperimental, mcpStatus, reloadPluginsResult, withMcpAuthPending = false } = {}) {
   let callbacks;
   let mode = 'default';
   const resolvers = new Map();
+  let mcpAuthPending = [];
   const impl = (opts) => {
     callbacks = opts;
     impl.lastOpts = opts;
     mode = opts.permissionMode || 'default';
     return {
+      ...(withMcpAuthPending ? { getMcpAuthPending: () => mcpAuthPending } : {}),
       pushInput: (text) => {
         impl.lastInput = text;
       },
@@ -119,6 +126,18 @@ function fakeStartSession({ rejectModes = new Set(), usageExperimental, mcpStatu
     const decision = new Promise((resolve) => resolvers.set(requestId, resolve));
     callbacks.onApprovalRequest({ requestId, toolName: 'ExitPlanMode', input, title: 'Exit plan mode?' });
     return decision;
+  };
+  // Mirrors session.js's onElicitation/elicitation_complete handling
+  // (mcpAuthPending Map -> getMcpAuthPending()) without going through a
+  // real onElicitation call - same "call the callback directly" shape as
+  // emitApprovalRequest above.
+  impl.emitMcpAuthRequest = ({ serverName, url, message }) => {
+    mcpAuthPending = [...mcpAuthPending.filter((p) => p.name !== serverName), { name: serverName, url, message }];
+    callbacks.onMcpAuthRequest?.({ serverName, url, message });
+  };
+  impl.emitMcpAuthResolved = (serverName) => {
+    mcpAuthPending = mcpAuthPending.filter((p) => p.name !== serverName);
+    callbacks.onMcpAuthResolved?.(serverName);
   };
   return impl;
 }
@@ -641,6 +660,56 @@ test('getMcpServerStatus passes through the SDK\'s server list', async () => {
 test('getMcpServerStatus on an unknown session id rejects instead of throwing synchronously', async () => {
   registry._reset();
   await assert.rejects(() => registry.getMcpServerStatus('does-not-exist'));
+});
+
+// MCP "needs-auth" badge (backlog.md).
+test('getMcpServerStatus merges authUrl/authMessage from session.js\'s onElicitation into the matching server, leaving others untouched', async () => {
+  registry._reset();
+  const mcpStatus = [
+    { name: 'github', status: 'needs-auth' },
+    { name: 'other-server', status: 'connected' },
+  ];
+  const startSessionImpl = fakeStartSession({ mcpStatus, withMcpAuthPending: true });
+  const row = registry.createSession({ cwd: '/tmp', startSessionImpl });
+
+  startSessionImpl.emitMcpAuthRequest({ serverName: 'github', url: 'https://example.com/authorize', message: 'Please authorize' });
+
+  const result = await registry.getMcpServerStatus(row.id);
+  assert.deepEqual(result, [
+    { name: 'github', status: 'needs-auth', authUrl: 'https://example.com/authorize', authMessage: 'Please authorize' },
+    { name: 'other-server', status: 'connected' },
+  ]);
+});
+
+test('getMcpServerStatus on a Grok session (no getMcpAuthPending) still passes through cleanly, unmerged', async () => {
+  registry._reset();
+  const mcpStatus = [{ name: 'my-server', status: 'needs-auth' }];
+  const row = registry.createSession({ cwd: '/tmp', startSessionImpl: fakeStartSession({ mcpStatus }) }); // withMcpAuthPending defaults false
+  const result = await registry.getMcpServerStatus(row.id);
+  assert.deepEqual(result, mcpStatus); // no authUrl - nothing to merge in
+});
+
+test('onMcpAuthRequest and onMcpAuthResolved each push a fresh cockpit:mcp-auth to attached clients', async () => {
+  registry._reset();
+  const mcpStatus = [{ name: 'github', status: 'needs-auth' }];
+  const startSessionImpl = fakeStartSession({ mcpStatus, withMcpAuthPending: true });
+  const row = registry.createSession({ cwd: '/tmp', startSessionImpl });
+  const ws = fakeWs();
+  registry.attachClient(row.id, ws);
+
+  startSessionImpl.emitMcpAuthRequest({ serverName: 'github', url: 'https://example.com/authorize', message: 'Please authorize' });
+  await new Promise((resolve) => setTimeout(resolve, 0)); // broadcastMcpAuth awaits getMcpServerStatus before sending
+
+  let pushed = ws.sent.filter((m) => m.type === 'cockpit:mcp-auth');
+  assert.equal(pushed.length, 1);
+  assert.equal(pushed[0].servers[0].authUrl, 'https://example.com/authorize');
+
+  startSessionImpl.emitMcpAuthResolved('github');
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  pushed = ws.sent.filter((m) => m.type === 'cockpit:mcp-auth');
+  assert.equal(pushed.length, 2);
+  assert.equal(pushed[1].servers[0].authUrl, undefined); // cleared - pending auth resolved
 });
 
 test('setMaxThinkingTokens calls through to the SDK, updates the row, and broadcasts to connected tabs', async () => {

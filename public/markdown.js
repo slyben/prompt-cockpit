@@ -5,7 +5,7 @@
 // than pulling in marked/markdown-it - this only needs to cover what Claude
 // actually produces in prose replies: headers, bold/italic, inline code,
 // fenced code blocks, links, lists, blockquotes, horizontal rules,
-// paragraphs. Not a spec-complete CommonMark implementation.
+// GFM pipe tables, paragraphs. Not a spec-complete CommonMark implementation.
 //
 // Safety: every leaf is built via textContent/createElement, never
 // innerHTML - so there's no HTML-injection surface even though the source
@@ -14,7 +14,11 @@
 const INLINE_CODE_RE = /`([^`]+)`/;
 const BOLD_RE = /\*\*([^*]+)\*\*|__([^_]+)__/;
 const ITALIC_RE = /\*([^*]+)\*|_([^_]+)_/;
+const STRIKE_RE = /~~([^~]+)~~/;
 const LINK_RE = /\[([^\]]+)\]\(([^)]+)\)/;
+// GFM backslash-escape: a backslash before ASCII punctuation is a literal
+// escaped character, not a marker - e.g. "\*not bold\*" shouldn't italicize.
+const ESCAPE_RE = /\\([\\`*_{}[\]()#+\-.!~>])/;
 
 // Finds the earliest-matching inline marker in `text` among the patterns
 // above, applies it, and recurses on both sides - so e.g. "**bold `code`**"
@@ -23,9 +27,11 @@ const LINK_RE = /\[([^\]]+)\]\(([^)]+)\)/;
 function renderInline(text, out) {
   if (!text) return;
   const candidates = [
+    { re: ESCAPE_RE, tag: 'esc' },
     { re: INLINE_CODE_RE, tag: 'code' },
     { re: BOLD_RE, tag: 'strong' },
     { re: ITALIC_RE, tag: 'em' },
+    { re: STRIKE_RE, tag: 's' },
     { re: LINK_RE, tag: 'a' },
   ];
   let earliest = null;
@@ -39,7 +45,9 @@ function renderInline(text, out) {
   }
   const { match, tag } = earliest;
   if (match.index > 0) out.append(document.createTextNode(text.slice(0, match.index)));
-  if (tag === 'a') {
+  if (tag === 'esc') {
+    out.append(document.createTextNode(match[1]));
+  } else if (tag === 'a') {
     const a = document.createElement('a');
     a.href = match[2];
     a.target = '_blank';
@@ -60,6 +68,94 @@ function renderInline(text, out) {
 
 function appendInline(parent, text) {
   renderInline(text, parent);
+}
+
+// Splits one `| a | b |` row into trimmed cell strings, tolerant of a
+// missing leading/trailing pipe and `\|` escaped inside a cell (the only
+// way to get a literal pipe into a GFM table cell).
+function splitTableRow(line) {
+  let s = line.trim();
+  if (s.startsWith('|')) s = s.slice(1);
+  if (s.endsWith('|')) s = s.slice(0, -1);
+  const cells = [];
+  let cur = '';
+  for (let j = 0; j < s.length; j++) {
+    if (s[j] === '\\' && s[j + 1] === '|') { cur += '|'; j++; continue; }
+    if (s[j] === '|') { cells.push(cur.trim()); cur = ''; continue; }
+    cur += s[j];
+  }
+  cells.push(cur.trim());
+  return cells;
+}
+
+// GFM's delimiter row: one `---`/`:--`/`--:`/`:-:` cell per column, nothing
+// else - this is what disambiguates "a table" from an ordinary line that
+// happens to contain a pipe.
+function isTableDelimiterRow(line) {
+  const cells = splitTableRow(line);
+  return cells.length > 0 && cells.every((c) => /^:?-+:?$/.test(c));
+}
+
+function tableAlign(delimiterCell) {
+  const left = delimiterCell.startsWith(':');
+  const right = delimiterCell.endsWith(':');
+  if (left && right) return 'center';
+  if (right) return 'right';
+  if (left) return 'left';
+  return null;
+}
+
+const UL_ITEM_RE = /^(\s*)[-*+]\s+(.*)$/;
+const OL_ITEM_RE = /^(\s*)\d+\.\s+(.*)$/;
+const TASK_ITEM_RE = /^\[([ xX])\]\s+(.*)$/;
+
+// Matches one list-item line regardless of nesting depth or marker type -
+// returns its indent width (so callers can tell a nested item from a
+// sibling) and whether it's ordered/unordered.
+function listItemMatch(line) {
+  const ul = UL_ITEM_RE.exec(line);
+  if (ul) return { indent: ul[1].length, ordered: false, content: ul[2] };
+  const ol = OL_ITEM_RE.exec(line);
+  if (ol) return { indent: ol[1].length, ordered: true, content: ol[2] };
+  return null;
+}
+
+// Consumes a run of same-indent, same-type list-item lines starting at
+// `start` into one <ul>/<ol>. A line indented deeper than the current item
+// recurses into a nested list appended inside that item's <li> - only two
+// levels deep in practice (matches how Claude actually nests sub-bullets),
+// but the recursion itself isn't depth-limited.
+function parseList(lines, start, indent) {
+  const first = listItemMatch(lines[start]);
+  const ordered = first.ordered;
+  const list = document.createElement(ordered ? 'ol' : 'ul');
+  let i = start;
+  while (i < lines.length) {
+    const m = listItemMatch(lines[i]);
+    if (!m || m.indent !== indent || m.ordered !== ordered) break;
+    i++;
+    const li = document.createElement('li');
+    const task = TASK_ITEM_RE.exec(m.content);
+    let content = m.content;
+    if (task) {
+      li.classList.add('task-list-item');
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.disabled = true;
+      cb.checked = /x/i.test(task[1]);
+      li.append(cb);
+      content = task[2];
+    }
+    appendInline(li, content);
+    const next = i < lines.length ? listItemMatch(lines[i]) : null;
+    if (next && next.indent > indent) {
+      const nested = parseList(lines, i, next.indent);
+      li.append(nested.node);
+      i = nested.i;
+    }
+    list.append(li);
+  }
+  return { node: list, i };
 }
 
 // Groups raw lines into block-level chunks (paragraph/list/code-fence/
@@ -137,31 +233,50 @@ export function renderMarkdown(text) {
       continue;
     }
 
-    // Unordered list.
-    if (/^[-*+]\s+/.test(line)) {
+    // List (ordered or unordered, nested, task-list-aware - see parseList).
+    const listItem = listItemMatch(line);
+    if (listItem) {
       flushParagraph(paraBuf);
-      const ul = document.createElement('ul');
-      while (i < lines.length && /^[-*+]\s+/.test(lines[i])) {
-        const li = document.createElement('li');
-        appendInline(li, lines[i].replace(/^[-*+]\s+/, ''));
-        ul.append(li);
-        i++;
-      }
-      root.append(ul);
+      const { node, i: ni } = parseList(lines, i, listItem.indent);
+      root.append(node);
+      i = ni;
       continue;
     }
 
-    // Ordered list.
-    if (/^\d+\.\s+/.test(line)) {
+    // GFM table - header row immediately followed by a delimiter row
+    // (checked one line ahead, since that's the only thing that tells a
+    // table apart from a paragraph line that happens to contain a pipe).
+    if (line.includes('|') && i + 1 < lines.length && isTableDelimiterRow(lines[i + 1])) {
       flushParagraph(paraBuf);
-      const ol = document.createElement('ol');
-      while (i < lines.length && /^\d+\.\s+/.test(lines[i])) {
-        const li = document.createElement('li');
-        appendInline(li, lines[i].replace(/^\d+\.\s+/, ''));
-        ol.append(li);
+      const headerCells = splitTableRow(line);
+      const aligns = splitTableRow(lines[i + 1]).map(tableAlign);
+      i += 2;
+      const table = document.createElement('table');
+      const thead = document.createElement('thead');
+      const headRow = document.createElement('tr');
+      headerCells.forEach((cell, idx) => {
+        const th = document.createElement('th');
+        if (aligns[idx]) th.style.textAlign = aligns[idx];
+        appendInline(th, cell);
+        headRow.append(th);
+      });
+      thead.append(headRow);
+      table.append(thead);
+      const tbody = document.createElement('tbody');
+      while (i < lines.length && lines[i].trim() && lines[i].includes('|')) {
+        const cells = splitTableRow(lines[i]);
+        const tr = document.createElement('tr');
+        headerCells.forEach((_, idx) => {
+          const td = document.createElement('td');
+          if (aligns[idx]) td.style.textAlign = aligns[idx];
+          appendInline(td, cells[idx] ?? '');
+          tr.append(td);
+        });
+        tbody.append(tr);
         i++;
       }
-      root.append(ol);
+      table.append(tbody);
+      root.append(table);
       continue;
     }
 

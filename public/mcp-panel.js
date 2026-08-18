@@ -69,6 +69,23 @@ export function initMcpPanel({ listEl, refreshButton, fetchStatus, toggleServer,
     });
 
     top.append(toggle, name, badge);
+    if (server.status === 'needs-auth' && server.authUrl) {
+      // Only appears once session.js's onElicitation has actually caught a
+      // URL-mode auth request for this server (see session-registry.js's
+      // getMcpServerStatus) - a plain 'needs-auth' status with no link yet
+      // means the server hasn't asked, typically because nothing has tried
+      // to use it this session. Opens in a new tab since the flow finishes
+      // in the browser, not the cockpit - reconnect/refresh afterward (or
+      // just wait for the push in the module comment above) to see the
+      // badge clear once the SDK reports the server connected.
+      const authLink = document.createElement('a');
+      authLink.className = 'mcp-auth-link';
+      authLink.href = server.authUrl;
+      authLink.target = '_blank';
+      authLink.rel = 'noopener noreferrer';
+      authLink.textContent = 'Authenticate ↗';
+      top.append(authLink);
+    }
     if (server.canReconnect !== false) top.append(reconnectBtn);
     if (server.source) {
       const source = document.createElement('span');
@@ -83,6 +100,15 @@ export function initMcpPanel({ listEl, refreshButton, fetchStatus, toggleServer,
       errLine.className = 'mcp-error';
       errLine.textContent = server.error;
       li.append(errLine);
+    }
+    if (server.status === 'needs-auth' && server.authMessage) {
+      // Informational (the elicitation's own `message`, e.g. "Please
+      // authorize access to continue") - .mcp-note's muted styling, not
+      // .mcp-error's red, since needing auth isn't a failure state.
+      const authMsg = document.createElement('div');
+      authMsg.className = 'mcp-note';
+      authMsg.textContent = server.authMessage;
+      li.append(authMsg);
     }
 
     return li;

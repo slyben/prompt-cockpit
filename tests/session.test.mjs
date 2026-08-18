@@ -286,3 +286,74 @@ test('a non-AskUserQuestion tool still auto-allows in an auto-allow mode (unchan
   assert.equal(approvalRequests.length, 0);
   assert.deepEqual(result, { behavior: 'allow', updatedInput: { command: 'echo hi' } });
 });
+
+// MCP "needs-auth" badge (backlog.md) - session.js's onElicitation handler
+// and the elicitation_complete system message that clears it.
+test('onElicitation with mode "url" accepts, records the pending auth, and notifies onMcpAuthRequest', async () => {
+  const mcpAuthRequests = [];
+  const { session, getOptions } = startFakeSession({
+    onMcpAuthRequest: (entry) => mcpAuthRequests.push(entry),
+  });
+
+  const result = await getOptions().onElicitation({
+    serverName: 'github',
+    message: 'Please authorize access',
+    mode: 'url',
+    url: 'https://example.com/oauth/authorize',
+    elicitationId: 'elic-1',
+  });
+
+  assert.deepEqual(result, { action: 'accept' });
+  assert.deepEqual(session.getMcpAuthPending(), [
+    { name: 'github', url: 'https://example.com/oauth/authorize', message: 'Please authorize access' },
+  ]);
+  assert.equal(mcpAuthRequests.length, 1);
+  assert.equal(mcpAuthRequests[0].serverName, 'github');
+  assert.equal(mcpAuthRequests[0].url, 'https://example.com/oauth/authorize');
+});
+
+test('onElicitation declines mode "form" (and any request with no url) rather than hanging - no UI for arbitrary schema forms', async () => {
+  const { session, getOptions } = startFakeSession();
+
+  const formResult = await getOptions().onElicitation({
+    serverName: 'github',
+    message: 'Enter details',
+    mode: 'form',
+    requestedSchema: { type: 'object' },
+  });
+  const noUrlResult = await getOptions().onElicitation({
+    serverName: 'other',
+    message: 'no mode at all',
+  });
+
+  assert.deepEqual(formResult, { action: 'decline' });
+  assert.deepEqual(noUrlResult, { action: 'decline' });
+  assert.deepEqual(session.getMcpAuthPending(), []);
+});
+
+test('an elicitation_complete system message clears the matching pending auth and notifies onMcpAuthResolved', async () => {
+  const mcpAuthResolved = [];
+  const { handle, session, getOptions } = startFakeSession({
+    onMcpAuthResolved: (name) => mcpAuthResolved.push(name),
+  });
+
+  await getOptions().onElicitation({
+    serverName: 'github',
+    mode: 'url',
+    url: 'https://example.com/oauth/authorize',
+    elicitationId: 'elic-1',
+  });
+  assert.equal(session.getMcpAuthPending().length, 1);
+
+  handle.push({
+    type: 'system',
+    subtype: 'elicitation_complete',
+    mcp_server_name: 'github',
+    elicitation_id: 'elic-1',
+    session_id: 'sid',
+  });
+  await flush();
+
+  assert.deepEqual(session.getMcpAuthPending(), []);
+  assert.deepEqual(mcpAuthResolved, ['github']);
+});

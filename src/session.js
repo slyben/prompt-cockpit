@@ -117,10 +117,19 @@ function createInputQueue() {
  * CLI doesn't resolve itself - not just ExitPlanMode), `onQueueChange` with
  * the current queue snapshot whenever it changes.
  */
-export function startSession({ cwd, resume, model, permissionMode, turnIndexOffset = 0, onMessage, onStateChange, onError, onApprovalRequest, onQueueChange, queryImpl = query }) {
+export function startSession({ cwd, resume, model, permissionMode, turnIndexOffset = 0, onMessage, onStateChange, onError, onApprovalRequest, onQueueChange, onMcpAuthRequest, onMcpAuthResolved, queryImpl = query }) {
   const inputQueue = createInputQueue();
   let currentMode = permissionMode || 'default';
   const pendingApprovals = new Map(); // requestId -> { resolve(PermissionResult), toolName }
+  // MCP "needs-auth" badge (backlog.md) - serverName -> { url, message,
+  // elicitationId }. Populated by onElicitation below when an MCP server
+  // asks for URL-mode auth; drained when the matching `elicitation_complete`
+  // system message arrives (see the for-await loop below). Exposed via
+  // getMcpAuthPending() so session-registry.js's getMcpServerStatus can
+  // merge an `authUrl` into the SDK's own status list, which has no
+  // equivalent field of its own - McpServerStatus only carries
+  // name/status/error, not how to actually resolve 'needs-auth'.
+  const mcpAuthPending = new Map();
   // Permission "always allow this tool" (backlog.md), per-tool-name only
   // (no input/cwd pattern matching - still flagged as needing its own
   // design call, unattempted here). Two scopes share this same in-memory
@@ -195,6 +204,28 @@ export function startSession({ cwd, resume, model, permissionMode, turnIndexOffs
           pendingApprovals.set(requestId, { resolve, toolName });
           onApprovalRequest?.({ requestId, toolName, input, title: opts.title, displayName: opts.displayName });
         });
+      },
+      // MCP "needs-auth" badge (backlog.md). Two elicitation modes exist;
+      // only 'url' (the OAuth-style "open this link to authorize" case) is
+      // handled - 'form' would need real dynamic-schema form rendering the
+      // panel doesn't have, so it's declined outright rather than left to
+      // hang until the server's own timeout. `{action:'accept'}` on 'url'
+      // is deliberately fire-and-forget per the SDK's own doc example: it
+      // means "I'll show this to the user", not "the user finished" - actual
+      // completion arrives later as a separate `elicitation_complete` system
+      // message (handled in the for-await loop below), since the human still
+      // has to visit the URL and authorize out-of-band in their browser.
+      onElicitation: async (request) => {
+        if (request.mode !== 'url' || !request.url) {
+          return { action: 'decline' };
+        }
+        mcpAuthPending.set(request.serverName, {
+          url: request.url,
+          message: request.message,
+          elicitationId: request.elicitationId,
+        });
+        onMcpAuthRequest?.({ serverName: request.serverName, url: request.url, message: request.message });
+        return { action: 'accept' };
       },
       // Deliberately a PreToolUse hook, not another canUseTool check: the
       // SDK skips canUseTool entirely in acceptEdits/bypassPermissions/
@@ -285,6 +316,15 @@ export function startSession({ cwd, resume, model, permissionMode, turnIndexOffs
         } else if (message.type === 'result') {
           pendingTurns = Math.max(0, pendingTurns - 1);
           onStateChange(pendingTurns > 0 ? 'running' : 'idle');
+        } else if (message.type === 'system' && message.subtype === 'elicitation_complete') {
+          // The MCP server confirms the human finished (or abandoned) the
+          // URL-mode auth flow from onElicitation above - clear the pending
+          // entry either way so the panel stops offering a stale link. The
+          // SDK's own mcpServerStatus() is what actually reports whether
+          // auth succeeded (status flips off 'needs-auth' on the next poll);
+          // this event only tells us the flow is over, not its outcome.
+          mcpAuthPending.delete(message.mcp_server_name);
+          onMcpAuthResolved?.(message.mcp_server_name);
         } else if (message.type === 'conversation_reset') {
           // /clear starts a fresh conversation - turnCounter has to restart
           // with it (back to 0 real turns so far), or every rewind button
@@ -446,5 +486,8 @@ export function startSession({ cwd, resume, model, permissionMode, turnIndexOffs
     removeQueued,
     reorderQueue,
     sendNow,
+    // [{ name, url, message }] - session-registry.js's getMcpServerStatus
+    // merges this into the SDK's mcpServerStatus() list by server name.
+    getMcpAuthPending: () => [...mcpAuthPending.entries()].map(([name, entry]) => ({ name, url: entry.url, message: entry.message })),
   };
 }

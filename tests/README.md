@@ -84,6 +84,37 @@ the correct headers; copy-last-reply reads the *last* `.msg.assistant
 .body` node specifically (not the first) and writes its exact text to the
 clipboard.
 
+## Markdown rendering (assistant replies)
+
+`markdown.test.mjs` covers `public/markdown.js`'s `renderMarkdown` directly,
+via a hand-rolled DOM stub (`tests/helpers/dom-stub.mjs` - this project
+ships no jsdom dependency, so the stub implements just the handful of DOM
+primitives markdown.js actually touches: createElement/createTextNode/
+createDocumentFragment, textContent, append, classList.add, dataset,
+style.textAlign). Covered: paragraphs and paragraph breaks, bold/italic/
+inline-code (including nesting, e.g. bold containing code), links (target/
+rel set), fenced code blocks (verbatim, no inline parsing inside, language
+in `data-lang`), ATX headings h1-h6, horizontal rules, blockquotes, flat
+unordered/ordered lists, nested sub-lists under both list types, GFM
+task-list checkboxes (checked and unchecked), GFM strikethrough, backslash-
+escaped markers, GFM pipe tables (column alignment, escaped-pipe cells, and
+that a bare pipe-containing line without a delimiter row stays a plain
+paragraph instead of misfiring as a table), and the safety property the
+module's own top comment calls out - text is built via textContent, never
+innerHTML, so literal `<img onerror=...>`-shaped text renders as escaped
+text, not markup, both in prose and inside inline code spans.
+
+**Not covered by unit tests, hand-verified only:** the actual browser
+integration in `stream-view.js` (that assistant text blocks specifically,
+not tool args/results/thinking/user messages, get run through
+`renderMarkdown` and mounted under `.markdown-body`) and the CSS in
+`index.html` (`.markdown-body p`'s `white-space: pre-wrap`, which is what
+makes multi-line paragraphs break visually - the renderer itself just joins
+lines with `\n` and relies on that CSS, so a soft-break-vs-hard-break
+distinction was deliberately not implemented; see git history for the
+reasoning). Verified by hand: real streamed replies with tables, checklists,
+and nested bullets render correctly in the app itself.
+
 ## Persistent session title
 
 `session-titles.test.mjs` covers `src/session-titles.js` directly:
