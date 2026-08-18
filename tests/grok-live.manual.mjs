@@ -36,10 +36,11 @@ assert.ok(handshake.sessionId, 'expected a grok session id from session/new');
 assert.equal(handshake.cwd, CWD);
 console.log('  session', handshake.sessionId);
 
-console.log('[2/2] one turn: reply text comes back as an assistant message');
+console.log('[2/2] one turn: reply text and a turn bill (cost / in / out)');
 const turn = await withTimeout((resolve, reject) => {
   let sawInit = false;
   let reply = '';
+  let usage = null;
   const handle = startGrokSession({
     cwd: CWD,
     model: 'grok-4.5',
@@ -49,6 +50,9 @@ const turn = await withTimeout((resolve, reject) => {
         handle.pushInput('Reply with exactly the word pong and nothing else.');
         return;
       }
+      if (message.type === 'assistant' && message.message?.usage) {
+        usage = message.message.usage;
+      }
       if (message.type === 'assistant' && Array.isArray(message.message?.content)) {
         for (const block of message.message.content) {
           if (block.type === 'text') reply += block.text;
@@ -56,7 +60,7 @@ const turn = await withTimeout((resolve, reject) => {
       }
       if (message.type === 'result') {
         handle.close();
-        resolve({ sawInit, reply, stop: message.stop_reason });
+        resolve({ sawInit, reply, stop: message.stop_reason, usage });
       }
     },
     onStateChange: () => {},
@@ -68,5 +72,10 @@ const turn = await withTimeout((resolve, reject) => {
 });
 assert.equal(turn.sawInit, true);
 assert.match(turn.reply.toLowerCase(), /pong/);
+assert.ok(turn.usage, 'expected a turn bill on the live ACP stream');
+assert.ok(turn.usage.input_tokens > 0, `expected input tokens, got ${turn.usage.input_tokens}`);
+assert.ok(turn.usage.output_tokens > 0, `expected output tokens, got ${turn.usage.output_tokens}`);
+assert.ok(turn.usage.cost_usd_ticks > 0, `expected cost ticks, got ${turn.usage.cost_usd_ticks}`);
 console.log('  reply:', turn.reply.trim());
+console.log('  usage:', turn.usage.input_tokens, 'in /', turn.usage.output_tokens, 'out /', turn.usage.cost_usd_ticks, 'ticks');
 console.log('\nALL CHECKS PASSED');

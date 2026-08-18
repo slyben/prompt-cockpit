@@ -47,6 +47,18 @@ function unsupported(name) {
   };
 }
 
+function isSessionUpdateNotification(method) {
+  return method === 'session/update'
+    || method === 'x.ai/session/update'
+    || method === '_x.ai/session/update'
+    // Live stdio stamps turn_completed here (confirmed against a real
+    // grok agent stdio dump). updates.jsonl rewrites the same event as
+    // `_x.ai/session/update`, which is why history already worked and
+    // the live stats strip did not.
+    || method === 'x.ai/session_notification'
+    || method === '_x.ai/session_notification';
+}
+
 /**
  * Start a Grok session. Returns the same handle as startSession():
  * pushInput, close, interrupt, setMode, resolveApproval, getMode, query.
@@ -84,6 +96,10 @@ export function startGrokSession({
   // still queued or running - mid-turn that minted two promptIndexes
   // for one message (promptIndex 2 and 3, same body, ~4s apart).
   let openPromptText = null;
+  // A turn's bill can arrive twice: `_x.ai/session_notification`
+  // (turn_completed) during the prompt, and again on the prompt result's
+  // `_meta.usage`. Count it once.
+  let billedThisTurn = false;
 
   let resolveReady;
   let rejectReady;
@@ -118,7 +134,11 @@ export function startGrokSession({
       client.onNotification((method, params) => {
         const update = params.update || (params.sessionUpdate ? params : null);
         if (!update) return;
-        if (method !== 'session/update' && method !== 'x.ai/session/update') return;
+        // Chunks (text/tools) arrive as session/update. The live bill does
+        // not: grok agent stdio stamps turn_completed on
+        // `_x.ai/session_notification`. The on-disk updates.jsonl rewrites
+        // that same event as `_x.ai/session/update`. Accept both.
+        if (!isSessionUpdateNotification(method)) return;
         // Claude never streams the prompt back, so session.js local-echoes.
         // Grok does emit user_message_chunk for the same turn pushInput
         // already echoed. Forwarding it painted a second "You" bubble on
@@ -126,7 +146,13 @@ export function startGrokSession({
         // one promptIndex, two bubbles). History still reads the chunk
         // from disk via grok-history.js - this is live-only.
         if (update.sessionUpdate === 'user_message_chunk') return;
-        for (const message of acpUpdateToMessages(update, sessionId, { model })) onMessage(message);
+        for (const message of acpUpdateToMessages(update, sessionId, { model })) {
+          if (message.message && message.message.usage) {
+            if (billedThisTurn) continue;
+            billedThisTurn = true;
+          }
+          onMessage(message);
+        }
       });
 
       client.onRequest('session/request_permission', (params) => handlePermission(params));
@@ -208,15 +234,32 @@ export function startGrokSession({
     });
   }
 
+  function emitUsageFromPromptResult(result) {
+    if (billedThisTurn || !result || !result._meta || !result._meta.usage) return;
+    for (const message of acpUpdateToMessages({
+      sessionUpdate: 'turn_completed',
+      usage: result._meta.usage,
+    }, sessionId, { model })) {
+      if (message.message && message.message.usage) billedThisTurn = true;
+      onMessage(message);
+    }
+  }
+
   async function runPrompt(text) {
     await ready;
     if (closed || !connection) return;
     promptInFlight = true;
+    billedThisTurn = false;
     try {
       const result = await connection.client.request('session/prompt', {
         sessionId,
         prompt: [{ type: 'text', text }],
       });
+      // Live stdio also stamps the bill on session/prompt's `_meta.usage`
+      // (confirmed against a real result). Used only when the
+      // turn_completed notification was missing, so a method-name change
+      // cannot zero the stats strip again.
+      emitUsageFromPromptResult(result);
       const stopReason = (result && result.stopReason) || 'end_turn';
       pendingTurns = Math.max(0, pendingTurns - 1);
       if (openPromptText === text && pendingTurns === 0) openPromptText = null;

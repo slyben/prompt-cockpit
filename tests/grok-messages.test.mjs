@@ -97,6 +97,23 @@ test('turn_completed becomes an assistant message with model + usage', () => {
   assert.equal(msgs[0].message.usage.cache_read_input_tokens, 2);
 });
 
+test('turn_completed accepts the live Grok camelCase usage stamp', () => {
+  const msgs = acpUpdateToMessages({
+    sessionUpdate: 'turn_completed',
+    usage: {
+      inputTokens: 16666,
+      outputTokens: 41,
+      cachedReadTokens: 1408,
+      cacheCreationTokens: 0,
+      costUsdTicks: 53492200,
+    },
+  }, 's', { model: 'grok-4.6' });
+  assert.equal(msgs[0].message.usage.input_tokens, 16666);
+  assert.equal(msgs[0].message.usage.output_tokens, 41);
+  assert.equal(msgs[0].message.usage.cache_read_input_tokens, 1408);
+  assert.equal(msgs[0].message.usage.cost_usd_ticks, 53492200);
+});
+
 test('joinStreamText treats a single trailing newline as a token boundary', () => {
   assert.equal(joinStreamText('The\n', 'user\n'), 'The user\n');
   assert.equal(joinStreamText('The user\n', 'wants'), 'The user wants');

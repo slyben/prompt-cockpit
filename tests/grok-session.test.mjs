@@ -7,7 +7,7 @@ function flush() {
   return new Promise((resolve) => setImmediate(resolve));
 }
 
-function fakeConnect({ failInit = false, sessionId = 'grok-sess-1', hangPrompt = null } = {}) {
+function fakeConnect({ failInit = false, sessionId = 'grok-sess-1', hangPrompt = null, promptResult = { stopReason: 'end_turn' } } = {}) {
   const proc = new EventEmitter();
   const requests = [];
   const permissionHandler = { fn: null };
@@ -33,7 +33,7 @@ function fakeConnect({ failInit = false, sessionId = 'grok-sess-1', hangPrompt =
           },
         };
       }
-      if (method === 'session/prompt') return { stopReason: 'end_turn' };
+      if (method === 'session/prompt') return promptResult;
       if (method === '_x.ai/rewind/points') return { rewind_points: [{ prompt_index: 0 }, { prompt_index: 2 }] };
       if (method === '_x.ai/rewind/execute') return { success: true, target_prompt_index: params.target_prompt_index };
       if (method === 'session/set_model' || method === '_x.ai/session/set_model') return { modelId: params.modelId };
@@ -122,6 +122,95 @@ test('ACP tool updates are forwarded as sdk messages', async () => {
   });
   assert.equal(messages.at(-1).type, 'assistant');
   assert.equal(messages.at(-1).message.content[0].text, 'hi');
+});
+
+test('turn_completed on _x.ai/session/update is forwarded with usage', async () => {
+  const { messages, fake } = startFake();
+  await flush();
+  await flush();
+  fake.notificationHandler.fn('_x.ai/session/update', {
+    update: {
+      sessionUpdate: 'turn_completed',
+      usage: { inputTokens: 101544, outputTokens: 1128, costUsdTicks: 210854400 },
+    },
+  });
+  const billed = messages.find((m) => m.type === 'assistant' && m.message && m.message.usage);
+  assert.ok(billed, 'updates.jsonl rewrites the bill as _x.ai/session/update');
+  assert.equal(billed.message.usage.input_tokens, 101544);
+  assert.equal(billed.message.usage.output_tokens, 1128);
+  assert.equal(billed.message.usage.cost_usd_ticks, 210854400);
+});
+
+test('turn_completed on _x.ai/session_notification is forwarded with usage', async () => {
+  const { messages, fake } = startFake();
+  await flush();
+  await flush();
+  // Live stdio shape (confirmed against grok agent stdio): method is
+  // `_x.ai/session_notification`, params may be the update itself.
+  fake.notificationHandler.fn('_x.ai/session_notification', {
+    sessionUpdate: 'turn_completed',
+    usage: { inputTokens: 16666, outputTokens: 41, cachedReadTokens: 1408, costUsdTicks: 53492200 },
+  });
+  const billed = messages.find((m) => m.type === 'assistant' && m.message && m.message.usage);
+  assert.ok(billed, 'live Grok bills arrive on _x.ai/session_notification');
+  assert.equal(billed.message.usage.input_tokens, 16666);
+  assert.equal(billed.message.usage.output_tokens, 41);
+  assert.equal(billed.message.usage.cache_read_input_tokens, 1408);
+  assert.equal(billed.message.usage.cost_usd_ticks, 53492200);
+});
+
+test('session/prompt _meta.usage bills the turn when no notification arrives', async () => {
+  const { session, messages } = startFake({}, {
+    promptResult: {
+      stopReason: 'end_turn',
+      _meta: {
+        usage: { inputTokens: 16666, outputTokens: 41, costUsdTicks: 53492200, cachedReadTokens: 1408 },
+      },
+    },
+  });
+  await flush();
+  await flush();
+  session.pushInput('hello grok');
+  await flush();
+  await flush();
+  const billed = messages.filter((m) => m.type === 'assistant' && m.message && m.message.usage);
+  assert.equal(billed.length, 1, 'prompt-result usage is the fallback when the notification is missing');
+  assert.equal(billed[0].message.usage.input_tokens, 16666);
+  assert.equal(billed[0].message.usage.output_tokens, 41);
+  assert.equal(billed[0].message.usage.cost_usd_ticks, 53492200);
+});
+
+test('session/prompt _meta.usage is not double-counted after a turn_completed notification', async () => {
+  const hangPrompt = {};
+  const { session, messages, fake } = startFake({}, { hangPrompt });
+  await flush();
+  await flush();
+  session.pushInput('hello grok');
+  await flush();
+  await flush();
+  fake.notificationHandler.fn('_x.ai/session_notification', {
+    sessionUpdate: 'turn_completed',
+    usage: { inputTokens: 16666, outputTokens: 41, costUsdTicks: 53492200 },
+  });
+  hangPrompt.resolve({
+    stopReason: 'end_turn',
+    _meta: { usage: { inputTokens: 16666, outputTokens: 41, costUsdTicks: 53492200 } },
+  });
+  await flush();
+  await flush();
+  const billed = messages.filter((m) => m.type === 'assistant' && m.message && m.message.usage);
+  assert.equal(billed.length, 1, 'one turn, one bill');
+});
+
+test('unrelated ACP notifications are ignored', async () => {
+  const { messages, fake } = startFake();
+  await flush();
+  await flush();
+  const before = messages.length;
+  fake.notificationHandler.fn('session/cancel', {
+    update: { sessionUpdate: 'turn_completed', usage: { inputTokens: 1, outputTokens: 1 } },
+  });
+  assert.equal(messages.length, before);
 });
 
 test('live user_message_chunk is dropped because pushInput already echoed it', async () => {
