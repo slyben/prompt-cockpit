@@ -698,7 +698,45 @@ const settings = initSettings({
       pluginPanel.refresh();
     }
     refreshPermissionRulesList();
+    refreshGitGuardMode();
   },
+});
+
+const gitGuardModeEl = document.getElementById('gitGuardModeBtn');
+const gitGuardErrorEl = document.getElementById('gitGuardError');
+
+// Project-scoped (src/git-commit-guard.js via settings.local.json), not a
+// localStorage preference - same "read fresh on every modal open" reasoning
+// as refreshPermissionRulesList: reflects whatever another tab/session for
+// this cwd last saved, not a stale value cached from page load.
+async function refreshGitGuardMode() {
+  gitGuardErrorEl.style.display = 'none';
+  if (!sessionId) return;
+  try {
+    const res = await fetch(`/api/sessions/${sessionId}/git-guard`, { headers: authHeaders() });
+    if (!res.ok) return;
+    const { mode } = await res.json();
+    gitGuardModeEl.value = mode;
+  } catch {
+    // offline/blocked - select just keeps showing its last-known value
+  }
+}
+
+gitGuardModeEl.addEventListener('change', async () => {
+  if (!sessionId) return;
+  const mode = gitGuardModeEl.value;
+  try {
+    const res = await fetch(`/api/sessions/${sessionId}/git-guard`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...authHeaders() },
+      body: JSON.stringify({ mode }),
+    });
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || 'save failed');
+    gitGuardErrorEl.style.display = 'none';
+  } catch (err) {
+    gitGuardErrorEl.textContent = `Couldn't save git commit guard setting: ${err.message || err}`;
+    gitGuardErrorEl.style.display = '';
+  }
 });
 
 const permissionRulesListEl = document.getElementById('permissionRulesList');

@@ -1788,6 +1788,16 @@
             </div>
             <ul id="customFoldersList" class="settings-list"></ul>
           </div>
+          <label class="settings-row">
+            <span>Git commit guard</span>
+            <select id="gitGuardModeBtn">
+              <option value="commit">Block Co-Authored-By on git commit</option>
+              <option value="all">Block Co-Authored-By anywhere</option>
+              <option value="off">Off</option>
+            </select>
+            <span class="hint" title="Auto-denies Bash tool calls containing a Co-Authored-By trailer. 'git commit' only checks git commit invocations; 'anywhere' checks every Bash command for the string. Project-scoped (settings.local.json), takes effect on this session's next matching Bash call.">?</span>
+          </label>
+          <div id="gitGuardError" class="mcp-error" style="display: none;"></div>
           <div class="settings-section">
             <div class="settings-section-header">
               <strong>Always-allowed tools in this project</strong>

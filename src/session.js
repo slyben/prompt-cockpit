@@ -3,6 +3,7 @@
 import { randomUUID } from 'node:crypto';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { AUTO_ALLOW_MODES } from './permissions.js';
+import { readGitGuardMode, commandTripsGuard } from './git-commit-guard.js';
 
 // A minimal AsyncIterable<SDKUserMessage> that supports pushing values in
 // from the outside. query() pulls from this for as long as the session lives.
@@ -194,6 +195,41 @@ export function startSession({ cwd, resume, model, permissionMode, turnIndexOffs
           pendingApprovals.set(requestId, { resolve, toolName });
           onApprovalRequest?.({ requestId, toolName, input, title: opts.title, displayName: opts.displayName });
         });
+      },
+      // Deliberately a PreToolUse hook, not another canUseTool check: the
+      // SDK skips canUseTool entirely in acceptEdits/bypassPermissions/
+      // dontAsk/auto modes (see AUTO_ALLOW_MODES above), so a guard living
+      // there would silently stop applying the moment someone cycles modes.
+      // Hooks run on every tool call regardless of permission mode - the
+      // actual auto-deny surface for this. Reads gitCommitGuard fresh from
+      // settings.local.json on every Bash call (cheap - it's a small JSON
+      // file) rather than once at session start, so a mode change in the
+      // settings panel takes effect on this session's very next Bash call
+      // instead of requiring a restart (unlike plugin-settings.js's
+      // enabledPlugins, which the SDK only reads at session start).
+      hooks: {
+        PreToolUse: [
+          {
+            matcher: 'Bash',
+            hooks: [
+              async (hookInput) => {
+                const mode = await readGitGuardMode(cwd).catch(() => 'all');
+                const command = hookInput.tool_input?.command;
+                if (!commandTripsGuard(command, mode)) return { continue: true };
+                return {
+                  continue: true,
+                  hookSpecificOutput: {
+                    hookEventName: 'PreToolUse',
+                    permissionDecision: 'deny',
+                    permissionDecisionReason: mode === 'all'
+                      ? 'Blocked by this project\'s git commit guard: this command contains a Co-Authored-By trailer. Retry without it - do not try to route around this (e.g. writing the message to a file first). This is a project policy set by the human user; only they can change or disable it, in Settings > General > Git commit guard.'
+                      : 'Blocked by this project\'s git commit guard: this git commit includes a Co-Authored-By trailer. Retry without it - do not try to route around this (e.g. writing the message to a file first). This is a project policy set by the human user; only they can change or disable it, in Settings > General > Git commit guard.',
+                  },
+                };
+              },
+            ],
+          },
+        ],
       },
     },
   });

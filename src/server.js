@@ -21,6 +21,7 @@ import { isSafeGrokArg } from './grok-acp.js';
 import { defaultScreenshotDir } from './os-defaults.js';
 import { setPluginEnabled, readEnabledPlugins } from './plugin-settings.js';
 import { readSessionDefaults, setSessionDefaults } from './session-defaults.js';
+import { readGitGuardMode, setGitGuardMode, GIT_GUARD_MODES } from './git-commit-guard.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
@@ -423,6 +424,25 @@ async function handleSessionRoute(req, res, url, id, action) {
         await setPluginEnabled(row.cwd, body.pluginKey, Boolean(body.enabled));
       }
       return respondJson(res, 200, { enabled: Boolean(body.enabled) });
+    } catch (err) {
+      return respondJson(res, 500, { error: String(err.message || err) });
+    }
+  }
+
+  if (action === 'git-guard' && req.method === 'GET') {
+    try {
+      return respondJson(res, 200, { mode: await readGitGuardMode(row.cwd) });
+    } catch (err) {
+      return respondJson(res, 500, { error: String(err.message || err) });
+    }
+  }
+
+  if (action === 'git-guard' && req.method === 'POST') {
+    const body = await readJsonBody(req);
+    if (!GIT_GUARD_MODES.includes(body.mode)) return respondJson(res, 400, { error: `mode must be one of ${GIT_GUARD_MODES.join(', ')}` });
+    try {
+      await setGitGuardMode(row.cwd, body.mode);
+      return respondJson(res, 200, { mode: body.mode });
     } catch (err) {
       return respondJson(res, 500, { error: String(err.message || err) });
     }
