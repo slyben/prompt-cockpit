@@ -1,6 +1,6 @@
 {
   "name": "claude-prompt-cockpit",
-  "version": "0.1.0",
+  "version": "0.1.3",
   "private": true,
   "license": "MIT",
   "description": "Browser cockpit for driving Claude Code sessions via the Claude Agent SDK.",
