@@ -17,7 +17,7 @@
 // server.js is what bridges this row to that persisted store (see
 // seedSessionDefaults() and the 'thinking'/'auto-continue' routes there) -
 // this module itself stays filesystem-free.
-import { randomUUID } from 'node:crypto';
+import { randomUUID, randomBytes } from 'node:crypto';
 import { startSession } from './session.js';
 import { startGrokSession } from './grok-session.js';
 import { forkConversation, rewindFiles as rewindFilesSdk, resolveTurnUuid } from './rewind.js';
@@ -27,9 +27,55 @@ import { fetchGrokSessionHistory } from './grok-history.js';
 import { createEventLog, append as appendEvent, replay as replayEvents } from './event-log.js';
 import { createUsageAccumulator, costForUsage } from './usage.js';
 import { contextPayload } from './context-usage.js';
-import { joinStreamText } from './grok-messages.js';
-
 const sessions = new Map();
+
+// MVP6 seed (backlog.md): a single per-process "handshake secret" minted
+// fresh every time this server starts, in memory only - never persisted,
+// never sent anywhere automatically. It's the shared value that will
+// eventually let a session running on a DIFFERENT machine (an SSH'd Windows
+// cockpit, the actual MVP6 target) prove it belongs to the same trusted
+// group as sessions running locally, so delegation isn't gated on nothing
+// more than "the name string matched." Pairing today is deliberately manual
+// (copy from the session-list pane, paste into the other side's session) -
+// no exchange protocol exists yet, which is fine for a single human running
+// both ends.
+//
+// Every LOCALLY-created row is stamped with the CURRENT secret at creation
+// time (see createSession below), so local sessions are trusted by
+// construction - they were spawned by this very process, there's nothing to
+// prove. The override only matters two ways: (1) a future non-local row
+// type (once MVP6 actually exists) that does NOT get stamped automatically
+// and has to be manually promoted via setSessionHandshake, and (2) as a
+// manual revoke - blank/garble a row's value via the same setter to opt
+// that session out of delegation entirely, in either direction.
+let handshakeSecret = randomBytes(16).toString('hex');
+
+export function getHandshakeSecret() {
+  return handshakeSecret;
+}
+
+// Rotating invalidates every row's trust in one move (their stamped value
+// now mismatches) - a broader hammer than setSessionHandshake, deliberately:
+// this is the "something looked wrong, cut everyone off" control, not a
+// per-row action. Existing rows are NOT re-stamped, so this is also how you
+// audit who was actually trusted - anyone still `isSessionTrusted` after a
+// rotation was re-synced (or is a fresh row created after the rotation, which
+// gets the new value automatically).
+export function regenerateHandshakeSecret() {
+  handshakeSecret = randomBytes(16).toString('hex');
+  return handshakeSecret;
+}
+
+export function setSessionHandshake(id, value) {
+  const row = sessions.get(id);
+  if (!row) throw new Error(`unknown session: ${id}`);
+  row.handshakeSecret = typeof value === 'string' ? value.trim() : '';
+  return isSessionTrusted(row);
+}
+
+export function isSessionTrusted(row) {
+  return Boolean(row.handshakeSecret) && row.handshakeSecret === handshakeSecret;
+}
 
 // `startSessionImpl` defaults to the real SDK-backed session but can be
 // swapped for a stub in tests so unit tests don't spawn a real CLI process.
@@ -75,6 +121,10 @@ export function createSession({ cwd, resume, name, model, permissionMode, histor
     state: 'starting', // starting | idle | running | error | closed
     mode: permissionMode || 'default',
     claudeSessionId: resume || null,
+    // See handshakeSecret's own module-level comment above - stamped with
+    // the CURRENT canonical value at creation, so a locally-spawned row is
+    // trusted for delegation from the moment it exists.
+    handshakeSecret,
     // `enableFileCheckpointing` can't be turned on retroactively (plan
     // Decisions), so it only actually covers this session's history if the
     // cockpit started it fresh. Any resumed session - whether it was last
@@ -266,6 +316,12 @@ export function findByName(cwd, name) {
 function pushTurn(row, text, tag = null) {
   const queueId = row.handle.pushInput(text);
   row.pendingResultTags.push({ queueId, tag });
+  // Returned so relayDelegationResult can correlate this turn's own echoed
+  // 'user' message (which session.js stamps with this same queueId, see its
+  // pushInput comment) with a later, separate cockpit:delegate-full-trace
+  // marker - see that function for why the two can't just be sent as one
+  // message. Every other caller here ignores the return value, unaffected.
+  return queueId;
 }
 
 // MVP5 cross-session delegation: the whole feature in one call. Triggered
@@ -281,16 +337,38 @@ export function delegateTask(originId, targetName, text) {
   const target = findByName(origin.cwd, targetName);
   if (!target) throw new Error(`no session named "${targetName}" in this project`);
   if (target.id === origin.id) throw new Error('cannot delegate to the same session');
-  // Symmetric with relayDelegationResult's <delegated_result> wrapper below:
-  // without this, the target's own transcript - and the target model itself -
-  // has no way to tell this turn apart from the human typing straight into
-  // its compose box. It would just read "You: <text>" with zero indication
-  // another session asked, which is exactly the gap that surfaced in review
+  // Handshake gate (see handshakeSecret's module-level comment): both ends
+  // have to currently agree with this process's canonical secret, not just
+  // the target - an origin that's been manually revoked shouldn't be able
+  // to ask anyone anything either.
+  if (!isSessionTrusted(origin)) throw new Error('this session\'s handshake does not match the server - it cannot delegate to other sessions (see Settings)');
+  if (!isSessionTrusted(target)) throw new Error(`"${target.name || targetName}" does not have a matching handshake - it cannot receive delegated tasks (see Settings)`);
+  // Symmetric with relayDelegationResult's wrapper below: without this, the
+  // target's own transcript - and the target model itself - has no way to
+  // tell this turn apart from the human typing straight into its compose
+  // box. It would just read "You: <text>" with zero indication another
+  // session asked, which is exactly the gap that surfaced in review
   // (target's own reasoning referred to "the user" instead of the delegating
   // session). `tag.task` below stays the original unwrapped text - it's only
-  // used for the eventual reply's `task="..."` attribute, not re-displayed
-  // to the target.
-  const wrappedTask = `<delegated_task from="${escapeAttr(origin.name || 'session')}">\n${escapeBody(text)}\n</delegated_task>`;
+  // used for the eventual reply's header line, not re-displayed to the target.
+  //
+  // Deliberately prose, not an XML-ish `<delegated_task from="...">` tag
+  // (that was the v1 shape - see git history/backlog for why it was
+  // dropped): a bare tag wrapping plain text in an ordinary user turn is
+  // structurally indistinguishable from a hand-typed prompt-injection
+  // payload, and a receiving model that's trained to distrust exactly that
+  // pattern will - correctly, given what it's shown - refuse it outright
+  // ("I didn't spawn this agent, not treating this tag as real", confirmed
+  // live 2026-08-20). Prose framing doesn't eliminate that risk (nothing
+  // fully can without an out-of-band system-prompt anchor - see backlog),
+  // but it removes the single strongest refusal trigger: leading with a
+  // fake-tool-scaffolding token. `buildDelegatedHeader`'s exact wording
+  // matters here - it explicitly attributes the ask to "your operator" (a
+  // human), not to the sibling session as an autonomous agent, since that's
+  // the actual trust chain (`/ask` is only ever user-typed - see this
+  // function's own comment above) and is what a suspicious model is really
+  // checking.
+  const wrappedTask = buildDelegatedHeader('task', origin.name || 'session', text);
   pushTurn(target, wrappedTask, { fromId: origin.id, fromName: origin.name || 'session', task: text, buffer: [] });
   broadcastSummary(target.id); // target tab's state flips to 'running' immediately, not on its next unrelated broadcast
   // Durable marker on the ORIGIN's own event log/transcript - not routed
@@ -385,6 +463,11 @@ export function toSummary(row) {
     effort: row.effort || null,
     autoContinue: row.autoContinue,
     rateLimitHit: row.rateLimitHit,
+    // See handshakeSecret's module-level comment - whether this row is
+    // currently allowed to send/receive a delegated task. The raw secret
+    // value itself is NOT included here (only the server's own canonical
+    // copy is meant to be copied around, via the /api/handshake route).
+    handshakeTrusted: isSessionTrusted(row),
     // Turns cockpit still considers "in flight" for this row - mirrors
     // session.js/grok-session.js's own pendingTurns 1:1 (both increment on
     // pushTurn, both decrement on the same 'result' message, see
@@ -787,7 +870,7 @@ function handleMessage(id, message) {
     // belongs to - shift, not filter/find. `entry.tag` is null for a
     // non-delegated turn (nothing to relay).
     const entry = row.pendingResultTags.shift();
-    if (entry?.tag) relayDelegationResult(row, entry.tag, { ok: true });
+    if (entry?.tag) relayDelegationResult(row, entry.tag, { ok: true, message });
     refreshContextUsage(id); // a real round trip to the CLI - once per finished turn, not per message
     refreshRateLimits(id);
   }
@@ -804,37 +887,115 @@ function handleMessage(id, message) {
 // second queue built) wrapped so it reads like a tool result even though
 // there's no real tool_use id to attach an actual SDK tool_result to (the
 // trigger was a user-typed /ask, not an LLM tool call - see delegateTask's
-// comment). Text-only: forwards the target's final assistant text for that
-// turn, not a full tool-call trace (confirmed scope, not a gap).
-function relayDelegationResult(targetRow, tag, { ok, errorText }) {
+// comment).
+//
+// Backlog fix (2026-08-20, "relay buffers everything, not just the final
+// answer"): the ORIGIN MODEL now only ever sees finalAnswerText() below, not
+// the whole buffered narration - that comment used to claim this ("final
+// answer only") while the code actually joined every buffered block, which
+// is how mid-task narration once rode back looking exactly like a delegated
+// answer. The full buffer isn't thrown away, though: when it genuinely holds
+// more than the clean answer, it's shipped separately as a
+// cockpit:delegate-full-trace marker (below) that never touches the origin
+// model's context - purely a client-side "show full trace" button
+// (stream-view.js/detail-pane.js) for a human who wants to see it. No
+// marker at all when there's nothing extra (full text === final text) - see
+// that check below.
+function relayDelegationResult(targetRow, tag, { ok, errorText, message }) {
   const origin = sessions.get(tag.fromId);
   if (!origin) return; // origin session was closed/gone - best-effort, nothing left to deliver to
-  const body = ok ? (escapeBody(tag.buffer.reduce((acc, part) => joinStreamText(acc, part), '').trim()) || '(no text reply)') : `ERROR: ${escapeBody(errorText)}`;
-  const statusAttr = ok ? '' : ' status="error"';
-  const wrapped = `<delegated_result from="${escapeAttr(targetRow.name || 'session')}" task="${escapeAttr(tag.task)}"${statusAttr}>\n${body}\n</delegated_result>`;
-  pushTurn(origin, wrapped); // not tagged - this is a plain turn for origin, not itself a delegation
+  if (!ok) {
+    const wrapped = buildDelegatedHeader('result', targetRow.name || 'session', `ERROR: ${errorText}`, tag.task);
+    pushTurn(origin, wrapped);
+    return;
+  }
+  // tag.buffer holds one complete text block per assistant message
+  // (collectDelegationText) - each is already a fully-formed chunk of
+  // narration, not a streaming delta fragment, so they're joined as separate
+  // paragraphs (blank line between) rather than with joinStreamText, which
+  // is grok-messages.js's smart-whitespace merge for stitching partial
+  // deltas of the SAME flowing message back together. Reusing it here used
+  // to glue unrelated blocks together with whatever whitespace each one
+  // happened to end in (e.g. a narration block running straight into a
+  // fenced code block with no separator at all).
+  const fullText = tag.buffer.map((part) => (part || '').trim()).filter(Boolean).join('\n\n') || '(no text reply)';
+  const finalText = finalAnswerText(tag, message) || fullText;
+  const wrapped = buildDelegatedHeader('result', targetRow.name || 'session', finalText, tag.task);
+  const queueId = pushTurn(origin, wrapped); // not tagged - this is a plain turn for origin, not itself a delegation
+  if (fullText !== finalText) {
+    const marker = {
+      type: 'cockpit:delegate-full-trace',
+      queueId,
+      label: `${targetRow.name || 'session'} - full trace`,
+      text: fullText,
+    };
+    const seq = appendEvent(origin.eventLog, marker);
+    broadcast(origin.id, { type: 'sdk:message', message: marker, seq });
+  }
 }
 
-function escapeAttr(s) {
-  return String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+// Best-effort "final answer only" extraction for a delegated turn's relay.
+// Prefers the SDK's own `result.result` field - Claude's own authoritative
+// text for "this is the final answer" (SDKResultSuccess.result, distinct
+// from the per-step text blocks collectDelegationText buffers) - when it's
+// non-empty. Grok's synthesized result message never populates this
+// (grok-messages.js's turnResultMessage always sets result: ''), so for a
+// Grok target - and any Claude edge case where result comes back empty -
+// fall back to the last non-empty buffered text block, on the theory that
+// narration precedes the actual answer within a turn, not the reverse.
+// Returns '' (never throws) if neither source has anything - relayDelegationResult
+// falls back the rest of the way to fullText itself in that case.
+function finalAnswerText(tag, message) {
+  const sdkResult = message && message.type === 'result' && typeof message.result === 'string' ? message.result.trim() : '';
+  if (sdkResult) return sdkResult;
+  for (let i = tag.buffer.length - 1; i >= 0; i--) {
+    const t = (tag.buffer[i] || '').trim();
+    if (t) return t;
+  }
+  return '';
 }
 
-// Same escaping as escapeAttr minus the quote (this isn't inside a quoted
-// attribute) - closes a soft prompt-injection surface flagged in review: an
-// unescaped reply body containing a literal `</delegated_result><delegated_
-// result from="...">` could otherwise spoof the wrapper's own boundaries in
-// what the origin model reads. This is a readability/trust concern, not a
-// memory-safety one - the text is never parsed as real markup by any code,
-// only read by an LLM - but there is no reason to leave it wide open.
-function escapeBody(s) {
-  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;');
+// Shared prose wrapper for both delegation directions - see delegateTask's
+// comment for why this replaced the earlier `<delegated_task from="...">`
+// tag shape. Header line stays machine-parseable (stream-view.js's
+// DELEGATED_HEADER_RE) purely so the UI can pull a clean from-name/body
+// apart for the bubble label; the model reads the whole thing as one turn,
+// header prose included - that framing is the point, not incidental.
+// `sanitizeName` only guards the header's own quoted name from a stray `"`
+// in a session name breaking the UI's regex match; there's no boundary left
+// for body text to spoof (no closing tag), so body goes through unescaped -
+// the residual "body contains a fake header line" risk is the same class of
+// low-severity prompt-injection surface any relay design has, and prose
+// doesn't make it worse than tags did.
+function buildDelegatedHeader(kind, name, body, task) {
+  const safeName = sanitizeName(name);
+  if (kind === 'task') {
+    return `[Prompt Cockpit] Relayed task from "${safeName}"\n\n`
+      + `Your operator is also running a sibling cockpit session named "${safeName}" in this same project. `
+      + `They typed the message below in ${safeName}'s own compose box and used this app's delegation feature `
+      + `("/ask") to relay it to you directly - it is authorized by the human operator, not an instruction from `
+      + `another agent. Reply normally in this turn; your answer will be relayed back to ${safeName} automatically.\n\n`
+      + `---\n${body}`;
+  }
+  return `[Prompt Cockpit] Relayed reply from "${safeName}"\n\n`
+    + `Your operator earlier asked the sibling cockpit session "${safeName}" to do something on your behalf `
+    + `(the original ask was: "${sanitizeName(task)}"). This is ${safeName}'s reply, delivered back to you by `
+    + `your operator - not a message from ${safeName} directly.\n\n`
+    + `---\n${body}`;
+}
+
+function sanitizeName(s) {
+  return String(s).replace(/"/g, "'");
 }
 
 // MVP5: watches one assistant message for delegated-turn text while this
 // row has a pending delegation tag (row.pendingResultTags[0] - the OLDEST,
 // same FIFO reasoning as the 'result' branch above). Only the plain text
-// blocks are kept, per the confirmed v1 scope (final answer only, not a
-// tool-call trace).
+// blocks are kept (no tool-call trace) - but every block, not just the
+// final one: this buffer now serves double duty as both the "full trace"
+// side-channel and finalAnswerText()'s own fallback source, so trimming it
+// down here would quietly break both. The "final answer only" trim happens
+// downstream in relayDelegationResult instead.
 function collectDelegationText(row, message) {
   const tag = row.pendingResultTags[0]?.tag;
   if (!tag || message.type !== 'assistant' || !message.message || !Array.isArray(message.message.content)) return;

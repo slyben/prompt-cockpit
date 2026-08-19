@@ -132,6 +132,10 @@ const sessionListPane = initSessionListPane({
   closeBtn: document.getElementById('sessionListCloseBtn'),
   countBtn: document.getElementById('sessionCountBtn'),
   headerEl: document.querySelector('header'),
+  handshakeRow: document.getElementById('handshakeRow'),
+  handshakeValue: document.getElementById('handshakeValue'),
+  handshakeCopyBtn: document.getElementById('handshakeCopyBtn'),
+  handshakeRegenBtn: document.getElementById('handshakeRegenBtn'),
 });
 
 document.getElementById('newSessionTabBtn').addEventListener('click', () => {
@@ -148,6 +152,15 @@ document.getElementById('newSessionTabBtn').addEventListener('click', () => {
 function selectLiveToolCall(container, id) {
   sessionListPane.closePane(); // inspecting a tool call always wins over the session-list override
   detailPane.selectToolCall(container, id);
+  if (!settings.isDetailPaneEnabled()) settings.setDetailPaneEnabled(true);
+}
+
+// Delegated reply's "show full trace" corner button (stream-view.js's
+// attachDelegatedTrace) - same open-and-enable-the-pane pattern as a tool
+// call click above, just showing plain text instead of a tool-call record.
+function selectDelegatedTrace(container, queueId, label, text) {
+  sessionListPane.closePane();
+  detailPane.showText(container, queueId, label, text);
   if (!settings.isDetailPaneEnabled()) settings.setDetailPaneEnabled(true);
 }
 
@@ -803,6 +816,7 @@ const settings = initSettings({
     }
     refreshPermissionRulesList();
     refreshGitGuardMode();
+    refreshHandshakeStatus();
   },
 });
 
@@ -840,6 +854,49 @@ gitGuardModeEl.addEventListener('change', async () => {
   } catch (err) {
     gitGuardErrorEl.textContent = `Couldn't save git commit guard setting: ${err.message || err}`;
     gitGuardErrorEl.style.display = '';
+  }
+});
+
+// MVP6 seed (backlog.md): THIS session's own delegation handshake trust
+// status, plus a paste-in field to re-sync it. Distinct from the read-only
+// server-wide copy in session-list-pane.js - see this file's own comment
+// there for why the paste action has to live here, scoped to this tab's own
+// session token, rather than in the cross-tab "All sessions" list.
+const handshakeStatusEl = document.getElementById('handshakeStatus');
+const handshakeInputEl = document.getElementById('handshakeInput');
+const handshakeSaveBtnEl = document.getElementById('handshakeSaveBtn');
+const handshakeErrorEl = document.getElementById('handshakeError');
+
+async function refreshHandshakeStatus() {
+  handshakeErrorEl.style.display = 'none';
+  handshakeInputEl.value = '';
+  if (!sessionId) return;
+  try {
+    const res = await fetch(`/api/sessions/${sessionId}`, { headers: authHeaders() });
+    if (!res.ok) return;
+    const { handshakeTrusted } = await res.json();
+    handshakeStatusEl.textContent = handshakeTrusted ? '✓ trusted' : '⚠ not trusted - paste the value below';
+  } catch {
+    // offline/blocked - status just keeps showing its last-known value
+  }
+}
+
+handshakeSaveBtnEl.addEventListener('click', async () => {
+  if (!sessionId) return;
+  const value = handshakeInputEl.value;
+  try {
+    const res = await fetch(`/api/sessions/${sessionId}/handshake`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...authHeaders() },
+      body: JSON.stringify({ value }),
+    });
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || 'save failed');
+    const { trusted } = await res.json();
+    handshakeStatusEl.textContent = trusted ? '✓ trusted' : '⚠ not trusted - value did not match';
+    handshakeErrorEl.style.display = 'none';
+  } catch (err) {
+    handshakeErrorEl.textContent = `Couldn't save handshake value: ${err.message || err}`;
+    handshakeErrorEl.style.display = '';
   }
 });
 
@@ -1173,7 +1230,7 @@ streamEl.addEventListener('mouseup', (event) => {
 // (stream-view.js's renderAssistant), so .body always holds the full text,
 // nothing truncated to worry about.
 copyLastBtn.addEventListener('click', () => {
-  const replies = streamEl.querySelectorAll('.msg.assistant .body');
+  const replies = streamEl.querySelectorAll('.msg.assistant:not(.delegated-reply) .body');
   const last = replies[replies.length - 1];
   if (!last) return;
   const rect = copyLastBtn.getBoundingClientRect();
@@ -1831,6 +1888,7 @@ function connect(id, token, { reconnect = false } = {}) {
         onSelectToolCall: selectLiveToolCall,
         onToolCallStarted: (container, record) => detailPane.onToolCallStarted(container, record),
         onToolResultArrived: (container, id) => detailPane.onToolResultArrived(container, id),
+        onShowDelegatedTrace: selectDelegatedTrace,
       });
       // One bar per priced assistant turn (turn-chart.js) - same
       // message._usageInfo session-registry.js already stashes for
@@ -2220,7 +2278,7 @@ function setState(state) {
 // correct across every ingestion path). No open checkbox in the reply ->
 // null -> compose.js just falls back to its default placeholder text.
 function computePromptSuggestion() {
-  const replies = streamEl.querySelectorAll('.msg.assistant .body');
+  const replies = streamEl.querySelectorAll('.msg.assistant:not(.delegated-reply) .body');
   const last = replies[replies.length - 1];
   if (!last) return null;
   const match = (last.textContent || '').match(/^\s*[-*]\s*\[ \]\s*(.+)$/m);

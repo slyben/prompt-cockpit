@@ -5,8 +5,26 @@ import { defaultScreenshotDir } from '../os-defaults.js';
 import { listDirectory } from '../session-launcher.js';
 import { respondJson } from '../http-utils.js';
 import { availableProviders } from '../provider-availability.js';
+import { getHandshakeSecret, regenerateHandshakeSecret } from '../session-registry.js';
 
 export function registerSystemRoutes(router) {
+  // MVP6 seed (backlog.md): the per-process delegation handshake secret -
+  // see session-registry.js's own module-level comment for the full
+  // rationale. No session token gate (there's no one session it belongs
+  // to), same as /api/browse below - Host/Origin allowlisting is the actual
+  // boundary here, per server.js's isSpoofedRequest.
+  router.get('/api/handshake', async (req, res) => {
+    return respondJson(res, 200, { secret: getHandshakeSecret() });
+  });
+
+  // Rotates the canonical value - every row stamped with the OLD secret
+  // (i.e. every session that hasn't been manually re-synced afterward)
+  // stops being trusted for delegation the moment this runs. Deliberately a
+  // blunt "cut everyone off" control, not scoped to one row - see
+  // regenerateHandshakeSecret's own comment.
+  router.post('/api/handshake/regenerate', async (req, res) => {
+    return respondJson(res, 200, { secret: regenerateHandshakeSecret() });
+  });
   router.get('/api/os-defaults', async (req, res) => {
     return respondJson(res, 200, { screenshotDir: defaultScreenshotDir() });
   });

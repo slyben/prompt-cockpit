@@ -186,6 +186,21 @@ export function registerSessionActionRoutes(router) {
       }
     }
 
+    // MVP6 seed (backlog.md): pastes a handshake value onto THIS row -
+    // "paste from the server's own /api/handshake copy" is the trusted
+    // path, but any string is accepted (setSessionHandshake trims it and
+    // just compares); a mismatched value is a valid way to explicitly
+    // revoke this row's own delegation trust, not an error.
+    if (action === 'handshake' && req.method === 'POST') {
+      const body = await readJsonBody(req);
+      try {
+        const trusted = registry.setSessionHandshake(id, body.value);
+        return respondJson(res, 200, { trusted });
+      } catch (err) {
+        return respondJson(res, 500, { error: String(err.message || err) });
+      }
+    }
+
     if (action === 'model' && req.method === 'POST') {
       const body = await readJsonBody(req);
       try {

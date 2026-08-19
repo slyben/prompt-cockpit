@@ -21,6 +21,13 @@ export function initDetailPane({ panel, headerLabel, followLiveBtn, tabButtons, 
   let pinnedId = null; // set by an explicit row click; cleared by followLive() or reset()
   let currentRecord = null;
   let activeTab = 'summary'; // 'summary' | 'payload' | 'result' | 'timing'
+  // Set by showText() (a delegated reply's "full trace" button, see
+  // stream-view.js) - a plain-text view that bypasses the tool-call tabs
+  // entirely. Reuses `pinnedId` for the same "something specific is pinned,
+  // don't auto-follow live tool calls" gating tool rows already get; cleared
+  // by anything that goes back to tool-call mode (selectToolCall, followLive,
+  // reset), same as currentRecord.
+  let textView = null; // { id, label, text } | null
 
   function setContainer(container) {
     currentContainer = container;
@@ -78,10 +85,25 @@ export function initDetailPane({ panel, headerLabel, followLiveBtn, tabButtons, 
   function selectToolCall(container, id) {
     const record = getToolCallRecord(container, id);
     if (!record) return;
+    textView = null; // clicking a tool row always exits text mode, if it was showing
     pinnedId = id;
     currentContainer = container;
     currentRecord = record;
     highlightRow(record);
+    render();
+  }
+
+  // Delegated-reply "full trace" button (stream-view.js's attachDelegatedTrace)
+  // - shows arbitrary plain text instead of a tool-call record. `id` is the
+  // delegated turn's queueId, reused as pinnedId so a live tool call arriving
+  // while this is open doesn't yank the pane away (same reasoning as pinning
+  // a historical tool row).
+  function showText(container, id, label, text) {
+    pinnedId = id;
+    currentContainer = container;
+    currentRecord = null;
+    textView = { id, label, text };
+    updateLiveIndicator();
     render();
   }
 
@@ -109,6 +131,7 @@ export function initDetailPane({ panel, headerLabel, followLiveBtn, tabButtons, 
 
   function followLive() {
     pinnedId = null;
+    textView = null;
     const record = currentContainer ? getMostRecentToolCallRecord(currentContainer) : null;
     if (record) {
       currentRecord = record;
@@ -145,8 +168,25 @@ export function initDetailPane({ panel, headerLabel, followLiveBtn, tabButtons, 
     body.append(placeholder);
   }
 
+  function renderTextView(view) {
+    headerLabel.textContent = view.label;
+    body.textContent = '';
+    const wrap = document.createElement('div');
+    wrap.className = 'body';
+    // Markdown-rendered, same as a live assistant reply (stream-view.js's
+    // appendBlock call for block.text) - this is a delegated session's own
+    // narration/answer text, which is itself markdown, not a diff/plain-text
+    // tool payload (renderBody's other caller shape).
+    renderBody(wrap, view.text, null, true);
+    body.append(wrap);
+  }
+
   function render() {
     if (!enabled) return;
+    // No tabs make sense for a plain-text view - CSS keys off this class to
+    // hide the tab row entirely while textView is showing.
+    panel.classList.toggle('text-mode', Boolean(textView));
+    if (textView) { renderTextView(textView); return; }
     if (!currentRecord) { renderEmpty(); return; }
     const statusGlyph = currentRecord.status === 'pending' ? '…' : currentRecord.status === 'error' ? '✗' : '✓';
     headerLabel.textContent = `${currentRecord.name} ${statusGlyph}`;
@@ -296,6 +336,7 @@ export function initDetailPane({ panel, headerLabel, followLiveBtn, tabButtons, 
     currentContainer = container;
     pinnedId = null;
     currentRecord = null;
+    textView = null;
     activeTab = 'summary';
     for (const b of tabButtons) b.classList.toggle('active', b.dataset.tab === 'summary');
     updateLiveIndicator();
@@ -307,6 +348,7 @@ export function initDetailPane({ panel, headerLabel, followLiveBtn, tabButtons, 
   return {
     setContainer,
     selectToolCall,
+    showText,
     onToolCallStarted,
     onToolResultArrived,
     followLive,

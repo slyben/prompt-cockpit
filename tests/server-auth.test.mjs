@@ -698,6 +698,7 @@ const NEWER_ROUTES = [
   { action: 'plugin-enabled', body: { pluginKey: 'formatter@anthropic-tools', enabled: true } },
   { action: 'title', body: { title: 'My renamed session' } },
   { action: 'approval-decision', body: { requestId: 'x', decision: 'allow' } },
+  { action: 'handshake', body: { value: 'some-value' } },
 ];
 
 for (const { action, body } of NEWER_ROUTES) {
@@ -786,6 +787,26 @@ test('a delegate ws payload with an unknown target name gets a cockpit:delegate-
   } finally {
     ws.close();
   }
+});
+
+// MVP6 seed (backlog.md): the global handshake routes have no session token
+// (there's no one session they belong to - see routes/system.js's own
+// comment), so this just proves Origin/Host-allowed requests reach them and
+// get a real value back, same coverage level as the rest of this file gives
+// /mode etc's happy path.
+test('GET /api/handshake returns the current secret, and POST /api/handshake/regenerate rotates it', async () => {
+  const before = await fetch(`${ORIGIN}/api/handshake`);
+  assert.equal(before.status, 200);
+  const { secret: secretBefore } = await before.json();
+  assert.ok(secretBefore && secretBefore.length >= 16);
+
+  const regen = await fetch(`${ORIGIN}/api/handshake/regenerate`, { method: 'POST' });
+  assert.equal(regen.status, 200);
+  const { secret: secretAfter } = await regen.json();
+  assert.notEqual(secretAfter, secretBefore);
+
+  const after = await fetch(`${ORIGIN}/api/handshake`);
+  assert.equal((await after.json()).secret, secretAfter, 'a subsequent GET must see the rotated value');
 });
 
 function assertRejectedUpgrade(ws) {

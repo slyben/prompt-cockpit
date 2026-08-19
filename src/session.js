@@ -253,8 +253,8 @@ export function startSession({ cwd, resume, model, permissionMode, turnIndexOffs
                     hookEventName: 'PreToolUse',
                     permissionDecision: 'deny',
                     permissionDecisionReason: mode === 'all'
-                      ? 'Blocked by this project\'s git commit guard: this command contains a Co-Authored-By trailer. Retry without it - do not try to route around this (e.g. writing the message to a file first). This is a project policy set by the human user; only they can change or disable it, in Settings > General > Git commit guard.'
-                      : 'Blocked by this project\'s git commit guard: this git commit includes a Co-Authored-By trailer. Retry without it - do not try to route around this (e.g. writing the message to a file first). This is a project policy set by the human user; only they can change or disable it, in Settings > General > Git commit guard.',
+                      ? 'Blocked by this project\'s git commit guard: this command contains a Co-Authored-By trailer or a "Generated with Claude Code" line. Retry without it - do not try to route around this (e.g. writing the message to a file first). This is a project policy set by the human user; only they can change or disable it, in Settings > General > Git commit guard.'
+                      : 'Blocked by this project\'s git commit guard: this commit/PR includes a Co-Authored-By trailer or a "Generated with Claude Code" line. Retry without it - do not try to route around this (e.g. writing the message to a file first). This is a project policy set by the human user; only they can change or disable it, in Settings > General > Git commit guard.',
                   },
                 };
               },

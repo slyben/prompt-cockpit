@@ -10,11 +10,58 @@
 // too, not just this one's own lifecycle events; the expanded list body is
 // still a read-only, one-time snapshot fetched only when the panel opens -
 // not worth a websocket fan-in just to keep an open list live too.
-export function initSessionListPane({ panel, body, closeBtn, countBtn, headerEl }) {
+export function initSessionListPane({ panel, body, closeBtn, countBtn, headerEl, handshakeRow, handshakeValue, handshakeCopyBtn, handshakeRegenBtn }) {
   let open = false;
 
   function label(count) {
     return `${count} session${count === 1 ? '' : 's'}`;
+  }
+
+  // MVP6 seed (backlog.md): the per-process delegation handshake secret -
+  // shown copyable here so a human can paste it into a sibling session's
+  // own row (per-row "fix" button below) to mark that session trusted for
+  // delegation, or eventually into a remote/SSH'd cockpit once that exists.
+  // Fetched fresh every time the pane opens, same one-time-snapshot
+  // reasoning as the session list itself (see module comment above).
+  async function refreshHandshake() {
+    if (!handshakeRow) return;
+    try {
+      const res = await fetch('/api/handshake');
+      const { secret } = await res.json();
+      handshakeValue.textContent = secret;
+      handshakeValue.dataset.secret = secret;
+    } catch {
+      handshakeValue.textContent = '(unavailable)';
+    }
+  }
+
+  if (handshakeCopyBtn) {
+    handshakeCopyBtn.addEventListener('click', async () => {
+      const secret = handshakeValue.dataset.secret;
+      if (!secret) return;
+      try {
+        await navigator.clipboard.writeText(secret);
+        handshakeCopyBtn.textContent = 'Copied';
+        setTimeout(() => { handshakeCopyBtn.textContent = 'Copy'; }, 1200);
+      } catch {
+        // Clipboard permission denied or unavailable - the value is still
+        // selectable/visible in handshakeValue, so this is a soft failure.
+      }
+    });
+  }
+
+  if (handshakeRegenBtn) {
+    handshakeRegenBtn.addEventListener('click', async () => {
+      // Rotating cuts off every currently-trusted session (see
+      // regenerateHandshakeSecret's own comment) - confirm since this is
+      // the "something looked wrong" hammer, not a routine action.
+      if (!confirm('Regenerate the handshake secret? Every session not re-synced afterward loses delegation trust.')) return;
+      const res = await fetch('/api/handshake/regenerate', { method: 'POST' });
+      const { secret } = await res.json();
+      handshakeValue.textContent = secret;
+      handshakeValue.dataset.secret = secret;
+      if (open) refreshCount().then(renderList); // trust badges below are now stale otherwise
+    });
   }
 
   async function refreshCount() {
@@ -50,6 +97,18 @@ export function initSessionListPane({ panel, body, closeBtn, countBtn, headerEl 
       meta.className = 'session-list-meta';
       meta.textContent = [s.model, s.effort].filter(Boolean).join(' / ') || '(default model)';
       row.append(name, meta);
+      // Read-only here - this pane spans every tab/session server-wide, but
+      // only the OWNING tab holds that session's own bearer token, so
+      // fixing an untrusted row (pasting a value) has to happen from
+      // Settings on that session's own tab, not from here. See
+      // registry.isSessionTrusted's comment.
+      if (s.handshakeTrusted === false) {
+        const untrusted = document.createElement('span');
+        untrusted.className = 'session-list-meta';
+        untrusted.title = 'This session\'s delegation handshake does not match the server - it can\'t send or receive delegated tasks until re-synced from its own Settings panel.';
+        untrusted.textContent = '⚠ handshake mismatch';
+        row.append(untrusted);
+      }
       body.append(row);
     }
   }
@@ -66,6 +125,7 @@ export function initSessionListPane({ panel, body, closeBtn, countBtn, headerEl 
     loading.className = 'detail-pane-placeholder';
     loading.textContent = 'Loading…';
     body.append(loading);
+    refreshHandshake();
     const sessions = await refreshCount();
     if (!open) return; // closed again before the fetch resolved
     renderList(sessions);

@@ -767,6 +767,9 @@
      falsely light this up too. */
   .detail-pane .detail-pane-header button.pinned-away { color: var(--accent); border-color: var(--accent); }
   .detail-pane-tabs { display: flex; gap: 2px; padding: 4px 8px; border-bottom: 1px solid var(--border); }
+  /* Delegated reply's "full trace" view (detail-pane.js's showText) - a
+     plain-text dump, no Summary/Payload/Result/Timing split applies. */
+  .detail-pane.text-mode .detail-pane-tabs { display: none; }
   .detail-pane .detail-tab {
     background: none;
     border: none;
@@ -981,6 +984,12 @@
      color so the transcript is scannable at a glance instead of one shade
      of gray for everything but errors. */
   .msg.assistant .role { color: #d97757; } /* Anthropic orange, "claude" */
+  /* Delegated reply from a sibling cockpit session (stream-view.js's
+     delegatedLabelAndText/renderUser): body renders like a normal assistant
+     reply (plain, no blue "you typed this" box) since it IS one - just not
+     this session's own Claude talking. Role label uses the same Anthropic
+     orange as a native assistant reply, since the sibling is Claude too. */
+  .msg.assistant.delegated-reply .role { color: #d97757; }
 
   /* Markdown-rendered assistant reply (markdown.js) - .body's own
      white-space: pre-wrap (above) is undone here since block elements
@@ -1115,6 +1124,32 @@
     cursor: pointer;
   }
   .msg-action:hover { color: var(--text); border-color: var(--accent); }
+
+  /* Delegated reply's "show full trace" corner button (stream-view.js's
+     attachDelegatedTrace) - only ever added post-hoc, when a matching
+     cockpit:delegate-full-trace marker actually arrives with extra content
+     beyond the clean answer already in the bubble (see session-registry.js's
+     relayDelegationResult - no marker at all means no button, not a disabled
+     one). margin-left: auto pins it to the role row's right edge, i.e. the
+     bubble's top-right corner, without needing absolute positioning. */
+  .trace-toggle-btn {
+    margin-left: auto;
+    background: none;
+    border: 1px solid var(--border);
+    color: var(--muted);
+    border-radius: 4px;
+    height: 20px;
+    padding: 0 6px;
+    line-height: 1;
+    font-size: 11px;
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    cursor: pointer;
+    flex: none;
+    white-space: nowrap;
+  }
+  .trace-toggle-btn:hover { color: var(--text); border-color: var(--accent); }
 
   /* Task list (task-panel.js) - docked directly above #compose, off by
      default (settings.js's taskPanelEnabled). Same status color scheme as
@@ -1688,6 +1723,17 @@
       <span class="detail-pane-header-label">All sessions</span>
       <button id="sessionListCloseBtn" title="Close">✕</button>
     </div>
+    <!-- MVP6 seed (backlog.md): this process's delegation handshake secret -
+         copy it and paste into a sibling session's own Settings panel (or,
+         eventually, an SSH'd remote cockpit's) to mark that session trusted
+         for /ask delegation. Pairing is manual-only for now - see
+         session-registry.js's handshakeSecret comment. -->
+    <div class="settings-row" id="handshakeRow" style="padding: 8px 12px; border-bottom: 1px solid var(--border);">
+      <span title="Sessions must share this value to delegate tasks to each other">Handshake</span>
+      <code id="handshakeValue" style="flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11.5px;"></code>
+      <button id="handshakeCopyBtn" type="button">Copy</button>
+      <button id="handshakeRegenBtn" type="button" title="Rotate the secret - every session not re-synced afterward loses delegation trust">↻</button>
+    </div>
     <div id="sessionListBody" class="detail-pane-body"></div>
   </div>
   <div id="copyToast">Copied</div>
@@ -1971,13 +2017,29 @@
           <label class="settings-row">
             <span>Git commit guard</span>
             <select id="gitGuardModeBtn">
-              <option value="commit">Block Co-Authored-By on git commit</option>
-              <option value="all">Block Co-Authored-By anywhere</option>
+              <option value="commit">Block AI attribution on git commit / gh pr</option>
+              <option value="all">Block AI attribution anywhere</option>
               <option value="off">Off</option>
             </select>
-            <span class="hint" title="Auto-denies Bash tool calls containing a Co-Authored-By trailer. 'git commit' only checks git commit invocations; 'anywhere' checks every Bash command for the string. Project-scoped (settings.local.json), takes effect on this session's next matching Bash call.">?</span>
+            <span class="hint" title="Auto-denies Bash tool calls containing a Co-Authored-By trailer or a 'Generated with Claude Code' line. 'git commit / gh pr' only checks git commit and gh pr create/edit invocations; 'anywhere' checks every Bash command for either phrase. Project-scoped (settings.local.json), takes effect on this session's next matching Bash call.">?</span>
           </label>
           <div id="gitGuardError" class="mcp-error" style="display: none;"></div>
+          <!-- MVP6 seed (backlog.md): per-session delegation handshake -
+               THIS session's own trust status plus a paste-in field to
+               re-sync it, scoped to this session's own token (unlike the
+               server-wide copy shown in the "All sessions" pane, which has
+               no per-session auth to act through). See
+               session-registry.js's handshakeSecret comment. -->
+          <label class="settings-row">
+            <span>Delegation handshake</span>
+            <span id="handshakeStatus" class="hint"></span>
+          </label>
+          <div class="settings-row">
+            <input id="handshakeInput" type="text" placeholder="paste handshake value" style="flex: 1 1 auto; min-width: 0;">
+            <button id="handshakeSaveBtn" type="button">Save</button>
+            <span class="hint" title="Sessions must share the same handshake value (Session list > Handshake) to send or receive /ask delegated tasks. Local sessions are trusted automatically when created; paste a value here to re-sync after a rotation, or an invalid value to revoke this session's own trust.">?</span>
+          </div>
+          <div id="handshakeError" class="mcp-error" style="display: none;"></div>
           <div class="settings-section">
             <div class="settings-section-header">
               <strong>Always-allowed tools in this project</strong>
