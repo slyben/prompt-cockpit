@@ -400,10 +400,36 @@ export function startGrokSession({
     return [];
   }
 
+  // Same debug capture as session.js's own debugSnapshot - see that
+  // comment. `promptTail` itself isn't inspectable (it's a plain Promise
+  // chain), but `promptInFlight`/`openPromptText` are the two fields that
+  // matter for telling "a real turn is running" apart from "the chain is
+  // stuck behind an interrupt that never resolved its session/prompt
+  // request" (see pushInput's interrupt()-then-chain comment above).
+  function debugSnapshot() {
+    return {
+      pendingTurns,
+      turnCounter,
+      currentMode,
+      promptInFlight,
+      openPromptText: openPromptText != null,
+    };
+  }
+
+  // Same manual recovery as session.js's own forceIdle - see that comment
+  // for the failure mode. Local bookkeeping reset only, doesn't touch the
+  // process/connection.
+  function forceIdle() {
+    pendingTurns = 0;
+    if (openPromptText != null) openPromptText = null;
+    onStateChange('idle');
+  }
+
   return {
     pushInput,
     close,
     interrupt,
+    forceIdle,
     listQueue,
     removeQueued: () => false,
     reorderQueue: () => {},
@@ -414,6 +440,7 @@ export function startGrokSession({
     rewindTo,
     forkAt,
     getMode: () => currentMode,
+    debugSnapshot,
     query: {
       supportedModels: async () => availableModels.map((m) => ({
         value: m.modelId || m.value,

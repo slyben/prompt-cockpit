@@ -252,6 +252,19 @@
     flex-direction: column;
     gap: 4px;
   }
+  /* MCP/Plugins lists get to use the popup's actual height instead of the
+     160px default above (sized for short lists like customFolders/
+     permissionRules, which stay put) - the whole flex chain down to the
+     <ul> needs flex: 1 + min-height: 0 for that, same reasoning as
+     .modal-box div.modal-body's own comment. */
+  .settings-tab-panel[data-settings-tab-panel="mcp"],
+  .settings-tab-panel[data-settings-tab-panel="plugins"],
+  .settings-tab-panel[data-settings-tab-panel="mcp"] .settings-section,
+  .settings-tab-panel[data-settings-tab-panel="plugins"] .settings-section {
+    flex: 1;
+    min-height: 0;
+  }
+  #mcpServerList, #pluginList { flex: 1; min-height: 0; max-height: none; }
   .settings-list .cmd-desc { color: var(--muted); font-size: 11.5px; }
   .mcp-server-row {
     padding: 5px 8px;
@@ -788,6 +801,15 @@
     #streamWrap { flex-direction: column; }
     #detailPane.enabled { width: 100%; height: 240px; border-left: none; border-top: 1px solid var(--border); }
   }
+  /* Settings modal keeps a fixed height regardless of which tab (General /
+     MCP / Plugins) is active - the three panels hold very different amounts
+     of content, and .modal-box below only sets max-height (shrink-to-fit),
+     so switching tabs used to resize the whole popup around whichever
+     panel's content was shorter/taller. Forcing height (not max-height)
+     here pins the box itself; .modal-box .modal-body's existing
+     overflow-y: auto still scrolls internally if a panel's content
+     overflows it. */
+  #settingsModal .modal-box { height: min(760px, 85vh); }
   /* History modal gets a wider box (default .modal-box caps at 640px) so its
      own docked detail pane (historyDetailPane) has room without squeezing
      the transcript unreadably thin. */
@@ -1298,6 +1320,28 @@
     white-space: nowrap;
   }
   #stopBtn:hover { opacity: 0.85; }
+  /* Turns-in-flight badge (app.js's pendingTurnsBadge) - small and quiet at
+     rest (just a number, same warning color as the reconnecting spinner
+     state) since most sessions never show it at all; only the .armed state
+     below needs to grab attention, once a click has actually committed to
+     the force-idle path. */
+  #pendingTurnsBadge {
+    padding: 3px 8px;
+    background: transparent;
+    border: 1px solid #e0b34d;
+    color: #e0b34d;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 11px;
+    white-space: nowrap;
+  }
+  #pendingTurnsBadge:hover { background: rgba(224, 179, 77, 0.12); }
+  #pendingTurnsBadge.armed {
+    background: var(--error);
+    border-color: var(--error);
+    color: white;
+    font-weight: 600;
+  }
   /* Armed state (app.js) - first click arms a ~2s confirm window instead of
      stopping immediately, so a stray click next to the spinner doesn't
      cancel a turn outright. Visually distinct from the resting red so "one
@@ -1462,6 +1506,17 @@
     font-size: 13px;
   }
   .modal-box .modal-body { padding: 12px 16px; overflow-y: auto; }
+  /* flex: 1 + min-height: 0 (not just overflow-y: auto) is what actually
+     anchors footer/header in place: a flex item's default min-height is
+     auto, which blocks it from shrinking below its own content size no
+     matter what overflow says, so without this the whole modal-box grew/
+     scrolled around a tall panel (e.g. MCP) instead of just this div
+     scrolling internally between header and footer. Scoped to the div
+     specifically (not the bare .modal-body class) because several modals'
+     <header> also carries class="modal-body" for its padding - giving that
+     flex: 1 too split the growable space between header and body instead of
+     giving it all to the body, which is what bloated the title strip. */
+  .modal-box div.modal-body { flex: 1; min-height: 0; }
   .modal-box footer {
     padding: 10px 16px;
     border-top: 1px solid var(--border);
@@ -1645,8 +1700,10 @@
            checkbox in the settings modal (#detailPaneEnabledBtn below). -->
       <button id="detailPaneToggleBtn" title="Toggle the tool-call detail pane">🔍 Detail pane</button>
       <!-- Task list toggle (task-panel.js) - sits between the cost graph
-           toggle and the Agents button; also mirrored as a checkbox in the
-           settings modal (see #taskPanelEnabledBtn below).
+           toggle and the Agents button. No settings-modal mirror (unlike
+           turnChart/detailPane above): hidden until app.js's cockpit:tasks
+           handler sees the first task, since a session that never creates
+           one has nothing to toggle.
            session-registry.js reconstructs the list server-side from
            TaskCreate/TaskUpdate/TaskList tool calls and pushes it live, so
            there's nothing to fetch here on open. -->
@@ -1658,8 +1715,8 @@
     <ul id="agentsList"></ul>
   </div>
   <!-- Task list (task-panel.js) - docked just above the compose box, same
-       spot/pattern as turnChartPanel below. Off by default; toggled by
-       taskPanelToggleBtn above or the settings checkbox. -->
+       spot/pattern as turnChartPanel below. Off by default; toggled only by
+       taskPanelToggleBtn above (see its own comment re: no settings mirror). -->
   <div id="taskPanel">
     <div class="controls"><span>Tasks:</span></div>
     <ul id="taskList"></ul>
@@ -1697,6 +1754,17 @@
        app.js, so nothing else needed to change. -->
   <div id="activityBar">
     <span id="stateLabel" class="state"><span id="stateIcon"></span></span>
+    <!-- Turns-in-flight badge (session-registry.js's pendingTurnsCount) -
+         debug option, off by default (see #pendingTurnsBadgeEnabledBtn in
+         the settings modal below); when enabled, hidden whenever the count
+         is 0, otherwise shows the raw count right next to the spinner it
+         explains. Click = "it's spinning and nothing is in flux from my
+         point of view" - posts to the force-idle route (registry.forceIdle)
+         that resets the counter directly instead of waiting on a `result`
+         message that, per that comment, may never come. Deliberately a
+         click-to-assert rather than automatic: only the human watching the
+         actual CLI output can know nothing is really running. -->
+    <button id="pendingTurnsBadge" style="display:none" title="Turns cockpit still thinks are in flight. Click if nothing is actually running to force it back to idle."></button>
     <!-- Cancel the running turn (backlog.md) - lives right next to the
          |\-/ activity spinner it's cancelling, not down in composeSendGroup
          next to Send anymore (too easy to fat-finger right after Enter).
@@ -1713,6 +1781,17 @@
          message, same path as typing it - there is no separate SDK method
          for it. Hidden until a session exists, same as diffBtn. -->
     <button id="compactBtn" style="display:none" title="Run /compact now to free up context">Compact</button>
+    <!-- Diagnostic capture for "spinner spins, nothing running" reports
+         (backlog) - lives right next to the spinner it's reporting on, same
+         row as stateLabel, for the same reason stopBtn does. Grabs both
+         client-side state (ws readiness, last seq seen) and a server-side
+         debug snapshot (src/routes/session-actions.js's 'debug' action,
+         which exposes session.js/grok-session.js's internal pendingTurns -
+         the counter the spinner is actually driven by, not just the last
+         state value the row happened to broadcast) and copies both as one
+         JSON blob to the clipboard so it can be pasted straight into a bug
+         report instead of asking for devtools output. -->
+    <button id="reportStuckBtn" style="display:none" title="Copy a diagnostic snapshot of the live session state (for reporting a stuck spinner or similar)">🐛 Report state</button>
     <button id="copyLastBtn" style="display:none" title="Copy the most recent reply">Copy reply</button>
     <button id="exportBtn" style="display:none" title="Download the whole transcript as markdown">Export .md</button>
   </div>
@@ -1858,12 +1937,13 @@
             <span>Show the per-turn cost graph above the compose box</span>
           </label>
           <label class="settings-row">
-            <input type="checkbox" id="taskPanelEnabledBtn" />
-            <span>Show the task list above the compose box</span>
-          </label>
-          <label class="settings-row">
             <input type="checkbox" id="showTimestampsBtn" />
             <span>Show a timestamp on each message</span>
+          </label>
+          <label class="settings-row">
+            <input type="checkbox" id="pendingTurnsBadgeEnabledBtn" />
+            <span>Debug: show the turns-in-flight counter next to the spinner</span>
+            <span class="hint" title="Off by default. Shows session-registry.js's pendingTurnsCount next to the activity spinner whenever it's above 0, with a click-through to force it back to idle if it ever gets stuck - see app.js's pendingTurnsBadge.">?</span>
           </label>
           <div id="thinkingControlsGroup">
             <label class="settings-row">

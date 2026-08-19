@@ -315,7 +315,21 @@ export function startSession({ cwd, resume, model, permissionMode, turnIndexOffs
           currentMode = message.permissionMode;
         } else if (message.type === 'result') {
           pendingTurns = Math.max(0, pendingTurns - 1);
+          // onMessage() before onStateChange(), not after (unlike every other
+          // branch here that falls through to the generic onMessage() call
+          // below) - confirmed live: session-registry.js's handleMessage is
+          // what shifts row.pendingResultTags (the array the state
+          // broadcast's pendingTurnsCount badge reads off), but setState()
+          // (wired to onStateChange) broadcasts immediately and synchronously.
+          // Calling onStateChange first shipped a summary with the corrected
+          // 'idle' state but a stale pendingTurnsCount still showing the
+          // finished turn - and nothing ever re-broadcasts to fix it up, so
+          // the badge was stuck showing a phantom pending turn until some
+          // unrelated event happened to trigger another summary. Mirrors the
+          // order grok-session.js's own result handling already used.
+          onMessage(message);
           onStateChange(pendingTurns > 0 ? 'running' : 'idle');
+          continue; // already delivered above - skip the generic onMessage(message) below
         } else if (message.type === 'system' && message.subtype === 'elicitation_complete') {
           // The MCP server confirms the human finished (or abandoned) the
           // URL-mode auth flow from onElicitation above - clear the pending
@@ -481,11 +495,45 @@ export function startSession({ cwd, resume, model, permissionMode, turnIndexOffs
     return { resolved: true, toolName: entry.toolName, scope: scope || null };
   }
 
+  // Debug capture (backlog: "spinner spins, nothing running" reports with
+  // no way to catch the live internal state that would explain them).
+  // `pendingTurns` is the actual counter onStateChange's running/idle flip
+  // is computed from - session-registry.js's row.state is just its last
+  // reported value, so exposing this raw is what lets a stuck-idle report
+  // be told apart from a stuck-pendingTurns-not-zero one instead of
+  // guessing from the outside.
+  function debugSnapshot() {
+    return {
+      pendingTurns,
+      turnCounter,
+      currentMode,
+      queueLength: inputQueue.list().length,
+      mcpAuthPendingCount: mcpAuthPending.size,
+    };
+  }
+
+  // Manual recovery for a `pendingTurns` that's stuck above 0 with nothing
+  // left to bring it back down - confirmed live: a message pushed while the
+  // previous turn's stream was still open can apparently get absorbed into
+  // that turn instead of producing its own separate `result`, permanently
+  // stranding this counter one too high with no SDK message ever coming to
+  // decrement it. interrupt() can't fix that case - it only ever resolves a
+  // turn genuinely still in flight, and there isn't one once this has
+  // happened. This is the last resort: reset the counter directly and flip
+  // to idle without waiting on the CLI at all. Only ever call this once
+  // you've confirmed nothing is actually running CLI-side - it doesn't
+  // touch the CLI or the underlying conversation, purely local bookkeeping.
+  function forceIdle() {
+    pendingTurns = 0;
+    onStateChange('idle');
+  }
+
   return {
     query: handle,
     pushInput,
     close,
     interrupt,
+    forceIdle,
     setMode,
     resolveApproval,
     getMode: () => currentMode,
@@ -496,5 +544,6 @@ export function startSession({ cwd, resume, model, permissionMode, turnIndexOffs
     // [{ name, url, message }] - session-registry.js's getMcpServerStatus
     // merges this into the SDK's mcpServerStatus() list by server name.
     getMcpAuthPending: () => [...mcpAuthPending.entries()].map(([name, entry]) => ({ name, url: entry.url, message: entry.message })),
+    debugSnapshot,
   };
 }

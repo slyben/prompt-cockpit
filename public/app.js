@@ -40,6 +40,17 @@ const recentFoldersSelect = document.getElementById('recentFoldersSelect');
 const resumeListEl = document.getElementById('resumeList');
 const modeBtn = document.getElementById('modeBtn');
 const stopBtn = document.getElementById('stopBtn');
+const pendingTurnsBadge = document.getElementById('pendingTurnsBadge');
+// Declared up here rather than down by forceIdleSession/disarmForceIdle
+// below (where this state conceptually belongs) because initSettings()'s
+// onPendingTurnsBadgeEnabledChange callback reads lastPendingTurnsCount and
+// forceIdleArmed synchronously during setup, and that setup runs well
+// before this file reaches its forceIdle section - a `let` down there would
+// still be in its temporal dead zone at that point.
+const FORCE_IDLE_CONFIRM_WINDOW_MS = 2000;
+let forceIdleArmed = false;
+let forceIdleArmTimer = null;
+let lastPendingTurnsCount = 0; // drives the badge's label text on the next arm/disarm
 const thinkingBudgetBtn = document.getElementById('thinkingBudgetBtn');
 const thinkingDisplayBtn = document.getElementById('thinkingDisplayBtn');
 const thinkingErrorEl = document.getElementById('thinkingError');
@@ -47,6 +58,7 @@ const effortBtn = document.getElementById('effortBtn');
 const effortErrorEl = document.getElementById('effortError');
 const diffBtn = document.getElementById('diffBtn');
 const compactBtn = document.getElementById('compactBtn');
+const reportStuckBtn = document.getElementById('reportStuckBtn');
 const copyLastBtn = document.getElementById('copyLastBtn');
 const exportBtn = document.getElementById('exportBtn');
 const autoContinueLabel = document.getElementById('autoContinueLabel');
@@ -228,6 +240,10 @@ let turnIndexUnreliable = false; // set from cockpit:hello/state - hides the rew
 let lastSeq = 0;
 let reconnectAttempt = 0;
 let reconnectTimer = null;
+// Debug capture only (reportStuckBtn below) - epoch ms of the last message
+// this socket actually received, so a report can show "stuck for Ns" rather
+// than just the state label's word.
+let lastMessageAt = null;
 // Set right before a deliberate disconnect (closing the session, leaving
 // for the launcher) so ws.onclose knows not to schedule a reconnect for it.
 let intentionalClose = false;
@@ -695,9 +711,9 @@ const settings = initSettings({
   // browser.js's open() takes a per-call onSelect override for exactly this.
   onBrowseFolder: (onSelect) => dirBrowser.open('', onSelect),
   turnChartCheckbox: document.getElementById('turnChartEnabledBtn'),
-  taskPanelCheckbox: document.getElementById('taskPanelEnabledBtn'),
   timestampsCheckbox: document.getElementById('showTimestampsBtn'),
   detailPaneCheckbox: document.getElementById('detailPaneEnabledBtn'),
+  pendingTurnsBadgeCheckbox: document.getElementById('pendingTurnsBadgeEnabledBtn'),
   closeSessionButton: closeSessionBtn,
   onAutoCollapseChange: setAutoCollapsePreviousGroup,
   onTurnChartEnabledChange: (enabled) => {
@@ -711,6 +727,13 @@ const settings = initSettings({
   onDetailPaneEnabledChange: (enabled) => {
     detailPane.setEnabled(enabled);
     detailPaneToggleBtn.classList.toggle('on', enabled);
+  },
+  // Debug option - flipping it off hides the badge immediately even if a
+  // turn is genuinely still pending; flipping it on re-shows it on the next
+  // summary (applySession above already re-evaluates display each time).
+  onPendingTurnsBadgeEnabledChange: (enabled) => {
+    if (!enabled) pendingTurnsBadge.style.display = 'none';
+    else if (!forceIdleArmed) pendingTurnsBadge.style.display = lastPendingTurnsCount > 0 ? 'inline-block' : 'none';
   },
   // Toggles the CSS class both stream-view.js render targets read
   // (index.html) - retroactive, so flipping this instantly stamps/unstamps
@@ -891,6 +914,7 @@ function returnToLauncher() {
   diffBtn.style.display = 'none';
   compactBtn.style.display = 'none';
   compactBtn.classList.remove('compact-urgent');
+  reportStuckBtn.style.display = 'none';
   copyLastBtn.style.display = 'none';
   exportBtn.style.display = 'none';
   currentCwd = null;
@@ -899,6 +923,8 @@ function returnToLauncher() {
   sessionLabelErrorEl.style.display = 'none';
   stopBtn.style.display = 'none';
   disarmStop();
+  pendingTurnsBadge.style.display = 'none';
+  disarmForceIdle();
   closeSessionBtn.style.display = 'none';
   settingsBtn.style.display = 'none';
   document.getElementById('settingsModal').style.display = 'none';
@@ -1147,6 +1173,56 @@ async function interruptTurn() {
   }
 }
 
+// Manual last-resort unstick for session-registry.js's pendingTurnsCount
+// (see its own comment on toSummary, and forceIdle's on session.js) - for
+// when interrupt above already ran (or there's nothing left to interrupt)
+// and the badge next to the spinner still won't clear. Same
+// in-flight-request guard as interruptTurn above.
+let forceIdleInFlight = false;
+
+async function forceIdleSession() {
+  if (!sessionId || forceIdleInFlight) return;
+  forceIdleInFlight = true;
+  try {
+    const res = await fetch(`/api/sessions/${sessionId}/force-idle`, {
+      method: 'POST',
+      headers: authHeaders(),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      console.error(`force-idle failed: ${err.error || res.statusText}`);
+    }
+  } catch (err) {
+    console.error('force-idle failed:', err);
+  } finally {
+    forceIdleInFlight = false;
+  }
+}
+
+// Same arm-then-confirm shape as stopBtn below (own timer/flag - kept
+// separate rather than shared, since arming one shouldn't arm the other).
+// State itself is declared up top near pendingTurnsBadge - see that comment.
+function disarmForceIdle() {
+  forceIdleArmed = false;
+  clearTimeout(forceIdleArmTimer);
+  forceIdleArmTimer = null;
+  pendingTurnsBadge.textContent = String(lastPendingTurnsCount);
+  pendingTurnsBadge.classList.remove('armed');
+}
+
+pendingTurnsBadge.addEventListener('click', () => {
+  if (forceIdleArmed) {
+    disarmForceIdle();
+    forceIdleSession();
+  } else {
+    forceIdleArmed = true;
+    pendingTurnsBadge.textContent = 'Nothing running?';
+    pendingTurnsBadge.classList.add('armed');
+    clearTimeout(forceIdleArmTimer);
+    forceIdleArmTimer = setTimeout(disarmForceIdle, FORCE_IDLE_CONFIRM_WINDOW_MS);
+  }
+});
+
 // Arm-then-confirm (backlog.md follow-up: Stop sat exactly where Send does,
 // too easy to fat-finger right after hitting Enter). First click arms a
 // short confirm window instead of interrupting outright; a second click
@@ -1199,6 +1275,54 @@ function runCompact() {
 }
 
 compactBtn.addEventListener('click', runCompact);
+
+// Diagnostic snapshot for "spinner spins, nothing running" reports
+// (backlog) - client-side state (what the browser thinks is happening) plus
+// a fresh server-side pull (src/routes/session-actions.js's 'debug' action,
+// registry.getDebugInfo) of what session.js/grok-session.js's internal
+// pendingTurns/promptInFlight counters actually say - the two can disagree
+// (a dropped state broadcast vs. a real turn-accounting bug look identical
+// from the UI alone), which is the whole reason this exists instead of just
+// screenshotting the spinner. Copies as one JSON blob rather than showing a
+// modal - nothing here is meant to be read in the app, only pasted
+// elsewhere.
+async function reportStuckState() {
+  const clientState = {
+    uiState: stateLabelEl.title,
+    spinnerRunning: spinTimer !== null,
+    wsReadyState: ws ? ws.readyState : null, // 0 CONNECTING / 1 OPEN / 2 CLOSING / 3 CLOSED / null no socket
+    msSinceLastMessage: lastMessageAt != null ? Date.now() - lastMessageAt : null,
+    lastSeq,
+    sessionId,
+    provider: currentProvider,
+    tabHidden: document.hidden,
+  };
+  let serverState = null;
+  let serverError = null;
+  if (sessionId) {
+    try {
+      const res = await fetch(`/api/sessions/${sessionId}/debug`, { headers: authHeaders() });
+      serverState = res.ok ? await res.json() : null;
+      if (!res.ok) serverError = `HTTP ${res.status}`;
+    } catch (err) {
+      serverError = String(err.message || err);
+    }
+  }
+  const report = { capturedAt: new Date().toISOString(), clientState, serverState, serverError };
+  const text = JSON.stringify(report, null, 2);
+  try {
+    await navigator.clipboard.writeText(text);
+    reportStuckBtn.textContent = '✓ Copied';
+  } catch {
+    // Clipboard API can be denied/unavailable (older browser, non-secure
+    // context) - fall back to a selectable prompt rather than silently
+    // failing with no way to get the data out at all.
+    window.prompt('Clipboard copy failed - copy manually:', text);
+  }
+  setTimeout(() => { reportStuckBtn.textContent = '🐛 Report state'; }, 2000);
+}
+
+reportStuckBtn.addEventListener('click', reportStuckState);
 
 let modeChangeInFlight = false;
 
@@ -1578,6 +1702,7 @@ function connect(id, token, { reconnect = false } = {}) {
   autoContinueLabel.style.display = 'flex';
   diffBtn.style.display = 'inline-block';
   compactBtn.style.display = 'inline-block';
+  reportStuckBtn.style.display = 'inline-block';
   copyLastBtn.style.display = 'inline-block';
   exportBtn.style.display = 'inline-block';
   closeSessionBtn.style.display = 'inline-block';
@@ -1612,6 +1737,7 @@ function connect(id, token, { reconnect = false } = {}) {
   ws.onerror = () => setState('error');
 
   ws.onmessage = (event) => {
+    lastMessageAt = Date.now(); // debug capture only (reportStuckBtn below) - "how long since anything arrived on this socket"
     const payload = JSON.parse(event.data);
     if (payload.type === 'sdk:message') {
       if (typeof payload.seq === 'number') lastSeq = Math.max(lastSeq, payload.seq);
@@ -1873,6 +1999,19 @@ function applySession(session) {
   sessionLabelEl.title = `${session.cwd} - click to rename this session`; // full path survives on hover once the label itself is truncated
   if (!tabChrome.isUserNamed()) tabChrome.setAutoName(currentSessionName || session.cwd.split('/').filter(Boolean).pop() || session.cwd);
   setState(session.state);
+  // Turns-in-flight badge (session-registry.js's pendingTurnsCount) - debug
+  // option, off by default (settings.isPendingTurnsBadgeEnabled(), toggled
+  // via the settings modal's "Debug: show the turns-in-flight counter"
+  // checkbox); when on, only shown once there's something to explain/unstick
+  // - a healthy idle session stays at 0 and the badge never appears. Skips
+  // the update while a click is armed so a summary landing mid-confirm-window
+  // doesn't blow away the "Nothing running?" label out from under the second
+  // click.
+  lastPendingTurnsCount = session.pendingTurnsCount || 0;
+  if (!forceIdleArmed) {
+    pendingTurnsBadge.textContent = String(lastPendingTurnsCount);
+    pendingTurnsBadge.style.display = settings.isPendingTurnsBadgeEnabled() && lastPendingTurnsCount > 0 ? 'inline-block' : 'none';
+  }
   currentMode = session.mode;
   currentModel = session.model;
   hasFileCheckpointing = session.hasFileCheckpointing;

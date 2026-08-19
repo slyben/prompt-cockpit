@@ -65,6 +65,14 @@ function fakeStartSession({ rejectModes = new Set(), usageExperimental, mcpStatu
       interrupt: async () => {
         impl.interrupted = (impl.interrupted || 0) + 1;
       },
+      // Mirrors session.js's real forceIdle: pure local bookkeeping reset,
+      // no CLI call, but it does fire onStateChange('idle') same as the
+      // real one so a test can assert the row.state flip that rides in on
+      // it (registry.forceIdle's own comment).
+      forceIdle: () => {
+        impl.forceIdleCalls = (impl.forceIdleCalls || 0) + 1;
+        callbacks.onStateChange('idle');
+      },
       listQueue: () => impl.queue || [],
       removeQueued: (queueId) => {
         impl.lastRemoveQueued = queueId;
@@ -317,6 +325,36 @@ test('interruptTurn delegates to the session handle and broadcasts', async () =>
 test('interruptTurn on an unknown session id rejects instead of throwing synchronously', async () => {
   registry._reset();
   await assert.rejects(() => registry.interruptTurn('does-not-exist'));
+});
+
+test('forceIdle resets the handle and flips row.state back to idle even with no real result coming', async () => {
+  registry._reset();
+  const startSessionImpl = fakeStartSession();
+  const row = registry.createSession({ cwd: '/tmp', startSessionImpl });
+  await registry.sendInput(row.id, 'hello'); // real handle stub doesn't drive onStateChange itself - set directly, same as toSummary's pendingTurnsCount comment describes
+  row.state = 'running';
+  await registry.forceIdle(row.id);
+  assert.equal(startSessionImpl.forceIdleCalls, 1);
+  assert.equal(row.state, 'idle');
+});
+
+test('forceIdle clears pendingResultTags and fails any delegation still waiting on this row, same as closeSession does', async () => {
+  registry._reset();
+  const originImpl = fakeStartSession();
+  const origin = registry.createSession({ cwd: '/tmp', startSessionImpl: originImpl });
+  const targetImpl = fakeStartSession();
+  const target = registry.createSession({ cwd: '/tmp', name: 'Target', startSessionImpl: targetImpl });
+  registry.delegateTask(origin.id, 'Target', 'do the thing');
+  assert.equal(target.pendingResultTags.length, 1);
+  await registry.forceIdle(target.id);
+  assert.equal(target.pendingResultTags.length, 0);
+  const relayed = originImpl.allInputs.find((t) => t.includes('status="error"') && t.includes('was manually unstuck'));
+  assert.ok(relayed, 'origin should have received a failure relay instead of waiting forever');
+});
+
+test('forceIdle on an unknown session id rejects instead of throwing synchronously', async () => {
+  registry._reset();
+  await assert.rejects(() => registry.forceIdle('does-not-exist'));
 });
 
 test('listQueue/removeQueued/reorderQueue/sendNow all delegate to the session handle', async () => {

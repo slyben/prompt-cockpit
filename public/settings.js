@@ -32,6 +32,9 @@ const DEFAULTS = {
   // presentation redesign) calls for the detail pane docked by default when
   // a session is active, not closed-by-default/slide-in.
   detailPaneEnabled: true,
+  // Debug option, off by default - see setPendingTurnsBadgeEnabled below and
+  // its checkbox's own hint text in index.html for what this actually shows.
+  pendingTurnsBadgeEnabled: false,
   // Drag-resized (detail-pane.js's resizeHandle) - persisted the same way
   // turnChartMetric is, via the standalone patchSettings() below rather than
   // the settings-modal machinery, since there's no checkbox/select for this,
@@ -102,15 +105,16 @@ export function initSettings({
   addCustomFolderButton,
   onBrowseFolder,
   turnChartCheckbox,
-  taskPanelCheckbox,
   timestampsCheckbox,
   detailPaneCheckbox,
+  pendingTurnsBadgeCheckbox,
   closeSessionButton,
   onAutoCollapseChange,
   onTurnChartEnabledChange,
   onTaskPanelEnabledChange,
   onTimestampsChange,
   onDetailPaneEnabledChange,
+  onPendingTurnsBadgeEnabledChange,
   onCloseSession,
   onOpen,
 }) {
@@ -132,14 +136,15 @@ export function initSettings({
 
   autoCollapseCheckbox.checked = settings.autoCollapsePreviousGroup;
   turnChartCheckbox.checked = settings.turnChartEnabled;
-  taskPanelCheckbox.checked = settings.taskPanelEnabled;
   timestampsCheckbox.checked = settings.showMessageTimestamps;
   detailPaneCheckbox.checked = settings.detailPaneEnabled;
+  pendingTurnsBadgeCheckbox.checked = settings.pendingTurnsBadgeEnabled;
   onAutoCollapseChange(settings.autoCollapsePreviousGroup);
   onTurnChartEnabledChange(settings.turnChartEnabled);
   onTaskPanelEnabledChange(settings.taskPanelEnabled);
   onTimestampsChange(settings.showMessageTimestamps);
   onDetailPaneEnabledChange(settings.detailPaneEnabled);
+  onPendingTurnsBadgeEnabledChange(settings.pendingTurnsBadgeEnabled);
   renderCustomFolders();
 
   // "searchable in @" implies this already works out of the box, so a user
@@ -233,11 +238,14 @@ export function initSettings({
   });
 
   turnChartCheckbox.addEventListener('change', () => setTurnChartEnabled(turnChartCheckbox.checked));
-  taskPanelCheckbox.addEventListener('change', () => setTaskPanelEnabled(taskPanelCheckbox.checked));
   detailPaneCheckbox.addEventListener('change', () => setDetailPaneEnabled(detailPaneCheckbox.checked));
   timestampsCheckbox.addEventListener('change', () => {
     persist({ showMessageTimestamps: timestampsCheckbox.checked });
     onTimestampsChange(timestampsCheckbox.checked);
+  });
+  pendingTurnsBadgeCheckbox.addEventListener('change', () => {
+    persist({ pendingTurnsBadgeEnabled: pendingTurnsBadgeCheckbox.checked });
+    onPendingTurnsBadgeEnabledChange(pendingTurnsBadgeCheckbox.checked);
   });
 
   closeSessionButton.addEventListener('click', () => {
@@ -258,10 +266,11 @@ export function initSettings({
     onTurnChartEnabledChange(value);
   }
 
-  // Same shape as setTurnChartEnabled above, for the task-list panel's own
-  // toggle button + settings-modal checkbox pair.
+  // Unlike setTurnChartEnabled/setDetailPaneEnabled above, there's no
+  // settings-modal checkbox to keep in sync here - taskPanelToggleBtn (the
+  // "same line as the cost graph" button, app.js) is the only entry point,
+  // since the panel itself only ever appears once a session has a task.
   function setTaskPanelEnabled(value) {
-    taskPanelCheckbox.checked = value;
     persist({ taskPanelEnabled: value });
     onTaskPanelEnabledChange(value);
   }
@@ -282,5 +291,6 @@ export function initSettings({
     setTaskPanelEnabled,
     isDetailPaneEnabled: () => settings.detailPaneEnabled,
     setDetailPaneEnabled,
+    isPendingTurnsBadgeEnabled: () => settings.pendingTurnsBadgeEnabled,
   };
 }

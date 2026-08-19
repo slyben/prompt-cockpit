@@ -336,6 +336,35 @@ export function list() {
   return [...sessions.values()].map(toSummary);
 }
 
+// Debug capture (backlog: "spinner spins, nothing running" reports with no
+// live state to catch when it happens). Combines this row's own bookkeeping
+// with the handle's internal debugSnapshot() (session.js/grok-session.js) -
+// the latter is what actually explains a stuck spinner: row.state is just
+// the last value onStateChange reported, but pendingTurns is the counter
+// that value is computed FROM, so a report with pendingTurns > 0 and no
+// visible activity points at a real turn-accounting bug, while
+// pendingTurns === 0 with state still 'running' points at a dropped/
+// out-of-order state broadcast instead - two different bugs that look
+// identical from the browser alone.
+export function getDebugInfo(id) {
+  const row = sessions.get(id);
+  if (!row) return null;
+  return {
+    id: row.id,
+    provider: row.provider,
+    state: row.state,
+    mode: row.mode,
+    tabCount: row.clients.size,
+    hasPendingApproval: Boolean(row.pendingApproval),
+    pendingApprovalToolName: row.pendingApproval?.toolName || null,
+    queueLength: row.queue.length,
+    pendingResultTagsLength: row.pendingResultTags.length,
+    autoContinue: row.autoContinue,
+    rateLimitHit: row.rateLimitHit,
+    handle: row.handle?.debugSnapshot ? row.handle.debugSnapshot() : null,
+  };
+}
+
 export function toSummary(row) {
   return {
     id: row.id,
@@ -356,6 +385,15 @@ export function toSummary(row) {
     effort: row.effort || null,
     autoContinue: row.autoContinue,
     rateLimitHit: row.rateLimitHit,
+    // Turns cockpit still considers "in flight" for this row - mirrors
+    // session.js/grok-session.js's own pendingTurns 1:1 (both increment on
+    // pushTurn, both decrement on the same 'result' message, see
+    // handleMessage's pendingResultTags.shift() below), just read from the
+    // registry side so app.js can show it next to the spinner without
+    // polling the debug endpoint. A number here that never comes back to 0
+    // despite nothing actually running is exactly the drift getDebugInfo's
+    // own comment describes - see forceIdle below for the manual recovery.
+    pendingTurnsCount: row.pendingResultTags.length,
     capabilities: {
       fileRewind: row.provider === 'claude' && row.hasFileCheckpointing,
       thinkingBudget: row.provider === 'claude',
@@ -439,6 +477,25 @@ export async function setPermissionMode(id, mode) {
 // handling, not by this call.
 export async function interruptTurn(id) {
   return queryPassthrough(id, (row) => row.handle.interrupt());
+}
+
+// Manual last-resort recovery for the "pendingTurnsCount never reaches 0"
+// drift (see that field's own comment on toSummary) - the click-through for
+// the badge next to the spinner (app.js) that lets a human assert "nothing
+// is actually running, stop waiting for a result that isn't coming".
+// Doesn't route through queryPassthrough: this has to fail this row's own
+// stuck delegations too (same as closeSession/handleError do, via
+// failPendingDelegations), which queryPassthrough's single-action shape
+// doesn't have room for, and forceIdle's own onStateChange already
+// broadcasts the state flip - a second broadcastSummary here just also
+// covers the pendingTurnsCount reset for any tab that already rendered the
+// stale count before this ran.
+export async function forceIdle(id) {
+  const row = sessions.get(id);
+  if (!row) throw new Error(`unknown session: ${id}`);
+  failPendingDelegations(row, 'session was manually unstuck (force-idle) before this delegation replied');
+  row.handle.forceIdle();
+  broadcastSummary(id);
 }
 
 // Same shape as setPermissionMode above, for the CLI's own /model - one
