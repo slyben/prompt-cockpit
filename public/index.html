@@ -155,6 +155,44 @@
     line-height: 1;
   }
   #settingsBtn:hover { border-color: var(--accent); color: var(--text); }
+  #sessionCountBtn, #newSessionTabBtn {
+    padding: 4px 10px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    color: var(--muted);
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 12px;
+  }
+  #sessionCountBtn:hover, #newSessionTabBtn:hover { border-color: var(--accent); color: var(--text); }
+  /* Lit up while sessionListPane is overriding the right pane - same "on"
+     look list-panel toggles elsewhere in the header already use. */
+  #sessionCountBtn.on { color: var(--text); border-color: var(--accent); }
+  .session-list-row {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    padding: 6px 4px;
+    border-bottom: 1px solid var(--border);
+  }
+  .session-list-name { font-family: ui-monospace, monospace; flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .session-list-meta { color: var(--muted); font-size: 11.5px; flex: 0 0 auto; }
+  /* ID beats the plain .detail-pane class rule for the properties that
+     differ: fixed/full-height instead of an in-flow flex sibling of
+     #stream (see the sessionListPane markup comment for why it has to live
+     outside #streamWrap's display:none toggle). `top` is set inline by
+     session-list-pane.js at open time, not here - the header's own height
+     isn't a fixed constant (the rate-limit banner can wrap it onto two
+     lines), so measuring it live is the only way this reliably starts right
+     under the header instead of overlapping it. */
+  #sessionListPane {
+    position: fixed;
+    right: 0;
+    bottom: 0;
+    z-index: 40;
+    background: var(--bg);
+    box-shadow: -2px 0 12px rgba(0, 0, 0, 0.4);
+  }
 
   .settings-body { display: flex; flex-direction: column; gap: 16px; }
   /* Settings modal tabs (General / MCP / Plugins) - settings.js's
@@ -800,6 +838,7 @@
   @media (max-width: 900px) {
     #streamWrap { flex-direction: column; }
     #detailPane.enabled { width: 100%; height: 240px; border-left: none; border-top: 1px solid var(--border); }
+    #sessionListPane.enabled { width: 100%; }
   }
   /* Settings modal keeps a fixed height regardless of which tab (General /
      MCP / Plugins) is active - the three panels hold very different amounts
@@ -1568,7 +1607,14 @@
     <label id="autoContinueLabel" style="display:none" title="Same as the desktop app's checkbox: when the plan usage limit rejects a turn, automatically send Continue once it resets">
       <input type="checkbox" id="autoContinueBtn" /> Auto-continue
     </label>
-    <button id="diffBtn" style="display:none">Diff</button>
+    <button id="diffBtn" style="display:none" title="View uncommitted changes in the workspace">Diff</button>
+    <!-- Server-wide, always visible (not gated on a live session in this
+         tab - the whole point is seeing what else is running elsewhere).
+         sessionCountBtn's count and sessionListPane's rows both come from
+         GET /api/sessions (session-list-pane.js) - no per-session token
+         needed, see that route's server.js comment. -->
+    <button id="sessionCountBtn" title="All sessions on this server">… sessions</button>
+    <button id="newSessionTabBtn" title="Open a new tab to start another session">+ New tab</button>
     <button id="settingsBtn" style="display:none" title="Settings">⚙</button>
   </header>
 
@@ -1583,7 +1629,7 @@
       <select id="recentFoldersSelect" title="Pre-fill from a recently used folder">
         <option value="">…</option>
       </select>
-      <button id="browseBtn">Browse</button>
+      <button id="browseBtn" title="Browse for a project folder">Browse</button>
     </div>
     <div class="start-row">
       <input id="startNameInput" type="text" placeholder="Name (e.g. Claude)" title="MVP5: lets another session /ask this one by name" />
@@ -1593,7 +1639,7 @@
         <option value="opus">Opus</option>
         <option value="haiku">Haiku</option>
       </select>
-      <button id="startBtn">Start</button>
+      <button id="startBtn" title="Start a new session">Start</button>
     </div>
 
     <h2>Resume</h2>
@@ -1601,7 +1647,7 @@
   </div>
 
   <div id="loadHistoryBar">
-    <button id="loadHistoryBtn">Load earlier history</button>
+    <button id="loadHistoryBtn" title="Load earlier messages from this session">Load earlier history</button>
   </div>
 
   <!-- Trajectory-style layout: #stream (flat one-line tool-call rows) beside
@@ -1620,13 +1666,29 @@
         <button id="detailPaneCollapseBtn" title="Collapse detail pane">✕</button>
       </div>
       <div class="detail-pane-tabs">
-        <button type="button" class="detail-tab active" data-tab="summary">Summary</button>
-        <button type="button" class="detail-tab" data-tab="payload">Payload</button>
-        <button type="button" class="detail-tab" data-tab="result">Result</button>
-        <button type="button" class="detail-tab" data-tab="timing">Timing</button>
+        <button type="button" class="detail-tab active" data-tab="summary" title="Show summary">Summary</button>
+        <button type="button" class="detail-tab" data-tab="payload" title="Show raw request payload">Payload</button>
+        <button type="button" class="detail-tab" data-tab="result" title="Show tool result">Result</button>
+        <button type="button" class="detail-tab" data-tab="timing" title="Show timing breakdown">Timing</button>
       </div>
       <div id="detailPaneBody" class="detail-pane-body"></div>
     </div>
+  </div>
+  <!-- Deliberately NOT nested inside #streamWrap/#launcher (both of which
+       toggle display:none depending on session state - see connect()/
+       returnToLauncher() in app.js): a display:none ancestor hides this too
+       regardless of its own position, and the whole point is that the
+       header's sessionCountBtn works the same on the launcher screen as
+       mid-session. Fixed-positioned instead of an in-flow flex sibling of
+       #detailPane for that reason - see session-list-pane.js, which sets
+       `top` at open time to sit just under the header. Reuses the
+       .detail-pane header/body styling via the shared class. -->
+  <div id="sessionListPane" class="detail-pane">
+    <div class="detail-pane-header">
+      <span class="detail-pane-header-label">All sessions</span>
+      <button id="sessionListCloseBtn" title="Close">✕</button>
+    </div>
+    <div id="sessionListBody" class="detail-pane-body"></div>
   </div>
   <div id="copyToast">Copied</div>
   <!-- Sits directly above the compose box, not under the header - a
@@ -1669,8 +1731,8 @@
         <textarea id="planFeedbackText" placeholder="What should change? (used by Request changes below)"></textarea>
         <input type="text" id="planNoteText" placeholder="Optional note to send right after approving (e.g. also validate with a second agent)" />
       </div>
-      <button id="approveBtn">Accept this</button>
-      <button id="rejectBtn">No</button>
+      <button id="approveBtn" title="Approve and continue with this plan">Accept this</button>
+      <button id="rejectBtn" title="Reject this plan and send feedback">No</button>
     </div>
     <!-- AskUserQuestion gets its own real form instead of the generic
          allow/deny above - built dynamically in app.js's renderQuestionForm,
@@ -1710,7 +1772,7 @@
       <button id="taskPanelToggleBtn" title="Toggle task list">📋 Tasks</button>
       <!-- Agents roster toggle - now right-aligned (margin-left: auto in
            CSS) instead of leading the row. -->
-      <button id="agentsBtn">Agents</button>
+      <button id="agentsBtn" title="Choose a subagent to run this turn">Agents</button>
     </div>
     <ul id="agentsList"></ul>
   </div>
@@ -1819,7 +1881,7 @@
       <!-- Query.setMaxThinkingTokens(tokens, display) moved entirely into the
            Settings modal (thinkingControlsGroup) - not surfaced here at all,
            see settingsModal below. -->
-      <button id="sendBtn">Send</button>
+      <button id="sendBtn" title="Send message">Send</button>
     </div>
   </div>
 
@@ -1827,12 +1889,12 @@
     <div class="modal-box">
       <header class="modal-body" id="dirPath"></header>
       <div class="modal-body">
-        <button id="dirUpBtn">.. up</button>
+        <button id="dirUpBtn" title="Go to parent folder">.. up</button>
         <ul id="dirList"></ul>
       </div>
       <footer>
-        <button id="dirCancelBtn">Cancel</button>
-        <button id="dirSelectBtn" class="primary">Select this folder</button>
+        <button id="dirCancelBtn" title="Cancel folder selection">Cancel</button>
+        <button id="dirSelectBtn" class="primary" title="Use this folder as the session's working directory">Select this folder</button>
       </footer>
     </div>
   </div>
@@ -1842,7 +1904,7 @@
       <header class="modal-body"><strong>Workspace diff</strong></header>
       <div class="modal-body"><div id="diffBody"></div></div>
       <footer>
-        <button id="diffCloseBtn">Close</button>
+        <button id="diffCloseBtn" title="Close diff view">Close</button>
       </footer>
     </div>
   </div>
@@ -1864,17 +1926,17 @@
             <button id="historyDetailPaneFollowLiveBtn" type="button" title="Jump to the most recent tool call">● live</button>
           </div>
           <div class="detail-pane-tabs">
-            <button type="button" class="detail-tab active" data-tab="summary">Summary</button>
-            <button type="button" class="detail-tab" data-tab="payload">Payload</button>
-            <button type="button" class="detail-tab" data-tab="result">Result</button>
-            <button type="button" class="detail-tab" data-tab="timing">Timing</button>
+            <button type="button" class="detail-tab active" data-tab="summary" title="Show summary">Summary</button>
+            <button type="button" class="detail-tab" data-tab="payload" title="Show raw request payload">Payload</button>
+            <button type="button" class="detail-tab" data-tab="result" title="Show tool result">Result</button>
+            <button type="button" class="detail-tab" data-tab="timing" title="Show timing breakdown">Timing</button>
           </div>
           <div id="historyDetailPaneBody" class="detail-pane-body"></div>
         </div>
       </div>
       <footer>
         <a id="historyExportBtn" download title="Download this transcript as markdown">Export .md</a>
-        <button id="historyCloseBtn">Close</button>
+        <button id="historyCloseBtn" title="Close history view">Close</button>
       </footer>
     </div>
   </div>
@@ -1889,9 +1951,9 @@
              its own pane instead of stacking them. settings.js wires the
              click-to-switch (toggles .active + each panel's display). -->
         <div class="settings-tabs">
-          <button type="button" class="settings-tab active" data-settings-tab="general">Settings</button>
-          <button type="button" class="settings-tab" data-settings-tab="mcp">MCP</button>
-          <button type="button" class="settings-tab" data-settings-tab="plugins">Plugins</button>
+          <button type="button" class="settings-tab active" data-settings-tab="general" title="General settings">Settings</button>
+          <button type="button" class="settings-tab" data-settings-tab="mcp" title="MCP server settings">MCP</button>
+          <button type="button" class="settings-tab" data-settings-tab="plugins" title="Plugin settings">Plugins</button>
         </div>
 
         <div class="settings-tab-panel" data-settings-tab-panel="general">
@@ -1902,7 +1964,7 @@
           <div class="settings-section">
             <div class="settings-section-header">
               <strong>Extra folders searchable in @</strong>
-              <button type="button" id="addCustomFolderBtn">+ Add folder</button>
+              <button type="button" id="addCustomFolderBtn" title="Add a folder to the @ file picker">+ Add folder</button>
             </div>
             <ul id="customFoldersList" class="settings-list"></ul>
           </div>
@@ -1971,7 +2033,7 @@
               <strong>Close session</strong>
               <p>Ends this session's live process - it stops being resumable from here, though it stays on disk like any other transcript.</p>
             </div>
-            <button id="closeSessionBtn" class="danger" style="display:none">Close session</button>
+            <button id="closeSessionBtn" class="danger" style="display:none" title="End this session's live process">Close session</button>
           </div>
         </div>
 
@@ -1979,7 +2041,7 @@
           <div class="settings-section">
             <div class="settings-section-header">
               <strong>MCP Servers</strong>
-              <button id="mcpRefreshBtn" type="button">Refresh</button>
+              <button id="mcpRefreshBtn" type="button" title="Refresh the MCP server list">Refresh</button>
             </div>
             <p id="mcpProviderNote" class="mcp-note" style="display:none">Grok MCP servers from <code>grok inspect</code> for this directory (~/.grok/config.toml plus Claude/Cursor compat). Toggle runs <code>grok mcp enable/disable</code>. There is no live reconnect; start a new session to be sure the agent picks up a change.</p>
             <ul id="mcpServerList" class="settings-list"></ul>
@@ -1990,7 +2052,7 @@
           <div class="settings-section">
             <div class="settings-section-header">
               <strong>Plugins</strong>
-              <button id="pluginReloadBtn" type="button">Reload plugins</button>
+              <button id="pluginReloadBtn" type="button" title="Reload plugins from disk">Reload plugins</button>
             </div>
             <p id="pluginProviderNote" class="mcp-note" style="display:none">Grok plugins from <code>grok inspect</code> (including Claude-compat plugins Grok loads). Toggle runs <code>grok plugin enable/disable</code>. Reload only refreshes this list; the live agent picks up plugin changes on the next session start.</p>
             <p id="pluginWarning" class="settings-warning"></p>
@@ -1999,7 +2061,7 @@
         </div>
       </div>
       <footer>
-        <button id="settingsCloseBtn">Done</button>
+        <button id="settingsCloseBtn" title="Close settings">Done</button>
       </footer>
     </div>
   </div>

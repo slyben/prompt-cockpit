@@ -70,17 +70,42 @@ function stampedCostUsd(usage) {
 // per plan MVP4. `unpriced` collects any model id missing from both
 // pricing files so the panel can flag "cost may be understated" instead of
 // silently under-reporting.
+const NO_TOOL_BUCKET = '(no tool call)';
+
 export function createUsageAccumulator() {
   const totals = { costUsd: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
   const unpriced = new Set();
+  // name -> { costUsd, calls, inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens }.
+  // A turn's cost/tokens are the API's only unit of billing - there's no
+  // per-tool-call usage from the SDK - so a turn that fired N tool_use
+  // blocks has its cost split evenly across those N buckets (same tool
+  // called twice in one turn gets credited twice). This keeps
+  // sum(perTool.costUsd) === totals.costUsd exactly, at the cost of being
+  // an even-split approximation rather than a true per-call figure. Turns
+  // with no tool_use land in NO_TOOL_BUCKET (plain text turns, the final
+  // wrap-up after a tool result, etc.) so nothing is silently dropped.
+  const perTool = new Map();
+
+  function addToolBucket(name, info, n) {
+    const b = perTool.get(name) || { name, costUsd: 0, calls: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
+    b.costUsd += info.cost / n;
+    b.calls += 1;
+    b.inputTokens += info.inputTokens / n;
+    b.outputTokens += info.outputTokens / n;
+    b.cacheReadTokens += info.readTokens / n;
+    b.cacheWriteTokens += info.writeTokens / n;
+    perTool.set(name, b);
+  }
 
   return {
     totals,
     unpriced,
     // Call with an SDKAssistantMessage's `.message` (a BetaMessage) - a
     // no-op if it has no usage (shouldn't happen for a real assistant
-    // turn, but priming-sentinel/synthetic messages have none).
-    addAssistantMessage(message) {
+    // turn, but priming-sentinel/synthetic messages have none). `toolNames`
+    // is the list of tool_use block names this turn produced (duplicates
+    // included), read from that same `.message.content` by the caller.
+    addAssistantMessage(message, toolNames = []) {
       if (!message || !message.usage) return;
       const info = costForUsage(message.model, message.usage);
       if (!info) {
@@ -92,11 +117,19 @@ export function createUsageAccumulator() {
       totals.outputTokens += info.outputTokens;
       totals.cacheReadTokens += info.readTokens;
       totals.cacheWriteTokens += info.writeTokens;
+
+      if (toolNames.length === 0) {
+        addToolBucket(NO_TOOL_BUCKET, info, 1);
+      } else {
+        for (const name of toolNames) addToolBucket(name, info, toolNames.length);
+      }
     },
     snapshot() {
       const cacheTotal = totals.cacheReadTokens + totals.cacheWriteTokens;
+      const perToolList = [...perTool.values()].sort((a, b) => b.costUsd - a.costUsd);
       return {
         ...totals,
+        perTool: perToolList,
         cacheHitRate: cacheTotal > 0 ? totals.cacheReadTokens / cacheTotal : null,
         unpriced: [...unpriced],
       };

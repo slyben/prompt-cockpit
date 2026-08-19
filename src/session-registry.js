@@ -895,7 +895,10 @@ function parseToolResultJson(content) {
 // itself, after the whole history is folded in, not per message).
 function applyAssistantUsage(row, message) {
   if (message.type !== 'assistant' || !message.message) return false;
-  row.usageAcc.addAssistantMessage(message.message);
+  const toolNames = Array.isArray(message.message.content)
+    ? message.message.content.filter((b) => b && b.type === 'tool_use').map((b) => b.name)
+    : [];
+  row.usageAcc.addAssistantMessage(message.message, toolNames);
   const info = costForUsage(message.message.model, message.message.usage);
   if (info) {
     message._usageInfo = {

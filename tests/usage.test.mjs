@@ -80,3 +80,34 @@ test('createUsageAccumulator cacheHitRate is null with no cache activity, else r
   });
   assert.equal(acc.snapshot().cacheHitRate, 0.75);
 });
+
+test('createUsageAccumulator buckets cost per tool, split evenly across a turn\'s tool_use blocks, summing back to the total', () => {
+  const acc = createUsageAccumulator();
+  // Turn 1: no tool_use blocks -> lands in the "(no tool call)" bucket.
+  acc.addAssistantMessage({ model: 'claude-sonnet-5', usage: { input_tokens: 1000, output_tokens: 500 } });
+  // Turn 2: two tool_use blocks (Read, Bash) -> that turn's cost split 50/50.
+  acc.addAssistantMessage(
+    { model: 'claude-sonnet-5', usage: { input_tokens: 2000, output_tokens: 1000 } },
+    ['Read', 'Bash'],
+  );
+  // Turn 3: Read again -> Read's bucket accumulates across turns.
+  acc.addAssistantMessage(
+    { model: 'claude-sonnet-5', usage: { input_tokens: 500, output_tokens: 250 } },
+    ['Read'],
+  );
+
+  const snap = acc.snapshot();
+  const byName = Object.fromEntries(snap.perTool.map((t) => [t.name, t]));
+
+  assert.equal(byName['(no tool call)'].calls, 1);
+  assert.equal(byName.Read.calls, 2);
+  assert.equal(byName.Bash.calls, 1);
+
+  const sumCost = snap.perTool.reduce((s, t) => s + t.costUsd, 0);
+  assert.ok(Math.abs(sumCost - snap.costUsd) < 1e-9, 'per-tool costs must sum back to the session total');
+
+  // perTool is sorted by cost descending.
+  for (let i = 1; i < snap.perTool.length; i++) {
+    assert.ok(snap.perTool[i - 1].costUsd >= snap.perTool[i].costUsd);
+  }
+});

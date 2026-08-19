@@ -42,6 +42,9 @@ export function initStatsPanel({ el }) {
       const pct = hitRate == null ? '' : ` (${Math.round(hitRate * 100)}% hit)`;
       parts.push(`<span title="Cache read+write tokens, and read-vs-write hit rate">${fmtTok(cacheTok)} cache${pct}</span>`);
     }
+    if (usage.perTool && usage.perTool.length) {
+      parts.push(perToolChip(usage.perTool));
+    }
     if (context) {
       parts.push(contextBar(context));
     }
@@ -77,6 +80,25 @@ export function initStatsPanel({ el }) {
   // auto-compact threshold when confirmed plausible, else the same 80%
   // this used to hardcode as `remaining < 20`). Yellow starts 30 points
   // before red, preserving the original 50/80 relationship when warn===80.
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  }
+
+  // Turn cost is only reported per assistant message by the API - there's
+  // no per-tool-call usage - so usage.perTool (usage.js's accumulator)
+  // splits each turn's cost evenly across the tool_use blocks it contains.
+  // Shown as a tooltip (matches this panel's existing chips - no popover
+  // CSS in this codebase) rather than a click-to-expand row, since it's
+  // supplementary detail, not something read at a glance like cost/tokens.
+  function perToolChip(perTool) {
+    const lines = perTool
+      .slice(0, 8)
+      .map((t) => `${t.name}: ${fmtUSD(t.costUsd)} (${t.calls}×)`)
+      .join('\n');
+    const title = `Cost per tool - turn cost split evenly across tools used in that turn (approximation, not a true per-call figure):\n${lines}`;
+    return `<span title="${escapeHtml(title)}">${perTool.length} tool${perTool.length === 1 ? '' : 's'}</span>`;
+  }
+
   function contextBar(context) {
     const pct = context.percentage || 0;
     const warnPercent = context.autoCompact?.warnPercent ?? 80;

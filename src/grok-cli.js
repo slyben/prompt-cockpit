@@ -23,6 +23,17 @@ export function parseJsonOutput(text) {
   }
 }
 
+// Is the `grok` binary actually installed on this machine? Spawns `grok
+// --version` with a short timeout; ENOENT (spawn's 'error' event) or any
+// non-zero exit both mean "not available". Used once at server launch to
+// decide whether the frontend should even offer Grok as a provider - see
+// src/provider-availability.js.
+export function isGrokAvailable({ timeoutMs = 3000, spawnImpl, resolveBin } = {}) {
+  return runGrokCommand(['--version'], { spawnImpl, timeoutMs, resolveBin })
+    .then(() => true)
+    .catch(() => false);
+}
+
 export function runGrokCommand(args, {
   cwd,
   spawnImpl = spawn,

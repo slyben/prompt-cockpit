@@ -55,6 +55,7 @@ export function initMcpPanel({ listEl, refreshButton, fetchStatus, toggleServer,
     reconnectBtn.type = 'button';
     reconnectBtn.className = 'mcp-reconnect-btn';
     reconnectBtn.textContent = 'Reconnect';
+    reconnectBtn.title = `Reconnect to ${server.name}`;
     reconnectBtn.addEventListener('click', async () => {
       reconnectBtn.disabled = true;
       reconnectBtn.textContent = 'Reconnecting…';

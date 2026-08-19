@@ -538,7 +538,7 @@ function renderUser(container, message, onRewindClick, hasFileCheckpointing, rew
     const label = rewindLabel
       || (hasFileCheckpointing ? '⟲ rewind here' : '⟲ rewind here (conversation only)');
     const actions = onRewindClick && message.turnIndex
-      ? [{ label, onClick: () => onRewindClick(message.turnIndex) }]
+      ? [{ label, title: 'Fork a new session starting from this message', onClick: () => onRewindClick(message.turnIndex) }]
       : [];
     const delegated = delegatedLabelAndText(content);
     appendBlock(container, 'user', delegated ? delegated.label : 'You', delegated ? delegated.text : content, actions, container, null, null, timestampMs);
@@ -853,6 +853,7 @@ function appendBlock(container, cls, roleLabel, text, actions = [], parent = con
     const btn = document.createElement('button');
     btn.className = 'msg-action';
     btn.textContent = action.label;
+    if (action.title) btn.title = action.title;
     btn.addEventListener('click', (e) => {
       e.stopPropagation(); // don't also trigger the enclosing group's own toggle, if this block happens to be inside one
       action.onClick();

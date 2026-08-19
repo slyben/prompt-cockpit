@@ -17,6 +17,7 @@ import { initPluginPanel } from '/plugin-panel.js';
 import { initSettings, loadSettings, patchSettings } from '/settings.js';
 import { initTurnChart } from '/turn-chart.js';
 import { initDetailPane } from '/detail-pane.js';
+import { initSessionListPane } from '/session-list-pane.js';
 import { initTaskPanel } from '/task-panel.js';
 import { initQueuePanel } from '/queue-panel.js';
 import { createPromptHistoryStore, fuzzyScore } from '/prompt-history.js';
@@ -121,9 +122,31 @@ const detailPane = initDetailPane({
 });
 document.getElementById('detailPaneCollapseBtn').addEventListener('click', () => settings.setDetailPaneEnabled(false));
 
+// Header's server-wide session count + read-only list, overriding
+// #detailPane's docked slot while open (session-list-pane.js). Independent
+// of any live session in this tab - stays wired up even on the launcher
+// screen, since "what else is running" is exactly what it's for there too.
+const sessionListPane = initSessionListPane({
+  panel: document.getElementById('sessionListPane'),
+  body: document.getElementById('sessionListBody'),
+  closeBtn: document.getElementById('sessionListCloseBtn'),
+  countBtn: document.getElementById('sessionCountBtn'),
+  headerEl: document.querySelector('header'),
+});
+
+document.getElementById('newSessionTabBtn').addEventListener('click', () => {
+  // Plain location.href reuse is what caused the duplicate-session bug -
+  // see discardInheritedSessionOnNewTab's comment above. `newTab=1` tells
+  // the new tab to discard the sessionStorage it inherits from us.
+  const url = new URL(window.location.origin + window.location.pathname);
+  url.searchParams.set('newTab', '1');
+  window.open(url, '_blank');
+});
+
 // Click is an explicit ask to inspect this call - un-collapse a dismissed pane
 // rather than only painting .selected on a display:none box.
 function selectLiveToolCall(container, id) {
+  sessionListPane.closePane(); // inspecting a tool call always wins over the session-list override
   detailPane.selectToolCall(container, id);
   if (!settings.isDetailPaneEnabled()) settings.setDetailPaneEnabled(true);
 }
@@ -283,6 +306,26 @@ function clearActiveSession() {
     // ignore, see saveActiveSession
   }
 }
+
+// Bug: window.open(url, '_blank') from newSessionTabBtn's handler below
+// looked like it should land on a fresh launcher (sessionStorage is
+// per-tab, per the comment on saveActiveSession) - but the HTML spec says
+// a same-origin tab opened by a script (as opposed to by the user
+// typing/bookmarking a URL) gets a *copy* of the opener's sessionStorage,
+// not an empty one. So the new tab inherited cockpit:activeSession and
+// rejoinActiveSession() below silently reattached it to the SAME session
+// instead of showing the launcher. `?newTab=1` is a one-shot marker: the
+// button appends it, and on load - before rejoinActiveSession runs - it
+// clears the inherited copy and strips itself from the URL so a later
+// reload of *this* tab (once it has its own real session) behaves
+// normally again.
+(function discardInheritedSessionOnNewTab() {
+  const url = new URL(window.location.href);
+  if (!url.searchParams.has('newTab')) return;
+  clearActiveSession();
+  url.searchParams.delete('newTab');
+  history.replaceState(null, '', url);
+})();
 
 // Last 3 unique folders a session was started in, most-recent-first, so the
 // launcher can offer them as a dropdown instead of retyping/re-browsing the
@@ -694,6 +737,7 @@ async function closeSession() {
   if (!confirm('Close this session? Its transcript stays on disk (resumable later), but this live process ends now.')) return;
   intentionalClose = true;
   await fetch(`/api/sessions/${sessionId}`, { method: 'DELETE', headers: authHeaders() });
+  sessionListPane.refreshCount();
   returnToLauncher();
 }
 
@@ -1595,6 +1639,33 @@ startProviderSelect.addEventListener('change', () => {
 });
 fillStartModels();
 
+// Checked once on launch (server caches the result too - see
+// src/provider-availability.js). Strips any <option> for a provider whose
+// CLI isn't installed here (e.g. no `grok` binary), and if that leaves only
+// one provider standing, hides the dropdown entirely rather than showing a
+// pointless single-choice select.
+async function applyAvailableProviders() {
+  let providers;
+  try {
+    const res = await fetch('/api/providers');
+    if (!res.ok) return;
+    const data = await res.json();
+    providers = Array.isArray(data.providers) && data.providers.length ? data.providers : ['claude'];
+  } catch {
+    return; // launch-time hiccup - leave the dropdown as-is, Claude still works
+  }
+  for (const opt of Array.from(startProviderSelect.options)) {
+    if (!providers.includes(opt.value)) opt.remove();
+  }
+  if (providers.length <= 1) {
+    startProviderSelect.style.display = 'none';
+    startProviderSelect.value = providers[0] || 'claude';
+    fillStartModels();
+    loadResumable();
+  }
+}
+applyAvailableProviders();
+
 startBtn.addEventListener('click', () => {
   const cwd = cwdInput.value.trim();
   if (!cwd) return;
@@ -1692,6 +1763,7 @@ function connect(id, token, { reconnect = false } = {}) {
     queuePanel.reset(); // corrected by the first cockpit:queue push if a turn's already queued behind another, same as statsPanel above
     pluginsLoadedForSession = false; // new session - the plugin panel hasn't paid its one reload yet (B2)
     refreshCommandsAndAgents(); // fetched eagerly, not lazily like /model's picker - agentsBtn's own visibility depends on whether the list is empty
+    sessionListPane.refreshCount(); // this tab just added a row to the server-wide count
   }
 
   launcherEl.style.display = 'none';
@@ -1947,6 +2019,7 @@ function renderQuestionForm(request) {
   const submitBtn = document.createElement('button');
   submitBtn.className = 'q-submit';
   submitBtn.textContent = 'Submit answers';
+  submitBtn.title = 'Send these answers and continue';
   submitBtn.addEventListener('click', () => {
     const answers = {};
     for (const [questionText, { selected, otherEl }] of state) {
@@ -2061,6 +2134,13 @@ function applySession(session) {
   // feedback that it was going nowhere.
   if (session.state === 'error' || session.state === 'closed') {
     compose.setEnabled(false);
+    // This session just ended on the server without going through
+    // closeSession() (crashed CLI process, closed from another tab/the
+    // API, etc.) - that path already calls refreshCount() itself, but this
+    // one doesn't otherwise touch sessionListPane, so the header's count
+    // would keep showing a session that's actually gone until something
+    // else happened to refresh it.
+    sessionListPane.refreshCount();
   }
 }
 
