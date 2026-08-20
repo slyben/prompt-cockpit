@@ -488,7 +488,9 @@ test('createSession defaults provider to claude; grok disables file checkpointin
   const claudeCaps = registry.toSummary(claude).capabilities;
   assert.equal(claudeCaps.fileRewind, true);
   assert.equal(claudeCaps.thinkingBudget, true);
-  assert.equal(claudeCaps.effort, false);
+  // Both providers now support reasoning effort - Claude via the Agent
+  // SDK's `effort` option (session.js), Grok as its named spawn-time tier.
+  assert.equal(claudeCaps.effort, true);
   assert.equal(claudeCaps.autoContinue, true);
   assert.equal(claudeCaps.mcpToggle, true);
   assert.equal(grokCaps.fileRewind, false);

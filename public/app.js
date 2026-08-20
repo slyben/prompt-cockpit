@@ -14,6 +14,7 @@ import { initStatsPanel } from '/stats-panel.js';
 import { initHistoryPane } from '/history-pane.js';
 import { initMcpPanel } from '/mcp-panel.js';
 import { initPluginPanel } from '/plugin-panel.js';
+import { initGlobalStatsPanel } from '/global-stats-panel.js';
 import { initSettings, loadSettings, patchSettings } from '/settings.js';
 import { initTurnChart } from '/turn-chart.js';
 import { initDetailPane } from '/detail-pane.js';
@@ -36,6 +37,8 @@ const startNameInput = document.getElementById('startNameInput');
 const startBtn = document.getElementById('startBtn');
 const startProviderSelect = document.getElementById('startProviderSelect');
 const startModelSelect = document.getElementById('startModelSelect');
+const startEffortSelect = document.getElementById('startEffortSelect');
+const startClaudeEffortSelect = document.getElementById('startClaudeEffortSelect');
 const browseBtn = document.getElementById('browseBtn');
 const recentFoldersSelect = document.getElementById('recentFoldersSelect');
 const resumeListEl = document.getElementById('resumeList');
@@ -57,6 +60,7 @@ const thinkingDisplayBtn = document.getElementById('thinkingDisplayBtn');
 const thinkingErrorEl = document.getElementById('thinkingError');
 const effortBtn = document.getElementById('effortBtn');
 const effortErrorEl = document.getElementById('effortError');
+const modelBadge = document.getElementById('modelBadge');
 const diffBtn = document.getElementById('diffBtn');
 const compactBtn = document.getElementById('compactBtn');
 const reportStuckBtn = document.getElementById('reportStuckBtn');
@@ -162,6 +166,24 @@ function selectDelegatedTrace(container, queueId, label, text) {
   sessionListPane.closePane();
   detailPane.showText(container, queueId, label, text);
   if (!settings.isDetailPaneEnabled()) settings.setDetailPaneEnabled(true);
+}
+
+// Agent (Task) tool row click (stream-view.js) - opens a dedicated
+// read-only tab tailing the subagent's own transcript (agent-view.js, via
+// src/agent-transcript.js) instead of the in-page detail pane, which only
+// ever has this call's initial prompt/final result, never the subagent's
+// own tool calls as they happen.
+function openAgentTab(block) {
+  if (!currentClaudeSessionId) {
+    alert("This session's transcript id isn't known yet - try again in a moment.");
+    return;
+  }
+  const label = typeof block.input?.description === 'string' ? block.input.description : '';
+  const url = new URL(`${window.location.origin}/agent-view.html`);
+  url.searchParams.set('claudeSessionId', currentClaudeSessionId);
+  url.searchParams.set('toolUseId', block.id);
+  if (label) url.searchParams.set('label', label);
+  window.open(url, '_blank');
 }
 
 const turnChart = initTurnChart({
@@ -645,6 +667,19 @@ const pluginPanel = initPluginPanel({
   setPluginEnabled: setPluginEnabledApi,
 });
 
+// Stats tab (settings modal) - all-projects usage stats, src/global-stats.js.
+// No sessionId dependency (unlike mcpPanel/pluginPanel above): it reads
+// ~/.claude/projects directly, not this session's own SDK connection, so it
+// works even pre-session. Lazy-loaded on the tab's own first click below
+// (a real transcript scan, not a cheap status GET like MCP/plugins) rather
+// than on every modal open.
+const globalStatsPanel = initGlobalStatsPanel({
+  bodyEl: document.getElementById('statsBody'),
+  rangeSelect: document.getElementById('statsRangeBtn'),
+  refreshButton: document.getElementById('statsRefreshBtn'),
+});
+document.querySelector('[data-settings-tab="stats"]')?.addEventListener('click', () => globalStatsPanel.ensureLoaded());
+
 const dirBrowser = initDirBrowser({
   modal: document.getElementById('dirBrowserModal'),
   pathLabel: document.getElementById('dirPath'),
@@ -970,6 +1005,64 @@ sessionLabelEl.addEventListener('click', () => {
   });
 });
 
+// Purely informational - a glance at what's active, not a control. Used to
+// open Settings on click, but that surprised more than it helped (nothing
+// about the badge signals "this is a button"), so it's inert now: no click
+// handler, no pointer cursor (style.css), no "click to change" tooltip
+// (index.html). Change model/effort/thinking from the Settings modal
+// (settingsBtn) or the General tab directly.
+
+// One SDK-reported model id (currentModel) + whichever reasoning knob this
+// provider actually has - Claude's thinking-token budget or Grok's named
+// effort tier, never both (session-registry.js's capabilities.thinkingBudget
+// / .effort are already mutually exclusive per provider). currentModel can
+// still be null right after a "Default model" launch, before the first
+// assistant reply resolves it (session-registry.js's applyAssistantUsage) -
+// the badge just stays hidden until then rather than showing a misleading
+// blank chip.
+function applyModelBadge(session) {
+  if (!currentModel) { modelBadge.style.display = 'none'; return; }
+  const parts = [currentModel];
+  if (currentProvider === 'grok') {
+    // Always shown, not just when explicitly set - mirrors thinking's own
+    // "thinking default" fallback below rather than silently dropping the
+    // part when session.effort happens to be falsy.
+    parts.push(`${session.effort ? (GROK_EFFORT_LABELS[session.effort] || session.effort) : 'default'} effort`);
+  } else {
+    // Three distinct states, not two - 0 is a real explicit "Off" (falsy,
+    // so it can't share a branch with "unset"; see THINKING_BUDGET_PRESETS'
+    // comment for why 0 vs null actually differ on the SDK side). null/
+    // undefined is "Default" - what actually happens then is model-
+    // dependent (adaptive thinking on for Opus5/Sonnet5/Fable5, off on
+    // older models), so the badge says "default" rather than guessing.
+    // Claude has both dials now (session-registry.js line ~483: "both
+    // providers support reasoning effort now") - the badge only ever showed
+    // thinking-budget here, so effort silently never appeared for Claude
+    // sessions even though it's a real, independently-set field. Always
+    // shown now (not gated on session.effort being truthy), same reasoning
+    // as the Grok branch above - an unset effort is still worth surfacing
+    // as "default effort", not omitted.
+    // Unset effort isn't "no effort" - the SDK still picks a real tier
+    // ('high', per CLAUDE_EFFORT_OPTIONS' own sourced comment), so show that
+    // real value (already carrying its own '*' default marker) instead of
+    // the vague "default effort".
+    parts.push(`${CLAUDE_EFFORT_LABELS[session.effort || 'high'] || session.effort} effort`);
+    parts.push(
+      session.maxThinkingTokens === 0
+        ? 'thinking off'
+        : session.maxThinkingTokens
+          ? `thinking ${formatThinkingTokens(session.maxThinkingTokens)}`
+          : 'thinking default',
+    );
+  }
+  modelBadge.textContent = parts.join(' · ');
+  modelBadge.style.display = 'inline-block';
+}
+
+function formatThinkingTokens(tokens) {
+  return tokens >= 1000 ? `${Math.round(tokens / 1000)}k` : String(tokens);
+}
+
 function returnToLauncher() {
   intentionalClose = true;
   if (reconnectTimer) {
@@ -1022,6 +1115,7 @@ function returnToLauncher() {
   currentClaudeSessionId = null;
   currentSessionName = null;
   sessionLabelErrorEl.style.display = 'none';
+  modelBadge.style.display = 'none';
   stopBtn.style.display = 'none';
   disarmStop();
   pendingTurnsBadge.style.display = 'none';
@@ -1066,12 +1160,37 @@ for (const mode of PERMISSION_MODES) {
 modeBtn.addEventListener('change', () => { applyModeColor(modeBtn.value); setMode(modeBtn.value); });
 
 // Thinking budget: preset tiers only (deliberately no free-entry number
-// field - see backlog). Empty string = off/null. Values chosen as sensible
-// round tiers, not anything the SDK prescribes. Lives only in the Settings
-// modal (thinkingControlsGroup) - the row's own label already says
-// "Thinking budget", so these option labels don't repeat it.
+// field - see backlog). Values chosen as sensible round tiers, not anything
+// the SDK prescribes. Lives in the Settings modal (thinkingControlsGroup)
+// and the launcher's shared startEffortSelect slot (fillStartEffort below).
+//
+// '' (Default) vs '0' (Off) are deliberately two distinct options, not one -
+// confirmed against the installed @anthropic-ai/claude-agent-sdk's own
+// sdk.d.ts (0.3.231) plus a live probe against claude-opus-5
+// (tests/thinking-default-probe.manual.mjs, 2026-08-20; see
+// .claude/memory/sdk-streaming-input-gotchas.md item 3 for the full trail):
+//   - Query.setMaxThinkingTokens (the only mid-session thinking control the
+//     SDK exposes - there is no setThinking method) is deprecated, and its
+//     own doc says "0 = disabled, any other value = adaptive" - so 0 is the
+//     one value that genuinely turns thinking off.
+//   - null/undefined (this UI's '') "clears the limit" - the probe confirmed
+//     this actually resolves to ADAPTIVE THINKING ON for claude-opus-5 (and,
+//     per the same class of model, sonnet-5/fable-5), not off. Before this
+//     comment, '' was mislabeled "Off" here, which meant the launcher/
+//     Settings "Off" button never actually disabled thinking on Opus 5.
+// The 4k/10k/32k tiers still work as literal token budgets on pre-4.6
+// models; on Opus 4.6+ they're indistinguishable from each other (any
+// nonzero value just means "on") per the same doc comment - harmless to
+// keep since they're not wrong, just no longer literally sized on new
+// models.
 const THINKING_BUDGET_PRESETS = [
-  { value: '', label: 'Off' },
+  // Marked default (see CLAUDE.md-style marker request): this is genuinely
+  // what happens with nothing set, on every Claude model - it just resolves
+  // differently per model (adaptive-on for Opus5/Sonnet5/Fable5, off for
+  // older/unsupported models), so the marked *option* never moves even
+  // though its *meaning* is model-dependent.
+  { value: '', label: 'Default *' },
+  { value: '0', label: 'Off' },
   { value: '4000', label: '4k' },
   { value: '10000', label: '10k' },
   { value: '32000', label: '32k' },
@@ -1107,15 +1226,58 @@ const GROK_EFFORT_OPTIONS = [
   { value: 'high', label: 'High' },
   { value: 'xhigh', label: 'Extra high' },
 ];
-for (const opt of GROK_EFFORT_OPTIONS) {
-  const option = document.createElement('option');
-  option.value = opt.value;
-  option.textContent = opt.label;
-  effortBtn.append(option);
+// Claude's effort ladder (Agent SDK's EffortLevel - session-registry.js's
+// CLAUDE_EFFORTS) - one level wider than Grok's ('max'), and unlike Grok's
+// select this one needs a blank "Default" option since effort is optional
+// for Claude (unset = model/SDK default) where Grok's spawn-time flag is
+// always some concrete value.
+// 'high' is marked as the real default straight from the installed
+// @anthropic-ai/claude-agent-sdk's sdk.d.ts (0.3.231) EffortLevel doc
+// comment: "'high' — Deep reasoning (default)". Confirmed 2026-08-20,
+// same investigation as THINKING_BUDGET_PRESETS' default-marker comment
+// above - see .claude/memory/sdk-streaming-input-gotchas.md item 3.
+const CLAUDE_EFFORT_OPTIONS = [
+  { value: '', label: 'Default' },
+  { value: 'low', label: 'Low' },
+  { value: 'medium', label: 'Medium' },
+  { value: 'high', label: 'High *' },
+  { value: 'xhigh', label: 'Extra high' },
+  { value: 'max', label: 'Max' },
+];
+// Shared with the header badge (applyModelBadge) and the launcher's
+// startEffortSelect below - one label source for "low" -> "Low" etc.
+const GROK_EFFORT_LABELS = Object.fromEntries(GROK_EFFORT_OPTIONS.map((o) => [o.value, o.label]));
+const CLAUDE_EFFORT_LABELS = Object.fromEntries(CLAUDE_EFFORT_OPTIONS.map((o) => [o.value, o.label]));
+
+// Settings modal's Effort select is provider-aware (unlike the launcher's
+// startEffortSelect, which only ever needs to reflect the provider picker
+// at launch time) - a live session's provider doesn't change, but this
+// function still needs to run per-summary since the modal's DOM is shared
+// across every session tab a browser might switch between via history nav.
+function fillSettingsEffortSelect(provider) {
+  const grok = provider === 'grok';
+  const list = grok ? GROK_EFFORT_OPTIONS : CLAUDE_EFFORT_OPTIONS;
+  effortBtn.title = grok
+    ? 'Grok reasoning effort. Low is cheaper and faster. High / Extra high spend more on reasoning.'
+    : "Claude's reasoning effort for this session - low is cheaper and faster, high/xhigh/max spend more on thinking depth and thoroughness. Default leaves it up to the model.";
+  effortBtn.innerHTML = '';
+  for (const opt of list) {
+    const option = document.createElement('option');
+    option.value = opt.value;
+    option.textContent = opt.label;
+    effortBtn.append(option);
+  }
 }
+fillSettingsEffortSelect('grok'); // placeholder population before any session summary arrives
 effortBtn.addEventListener('change', () => selectEffort());
 
 async function selectEffort() {
+  // Claude's select has a blank "Default" option (unlike Grok's, which is
+  // never blank - every Grok effort is a concrete spawn-time value); there's
+  // no server-side "clear effort back to default" operation, so picking it
+  // back is a client-only no-op rather than a 400 from the effort route's
+  // CLAUDE_EFFORTS/GROK_EFFORTS validation.
+  if (!effortBtn.value) return;
   if (effortErrorEl) effortErrorEl.style.display = 'none';
   try {
     const res = await fetch(`/api/sessions/${sessionId}/effort`, {
@@ -1539,6 +1701,7 @@ async function loadEarlierHistory() {
     prependHistory(streamEl, messages, {
       onRewindClick, hasFileCheckpointing, turnIndexUnreliable, rewindLabel: rewindButtonLabel(),
       onSelectToolCall: selectLiveToolCall,
+      onOpenAgentTab: openAgentTab,
     });
     loadHistoryBar.style.display = 'none';
   } catch (err) {
@@ -1668,7 +1831,10 @@ async function loadResumable() {
 
 const CLAUDE_START_MODELS = [
   { value: '', label: 'Default model' },
-  { value: 'sonnet', label: 'Sonnet' },
+  // Marked default (same convention as THINKING_BUDGET_PRESETS/
+  // CLAUDE_EFFORT_OPTIONS below): Sonnet is what the CLI actually resolves
+  // '' to today, not just "a reasonable pick".
+  { value: 'sonnet', label: 'Sonnet *' },
   { value: 'opus', label: 'Opus' },
   { value: 'haiku', label: 'Haiku' },
 ];
@@ -1690,8 +1856,53 @@ function fillStartModels() {
   }
 }
 
+// Launcher's effort/thinking-budget picker - same slot, repopulated per
+// provider (mirrors fillStartModels above) rather than two separate selects
+// the user has to know to pick between. Options and value semantics match
+// the mid-session Settings versions exactly (GROK_EFFORT_OPTIONS/
+// THINKING_BUDGET_PRESETS, defined further down but already evaluated by
+// the time this runs - both are called from provider-select listeners, well
+// after module load finishes) so "effort" means the same thing whether it's
+// picked before or during a session.
+function fillStartEffort() {
+  const grok = startProviderSelect.value === 'grok';
+  const list = grok ? GROK_EFFORT_OPTIONS : THINKING_BUDGET_PRESETS;
+  startEffortSelect.title = grok
+    ? 'Grok reasoning effort for this session. Low is cheaper and faster; High/Extra high spend more on reasoning.'
+    : "Claude's thinking budget for this session - tokens it can spend reasoning before answering. Default lets the model decide (adaptive thinking on Opus 5/Sonnet 5/Fable 5); Off explicitly disables it.";
+  startEffortSelect.innerHTML = '';
+  // GROK_EFFORT_OPTIONS has no '' entry (Grok's spawn-time effort flag is
+  // always a concrete value, unlike Claude's optional one), so this override
+  // only ever fires for Claude. THINKING_BUDGET_PRESETS' '' label ("Default
+  // *") reads fine in the Settings modal, which has an adjacent "Thinking
+  // budget" span to disambiguate it - but this launcher row has no such
+  // label, and sits right next to startClaudeEffortSelect's own bare
+  // "Default" option, so a plain "Default" here read as ambiguous between
+  // the two dials. Spelled out here only, not in the shared preset list.
+  for (const item of list) {
+    const opt = document.createElement('option');
+    opt.value = item.value;
+    opt.textContent = (!grok && item.value === '') ? 'Default Thinking *' : item.label;
+    startEffortSelect.append(opt);
+  }
+  // Claude's dedicated effort dial - a real, separate SDK option (not the
+  // thinking-token budget above) - only shown for Claude; Grok's own effort
+  // concept already lives in the shared slot above.
+  startClaudeEffortSelect.style.display = grok ? 'none' : '';
+  if (!grok) {
+    startClaudeEffortSelect.innerHTML = '';
+    for (const opt of CLAUDE_EFFORT_OPTIONS) {
+      const option = document.createElement('option');
+      option.value = opt.value;
+      option.textContent = opt.value === '' ? 'Default effort' : opt.label;
+      startClaudeEffortSelect.append(option);
+    }
+  }
+}
+
 startProviderSelect.addEventListener('change', () => {
   fillStartModels();
+  fillStartEffort();
   loadResumable();
 });
 fillStartModels();
@@ -1718,10 +1929,12 @@ async function applyAvailableProviders() {
     startProviderSelect.style.display = 'none';
     startProviderSelect.value = providers[0] || 'claude';
     fillStartModels();
+    fillStartEffort();
     loadResumable();
   }
 }
 applyAvailableProviders();
+fillStartEffort();
 
 startBtn.addEventListener('click', () => {
   const cwd = cwdInput.value.trim();
@@ -1730,18 +1943,37 @@ startBtn.addEventListener('click', () => {
   // never having picked one, not a literal 'default' string the SDK would
   // have to resolve.
   const model = startModelSelect.value || undefined;
+  const provider = selectedProvider();
+  // Empty ("Default effort"/"Thinking: off") means skip it entirely below -
+  // same "don't send what was never picked" rule as model above.
+  const effortValue = startEffortSelect.value || undefined;
+  const claudeEffortValue = startClaudeEffortSelect.value || undefined;
   // MVP5 cross-session delegation (backlog.md) - name is what another
   // session addresses this one by via `/ask <Name>: ...`. Optional: an
   // unnamed session just can't be delegated to, same as today.
   const name = startNameInput.value.trim() || undefined;
-  startSession({ cwd, model, provider: selectedProvider(), name });
+  startSession({
+    cwd,
+    model,
+    provider,
+    name,
+    // Grok's effort rides the shared slot; Claude's rides its own dedicated
+    // select - both are real creation-time `effort` values now (session.js
+    // forwards Claude's into query()'s options too, see CLAUDE_EFFORTS).
+    effort: provider === 'grok' ? effortValue : claudeEffortValue,
+    thinkingBudget: provider === 'grok' ? undefined : effortValue,
+  });
 });
 
-async function startSession({ cwd, resume, model, provider, name }) {
+async function startSession({ cwd, resume, model, provider, name, effort, thinkingBudget }) {
   const res = await fetch('/api/sessions', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ cwd, resume, model, provider, name }),
+    // `effort` is a Grok spawn-time flag (grok-acp.js), so it's part of
+    // creation itself - see routes/sessions.js. Claude's thinking budget has
+    // no such creation-time param (it's always a live Query call), so it
+    // rides in separately below once we have a token to call with.
+    body: JSON.stringify({ cwd, resume, model, provider, name, effort }),
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
@@ -1750,6 +1982,21 @@ async function startSession({ cwd, resume, model, provider, name }) {
   }
   const { id, token } = await res.json();
   if (cwd) rememberRecentFolder(cwd);
+  if (thinkingBudget) {
+    // Best-effort: if this fails the session still starts fine at the SDK's
+    // own default (model-dependent - adaptive thinking on for Opus 5/
+    // Sonnet 5/Fable 5, off on older models; see THINKING_BUDGET_PRESETS'
+    // comment) - not worth blocking connect() over, the Settings modal's
+    // own thinking control is right there as a fallback. thinkingBudget
+    // here is always a non-empty string when truthy - '0' (Off) included,
+    // since JS string '0' is truthy even though numeric 0 isn't; only the
+    // real "Default" value ('') is falsy and skips this block entirely.
+    await fetch(`/api/sessions/${id}/thinking`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+      body: JSON.stringify({ maxThinkingTokens: Number(thinkingBudget) }),
+    }).catch(() => {});
+  }
   connect(id, token);
 }
 
@@ -1825,6 +2072,13 @@ function connect(id, token, { reconnect = false } = {}) {
 
   launcherEl.style.display = 'none';
   streamWrapEl.style.display = 'flex';
+  // detailPane.setEnabled() above (in the branch that sets up a fresh
+  // session) ran its own offset measurement while streamWrap was still
+  // display:none, so it measured a zero-width pane - re-measure now that
+  // the pane is actually laid out, or #approvalBanner/#compose stay full
+  // viewport width under the docked pane for the whole session (see
+  // detail-pane.js's syncOffset comment).
+  detailPane.syncOffset();
   composeEl.style.display = 'flex';
   activityBar.style.display = 'flex';
   modeBtn.style.display = 'inline-block';
@@ -1886,6 +2140,7 @@ function connect(id, token, { reconnect = false } = {}) {
         onRewindClick, hasFileCheckpointing, turnIndexUnreliable, turnPointIndex,
         assistantLabel: sessionProviderLabel(), rewindLabel: rewindButtonLabel(), receivedAtMs: Date.now(),
         onSelectToolCall: selectLiveToolCall,
+        onOpenAgentTab: openAgentTab,
         onToolCallStarted: (container, record) => detailPane.onToolCallStarted(container, record),
         onToolResultArrived: (container, id) => detailPane.onToolResultArrived(container, id),
         onShowDelegatedTrace: selectDelegatedTrace,
@@ -1970,6 +2225,16 @@ function showApprovalRequest(request) {
   // since a turn awaits each tool_result before its next tool_use, so a
   // second request while one is showing would be unusual, not silent.
   pendingApprovalRequestId = request.requestId;
+
+  // Belt-and-suspenders re-measure right before the banner actually needs
+  // the offset to be right, instead of only trusting whatever earlier
+  // lifecycle event (session connect, resize, drag) last computed it. The
+  // connect()-time call this used to rely on exclusively measures
+  // #detailPane while #streamWrap may still be display:none mid-setup
+  // (see detail-pane.js's syncOffset comment) - that's now patched at the
+  // one call site we found, but a banner is worth getting right every time
+  // it appears, not just when every upstream timing assumption holds.
+  detailPane.syncOffset();
 
   if (request.toolName === 'AskUserQuestion' && Array.isArray(request.input?.questions)) {
     approvalPlain.style.display = 'none';
@@ -2153,7 +2418,10 @@ function applySession(session) {
   if (thinkingGroup) thinkingGroup.style.display = caps.thinkingBudget === false ? 'none' : '';
   const effortGroup = document.getElementById('effortControlsGroup');
   if (effortGroup) effortGroup.style.display = caps.effort ? '' : 'none';
-  if (session.effort && effortBtn) effortBtn.value = session.effort;
+  if (effortBtn) {
+    fillSettingsEffortSelect(currentProvider);
+    effortBtn.value = session.effort || '';
+  }
   for (const tab of document.querySelectorAll('.settings-tab[data-settings-tab="mcp"], .settings-tab[data-settings-tab="plugins"]')) {
     tab.style.display = caps.mcpToggle === false ? 'none' : '';
   }
@@ -2164,8 +2432,12 @@ function applySession(session) {
   if (pluginNote) pluginNote.style.display = grokPanel ? 'block' : 'none';
   turnIndexUnreliable = session.turnIndexUnreliable;
   modeBtn.value = session.mode; applyModeColor(session.mode);
-  thinkingBudgetBtn.value = session.maxThinkingTokens ? String(session.maxThinkingTokens) : '';
+  // != null, not a truthiness check - maxThinkingTokens: 0 is the real
+  // "Off" value (THINKING_BUDGET_PRESETS above) and is falsy in JS, so a
+  // `session.maxThinkingTokens ? ... : ''` here would render Off as Default.
+  thinkingBudgetBtn.value = session.maxThinkingTokens != null ? String(session.maxThinkingTokens) : '';
   thinkingDisplayBtn.value = session.thinkingDisplay || '';
+  applyModelBadge(session);
   // Server is the source of truth (registry.js flips this false once
   // loadEarlierHistory has nothing left) - reflects it on every summary,
   // safe to repeat since it's idempotent either way.

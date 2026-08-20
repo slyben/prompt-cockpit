@@ -6,6 +6,8 @@ import { listDirectory } from '../session-launcher.js';
 import { respondJson } from '../http-utils.js';
 import { availableProviders } from '../provider-availability.js';
 import { getHandshakeSecret, regenerateHandshakeSecret } from '../session-registry.js';
+import { computeGlobalStats } from '../global-stats.js';
+import { fetchAccountLimits } from '../account-limits.js';
 
 export function registerSystemRoutes(router) {
   // MVP6 seed (backlog.md): the per-process delegation handshake secret -
@@ -41,6 +43,34 @@ export function registerSystemRoutes(router) {
       return respondJson(res, 200, await listDirectory(url.searchParams.get('path')));
     } catch (err) {
       return respondJson(res, 400, { error: String(err.message || err) });
+    }
+  });
+
+  // All-projects usage stats (Settings > Stats tab) - see global-stats.js's
+  // module comment for why this re-scans transcripts itself rather than
+  // reading the CLI's own `~/.claude/stats-cache.json`. Read-only, no
+  // session concept, same Origin/Host-only gating as /api/browse above.
+  router.get('/api/stats', async (req, res, url) => {
+    try {
+      const range = url.searchParams.get('range') || 'all';
+      return respondJson(res, 200, await computeGlobalStats(undefined, { range }));
+    } catch (err) {
+      return respondJson(res, 500, { error: String(err.message || err) });
+    }
+  });
+
+  // Account-level plan quota (Settings > Stats tab's "Account limits"
+  // section) - shells out to `claude -p "/usage"` rather than reading
+  // anything local, since this is the one figure that's actually tracked
+  // server-side across every device on the account (see
+  // account-limits.js's module comment). On-demand only (its own button),
+  // not part of computeGlobalStats' load - a real subprocess spawn, not a
+  // free local read.
+  router.get('/api/account-limits', async (req, res) => {
+    try {
+      return respondJson(res, 200, await fetchAccountLimits());
+    } catch (err) {
+      return respondJson(res, 502, { error: String(err.message || err) });
     }
   });
 }

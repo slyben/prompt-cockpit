@@ -282,7 +282,8 @@ export function registerSessionActionRoutes(router) {
 
     if (action === 'effort' && req.method === 'POST') {
       const body = await readJsonBody(req);
-      if (!registry.GROK_EFFORTS.includes(body.effort)) {
+      const validEfforts = row.provider === 'claude' ? registry.CLAUDE_EFFORTS : registry.GROK_EFFORTS;
+      if (!validEfforts.includes(body.effort)) {
         return respondJson(res, 400, { error: `invalid effort: ${body.effort}` });
       }
       try {

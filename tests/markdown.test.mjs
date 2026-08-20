@@ -147,6 +147,24 @@ test('renderMarkdown does not treat a lone pipe-containing line as a table witho
   assert.equal(out, '<p>a | b</p>');
 });
 
+test('Grok-streamed table/list/fence chunks still render as markdown after joinStreamText', async () => {
+  const { joinStreamText } = await import('../src/grok-messages.js');
+  const table = ['| A | B |\n', '| --- | --- |\n', '| 1 | 2 |\n'].reduce((acc, chunk) => joinStreamText(acc, chunk), '');
+  const tableHtml = html(table);
+  assert.match(tableHtml, /^<table>/);
+  assert.match(tableHtml, /<th>A<\/th>/);
+  assert.match(tableHtml, /<td>1<\/td>/);
+
+  const list = ['- one\n', '- two\n'].reduce((acc, chunk) => joinStreamText(acc, chunk), '');
+  assert.equal(html(list), '<ul><li>one</li><li>two</li></ul>');
+
+  const fence = ['```\n', 'code line\n', '```\n', '## After\n'].reduce((acc, chunk) => joinStreamText(acc, chunk), '');
+  const fenceHtml = html(fence);
+  assert.match(fenceHtml, /<pre><code>code line<\/code><\/pre>/);
+  assert.match(fenceHtml, /<h2>After<\/h2>/);
+  assert.doesNotMatch(fenceHtml, /## After/);
+});
+
 test('renderMarkdown builds elements via textContent, never HTML injection, even for angle-bracket text', () => {
   const out = html('<img src=x onerror=alert(1)>');
   assert.equal(out, '<p>&lt;img src=x onerror=alert(1)&gt;</p>');

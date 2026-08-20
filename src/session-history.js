@@ -4,6 +4,7 @@
 // getSessionMessages) - this is about the resume flow, not rewind
 // targeting, even though both read the same underlying transcript.
 import { getSessionMessages } from '@anthropic-ai/claude-agent-sdk';
+import { isSafeSessionId } from './safe-id.js';
 
 const MAX_HISTORY_MESSAGES = 5000; // safety cap against a pathologically long session, not a UX truncation
 
@@ -20,6 +21,11 @@ export const INITIAL_HISTORY_TOKEN_BUDGET = 1_000_000;
 const CHARS_PER_TOKEN_ESTIMATE = 4; // no real tokenizer available for persisted transcript messages
 
 export async function fetchSessionHistory(claudeSessionId, cwd) {
+  // Guard against a crafted id (e.g. `../../../etc/passwd`, or a
+  // URL-decoded `..%2F..%2F..`) reaching getSessionMessages, which has no
+  // validation of its own - see safe-id.js's comment for the incident this
+  // closed.
+  if (!isSafeSessionId(claudeSessionId)) throw new Error(`invalid session id: ${claudeSessionId}`);
   const messages = await getSessionMessages(claudeSessionId, { dir: cwd, limit: MAX_HISTORY_MESSAGES });
   return messages.filter(isRenderable);
 }

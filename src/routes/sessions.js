@@ -100,8 +100,9 @@ export function registerSessionRoutes(router) {
       return respondJson(res, 409, { error: `a session named "${name}" already exists in this project` });
     }
     let effort;
-    if (provider === 'grok' && typeof body.effort === 'string' && body.effort) {
-      if (!registry.GROK_EFFORTS.includes(body.effort)) {
+    if (typeof body.effort === 'string' && body.effort) {
+      const validEfforts = provider === 'grok' ? registry.GROK_EFFORTS : registry.CLAUDE_EFFORTS;
+      if (!validEfforts.includes(body.effort)) {
         return respondJson(res, 400, { error: `invalid effort: ${body.effort}` });
       }
       effort = body.effort;

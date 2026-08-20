@@ -216,6 +216,7 @@ export function initSettings({
   });
   closeButton.addEventListener('click', close);
   modal.addEventListener('click', (e) => { if (e.target === modal) close(); });
+  enableModalDrag(modal);
 
   // Tabs (General / MCP / Plugins) - each tab button's data-settings-tab
   // matches a panel's data-settings-tab-panel; switching just flips which
@@ -293,4 +294,65 @@ export function initSettings({
     setDetailPaneEnabled,
     isPendingTurnsBadgeEnabled: () => settings.pendingTurnsBadgeEnabled,
   };
+}
+
+// Lets the settings modal be repositioned by dragging its header - it's
+// tall enough (min(760px, 85vh)) to cover most of the window, which gets in
+// the way when you want to glance at the app behind it while it's open.
+// Purely visual/session-lived: position isn't persisted, so the modal
+// re-centers (its default flex placement) the next time it's opened fresh
+// after a reload.
+function enableModalDrag(modal) {
+  const box = modal.querySelector('.modal-box');
+  const header = modal.querySelector('header');
+  if (!box || !header) return;
+  header.classList.add('modal-draggable');
+
+  let dragging = false;
+  let startX = 0;
+  let startY = 0;
+  let startLeft = 0;
+  let startTop = 0;
+
+  header.addEventListener('mousedown', (e) => {
+    // Ignore drags starting on an interactive element inside the header
+    // (there are none today, but future-proof against e.g. a close icon
+    // moving up there).
+    if (e.button !== 0 || e.target.closest('button, a, input, select')) return;
+    const rect = box.getBoundingClientRect();
+    // Switch from the modal's default flex-centered placement to an
+    // explicit fixed position on first drag - position: fixed pulls the
+    // box out of the parent's flex layout entirely, so left/top fully
+    // control it from here on.
+    box.style.position = 'fixed';
+    box.style.margin = '0';
+    box.style.left = `${rect.left}px`;
+    box.style.top = `${rect.top}px`;
+    startLeft = rect.left;
+    startTop = rect.top;
+    startX = e.clientX;
+    startY = e.clientY;
+    dragging = true;
+    document.body.style.userSelect = 'none';
+    e.preventDefault();
+  });
+
+  window.addEventListener('mousemove', (e) => {
+    if (!dragging) return;
+    const rect = box.getBoundingClientRect();
+    // Clamp so the header can't be dragged fully off-screen and become
+    // ungrabbable.
+    const maxLeft = window.innerWidth - Math.min(rect.width, 80);
+    const maxTop = window.innerHeight - 40;
+    const left = Math.min(Math.max(startLeft + (e.clientX - startX), -rect.width + 80), maxLeft);
+    const top = Math.min(Math.max(startTop + (e.clientY - startY), 0), maxTop);
+    box.style.left = `${left}px`;
+    box.style.top = `${top}px`;
+  });
+
+  window.addEventListener('mouseup', () => {
+    if (!dragging) return;
+    dragging = false;
+    document.body.style.userSelect = '';
+  });
 }

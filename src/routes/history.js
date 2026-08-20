@@ -7,6 +7,7 @@ import { messagesToMarkdown } from '../transcript-markdown.js';
 import { setSessionTitle } from '../session-titles.js';
 import { isValidCwd } from '../session-launcher.js';
 import { respondJson, readJsonBody } from '../http-utils.js';
+import { findSubagentTranscript, readSubagentTranscript } from '../agent-transcript.js';
 
 export function registerHistoryRoutes(router) {
   router.get('/api/history/:id', async (req, res, url, { id }) => {
@@ -50,6 +51,23 @@ export function registerHistoryRoutes(router) {
         'content-disposition': `attachment; filename="session-${id}.md"`,
       });
       return res.end(markdown);
+    } catch (err) {
+      return respondJson(res, 404, { error: String(err.message || err) });
+    }
+  });
+
+  router.get('/api/history/:id/agent/:toolUseId', async (req, res, url, { id, toolUseId }) => {
+    // Backs public/agent-view.html's "open in new tab" reader for an Agent
+    // (Task) tool row - `id` here is the *parent* session's claudeSessionId
+    // (app.js's currentClaudeSessionId at click time), not this cockpit's
+    // own registry id. Same auth boundary as /api/history/:id above: no
+    // session token, since a subagent transcript on disk outlives the tab
+    // (and often the live registry row) that spawned it - Origin/Host only.
+    try {
+      const found = await findSubagentTranscript(id, toolUseId);
+      if (!found) return respondJson(res, 404, { error: 'no subagent transcript found for this tool call' });
+      const { messages, mtimeMs } = await readSubagentTranscript(found.transcriptPath);
+      return respondJson(res, 200, { meta: found.meta, messages, mtimeMs });
     } catch (err) {
       return respondJson(res, 404, { error: String(err.message || err) });
     }

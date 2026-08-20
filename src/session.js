@@ -117,7 +117,7 @@ function createInputQueue() {
  * CLI doesn't resolve itself - not just ExitPlanMode), `onQueueChange` with
  * the current queue snapshot whenever it changes.
  */
-export function startSession({ cwd, resume, model, permissionMode, turnIndexOffset = 0, onMessage, onStateChange, onError, onApprovalRequest, onQueueChange, onMcpAuthRequest, onMcpAuthResolved, queryImpl = query }) {
+export function startSession({ cwd, resume, model, effort, permissionMode, turnIndexOffset = 0, onMessage, onStateChange, onError, onApprovalRequest, onQueueChange, onMcpAuthRequest, onMcpAuthResolved, queryImpl = query }) {
   const inputQueue = createInputQueue();
   let currentMode = permissionMode || 'default';
   const pendingApprovals = new Map(); // requestId -> { resolve(PermissionResult), toolName }
@@ -161,6 +161,12 @@ export function startSession({ cwd, resume, model, permissionMode, turnIndexOffs
       cwd,
       resume,
       model,
+      // Reasoning-effort level ('low'|'medium'|'high'|'xhigh'|'max') - a
+      // distinct dial from `thinking` below: effort controls thinking depth
+      // AND overall response thoroughness (fewer/more consolidated tool
+      // calls), thinking controls whether/how reasoning happens at all.
+      // Undefined (not sent) leaves the SDK/model default in place.
+      effort: effort || undefined,
       permissionMode: currentMode,
       enableFileCheckpointing: true,
       // 'bypassPermissions' rejects at setPermissionMode() time without
@@ -466,6 +472,18 @@ export function startSession({ cwd, resume, model, permissionMode, turnIndexOffs
     await handle.setPermissionMode(mode);
     currentMode = mode;
   }
+
+  // Mid-session reasoning-effort change. No dedicated Query method exists
+  // for this the way setModel/setMaxThinkingTokens have their own -
+  // `effortLevel` rides the SDK's generic flag-settings layer instead
+  // (applyFlagSettings). Attached directly onto `handle` (not the wrapper
+  // returned below) so `row.handle.query.setEffort(...)` in
+  // session-registry.js's setEffort() resolves the same way for both
+  // providers - grok-session.js's own handle nests a real `setEffort`
+  // under `query` too, by the same convention.
+  handle.setEffort = async (effort) => {
+    await handle.applyFlagSettings({ effortLevel: effort });
+  };
 
   // Called by the registry once a client responds to an onApprovalRequest.
   // `decision` is a PermissionResult plus an optional cockpit-only

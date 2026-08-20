@@ -153,7 +153,7 @@ export function prependHistory(container, messages, options = {}) {
 // doc comment, which is exactly the use made of it here. history-pane.js
 // passes no receivedAtMs, so a transcript with no recorded timestamp simply
 // shows none rather than a fabricated "just now".
-export function renderMessage(container, message, { onRewindClick, hasFileCheckpointing = true, turnIndexUnreliable = false, turnPointIndex = null, assistantLabel = 'Claude', rewindLabel, receivedAtMs = null, historical = false, onSelectToolCall, onToolCallStarted, onToolResultArrived, onShowDelegatedTrace } = {}) {
+export function renderMessage(container, message, { onRewindClick, hasFileCheckpointing = true, turnIndexUnreliable = false, turnPointIndex = null, assistantLabel = 'Claude', rewindLabel, receivedAtMs = null, historical = false, onSelectToolCall, onOpenAgentTab, onToolCallStarted, onToolResultArrived, onShowDelegatedTrace } = {}) {
   if (!groupsByContainer.has(container)) resetStreamView(container);
 
   const parsed = message.timestamp ? Date.parse(message.timestamp) : NaN;
@@ -169,7 +169,7 @@ export function renderMessage(container, message, { onRewindClick, hasFileCheckp
   // already-past messages, rendered in one tick with no real elapsed time
   // between them) - see the Timing-tab honesty note this drives in
   // detail-pane.js.
-  const toolOpts = { historical, onSelectToolCall, onToolCallStarted, onToolResultArrived };
+  const toolOpts = { historical, onSelectToolCall, onOpenAgentTab, onToolCallStarted, onToolResultArrived };
 
   switch (message.type) {
     case 'system':
@@ -339,8 +339,20 @@ function appendToolCallRow(container, block, usageInfo, parent, turnPointIndex, 
   // renderMessage containers (live #stream, history modal's #historyBody) -
   // `wrap` is a genuine DOM descendant of whichever one it ended up in by
   // the time a user can click it, fragment or not.
+  // An Agent (Task) tool row opens its own read-only tab (agent-view.js)
+  // tailing the subagent's own transcript, instead of the in-page detail
+  // pane - that pane only ever has this call's initial prompt/eventual
+  // result, never the subagent's own tool calls as they happen. Falls back
+  // to the normal detail-pane click wherever onOpenAgentTab isn't wired up
+  // (e.g. this row rendering in a context with no live claudeSessionId to
+  // build the new tab's URL from).
+  if (block.name === 'Agent') wrap.classList.add('tool-row-agent');
   wrap.addEventListener('click', (e) => {
     e.stopPropagation(); // don't also toggle the enclosing group
+    if (block.name === 'Agent' && toolOpts.onOpenAgentTab) {
+      toolOpts.onOpenAgentTab(block);
+      return;
+    }
     const liveContainer = wrap.closest('#stream') || wrap.closest('#historyBody');
     toolOpts.onSelectToolCall?.(liveContainer || container, block.id);
   });
@@ -843,8 +855,18 @@ export function renderBody(body, content, hint = null, markdown = false) {
 // is always a descendant of it.
 // Grok streams BPE pieces (Rac + oon). Inventing a space between every
 // bare pair is what turned "Racoon" into "Rac oon". A single trailing
-// newline is the one case that is a word boundary rather than a
-// paragraph. Keep this in sync with src/grok-messages.js joinStreamText.
+// newline is usually a word boundary rather than a paragraph (thinking
+// chunks are often "The\n" + "user\n"); a real blank line (\n\n) is kept.
+// Structural markdown lines (tables/lists/fences/headings) keep their
+// trailing newline - stripping those is what flattened Grok replies into
+// one paragraph and let an unclosed fence swallow the rest of the turn.
+// Keep this in sync with src/grok-messages.js joinStreamText.
+const MARKDOWN_BLOCK_RE = /^\s*(```|#{1,6}\s|[-*+]\s|\d+\.\s|>\s?|\|)|^\s*(-{3,}|\*{3,}|_{3,})\s*$/;
+
+function isMarkdownBlockLine(s) {
+  return MARKDOWN_BLOCK_RE.test(String(s).replace(/\n+$/, ''));
+}
+
 function joinStreamText(existing, next) {
   const left = existing ?? '';
   const right = next ?? '';
@@ -852,7 +874,11 @@ function joinStreamText(existing, next) {
   if (!right) return left;
   let a = left;
   if (a.endsWith('\n') && !a.endsWith('\n\n') && !right.startsWith('\n')) {
-    a = a.slice(0, -1);
+    const withoutNl = a.slice(0, -1);
+    if (isMarkdownBlockLine(withoutNl) || isMarkdownBlockLine(right)) {
+      return a + right;
+    }
+    a = withoutNl;
     if (/\s$/.test(a) || /^\s/.test(right) || /^[,.;:!?')\]}]/.test(right)) {
       return a + right;
     }

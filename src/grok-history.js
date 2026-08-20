@@ -5,6 +5,7 @@ import { createInterface } from 'node:readline';
 import path from 'node:path';
 import { grokSessionsRoot } from './grok-launcher.js';
 import { acpUpdateToMessages, coalesceAssistantMessages } from './grok-messages.js';
+import { isSafeSessionId } from './safe-id.js';
 
 const MAX_LINES = 5000;
 
@@ -36,12 +37,10 @@ export async function fetchGrokSessionHistory(sessionId, cwd, sessionsDir = grok
 
 // Session ids are directory names under ~/.grok/sessions/<cwd>/. Reject
 // anything that is not a single path segment so a crafted resume/history
-// id cannot walk out of the sessions root.
-export function isSafeSessionId(sessionId) {
-  if (typeof sessionId !== 'string' || !sessionId || sessionId.length > 128) return false;
-  if (sessionId === '.' || sessionId === '..') return false;
-  return sessionId === path.basename(sessionId);
-}
+// id cannot walk out of the sessions root. Moved to safe-id.js so the
+// Claude-side history/transcript code can share the same guard; re-exported
+// here so existing imports of isSafeSessionId from this module still work.
+export { isSafeSessionId };
 
 export function findSessionDir(sessionId, cwd, sessionsDir = grokSessionsRoot()) {
   if (!isSafeSessionId(sessionId)) return null;

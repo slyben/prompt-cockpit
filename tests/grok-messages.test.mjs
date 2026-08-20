@@ -123,6 +123,29 @@ test('joinStreamText treats a single trailing newline as a token boundary', () =
   assert.equal(joinStreamText('end', '.'), 'end.');
 });
 
+test('joinStreamText keeps newlines between markdown block lines', () => {
+  assert.equal(joinStreamText('| A | B |\n', '| --- | --- |\n'), '| A | B |\n| --- | --- |\n');
+  assert.equal(
+    joinStreamText('| A | B |\n| --- | --- |\n', '| 1 | 2 |\n'),
+    '| A | B |\n| --- | --- |\n| 1 | 2 |\n',
+  );
+  assert.equal(joinStreamText('- one\n', '- two\n'), '- one\n- two\n');
+  assert.equal(joinStreamText('1. one\n', '2. two\n'), '1. one\n2. two\n');
+  assert.equal(joinStreamText('```\n', 'code\n'), '```\ncode\n');
+  assert.equal(joinStreamText('```\ncode\n', '```\n'), '```\ncode\n```\n');
+  assert.equal(joinStreamText('## Title\n', 'body'), '## Title\nbody');
+  assert.equal(joinStreamText('plain sentence.\n', '- list item'), 'plain sentence.\n- list item');
+});
+
+test('coalesceAssistantMessages keeps markdown structure in streamed text', () => {
+  const chunks = ['| A | B |\n', '| --- | --- |\n', '| 1 | 2 |\n'].map((text) => (
+    acpUpdateToMessages({ sessionUpdate: 'agent_message_chunk', content: { text } }, 's')[0]
+  ));
+  const merged = coalesceAssistantMessages(chunks);
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].message.content[0].text, '| A | B |\n| --- | --- |\n| 1 | 2 |\n');
+});
+
 test('joinStreamText does not invent spaces between bare BPE pieces', () => {
   assert.equal(joinStreamText('Rac', 'oon'), 'Racoon');
   assert.equal(joinStreamText('un', 'committed'), 'uncommitted');

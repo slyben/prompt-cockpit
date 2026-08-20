@@ -17,7 +17,7 @@
 // server.js is what bridges this row to that persisted store (see
 // seedSessionDefaults() and the 'thinking'/'auto-continue' routes there) -
 // this module itself stays filesystem-free.
-import { randomUUID, randomBytes } from 'node:crypto';
+import { randomUUID, randomBytes, timingSafeEqual } from 'node:crypto';
 import { startSession } from './session.js';
 import { startGrokSession } from './grok-session.js';
 import { forkConversation, rewindFiles as rewindFilesSdk, resolveTurnUuid } from './rewind.js';
@@ -480,7 +480,11 @@ export function toSummary(row) {
     capabilities: {
       fileRewind: row.provider === 'claude' && row.hasFileCheckpointing,
       thinkingBudget: row.provider === 'claude',
-      effort: row.provider === 'grok',
+      // Both providers support reasoning effort now - Grok as a named tier
+      // (spawn-time flag, grok-acp.js), Claude as the Agent SDK's `effort`
+      // option (session.js), live-adjustable via applyFlagSettings. Distinct
+      // value sets per provider - see GROK_EFFORTS vs CLAUDE_EFFORTS below.
+      effort: true,
       autoContinue: row.provider === 'claude',
       mcpToggle: true,
     },
@@ -489,7 +493,15 @@ export function toSummary(row) {
 
 export function checkToken(id, token) {
   const row = sessions.get(id);
-  return Boolean(row && token && row.token === token);
+  if (!row || !token) return false;
+  // timingSafeEqual over a plain === so a token guess can't be narrowed
+  // down via response-time comparison. Buffers must be equal length first -
+  // timingSafeEqual throws otherwise, and mismatched length already means
+  // "not equal" - so short-circuit rather than pad.
+  const expected = Buffer.from(row.token);
+  const actual = Buffer.from(token);
+  if (expected.length !== actual.length) return false;
+  return timingSafeEqual(expected, actual);
 }
 
 // `sinceSeq` comes from the client's last-seen event seq (server.js reads
@@ -627,6 +639,12 @@ export async function setMaxThinkingTokens(id, maxThinkingTokens, thinkingDispla
 }
 
 export const GROK_EFFORTS = ['low', 'medium', 'high', 'xhigh'];
+// Claude's effort ladder (Agent SDK's EffortLevel) - one level wider than
+// Grok's: 'max' is accepted by the SDK type but only actually honored by
+// models that support it (Fable 5, Opus 4.6+, Sonnet 4.6+); on other models
+// the SDK/API silently treats it as 'xhigh' or 'high' rather than erroring,
+// so no server-side model-aware narrowing is done here.
+export const CLAUDE_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 
 export async function setEffort(id, effort) {
   return queryPassthrough(id, (row) => row.handle.query.setEffort(effort), { effort });
@@ -811,7 +829,17 @@ function handleMessage(id, message) {
     row.mode = message.permissionMode;
     broadcastSummary(id);
   }
-  if (applyAssistantUsage(row, message)) broadcastUsage(id); // cost/tokens only - cheap, no round trip, so this can track every message
+  const hadModel = !!row.model;
+  if (applyAssistantUsage(row, message)) {
+    broadcastUsage(id); // cost/tokens only - cheap, no round trip, so this can track every message
+    // A "Default model" launch leaves row.model null until this call resolves
+    // it (see applyAssistantUsage's own comment) - broadcastUsage alone never
+    // reaches the header badge, since applyModelBadge only runs off
+    // cockpit:hello/cockpit:state (applySession), not cockpit:usage. Without
+    // this the badge stayed hidden for the rest of the session unless some
+    // unrelated event (e.g. renaming) happened to trigger a state broadcast.
+    if (!hadModel && row.model) broadcastSummary(id);
+  }
   collectDelegationText(row, message); // MVP5: buffers this turn's assistant text while a delegation is pending, see the 'result' branch below
   // Task* detection/resolution also has to run for a resumed session's
   // replayed history (see createSession's seedTaskState call), not just the
@@ -1056,6 +1084,13 @@ function parseToolResultJson(content) {
 // itself, after the whole history is folded in, not per message).
 function applyAssistantUsage(row, message) {
   if (message.type !== 'assistant' || !message.message) return false;
+  // A session started with no explicit model (row.model stays null - see
+  // createSession) never otherwise learns what the SDK/CLI actually picked;
+  // every assistant message already carries the resolved model id (both
+  // providers - see grok-messages.js's assistantMessage), so grab it once
+  // and stop - an explicit /model switch afterward overwrites this via
+  // setModel's own queryPassthrough patch, not this fallback.
+  if (!row.model && message.message.model) row.model = message.message.model;
   const toolNames = Array.isArray(message.message.content)
     ? message.message.content.filter((b) => b && b.type === 'tool_use').map((b) => b.name)
     : [];

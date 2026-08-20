@@ -10,9 +10,16 @@
 //   - a second message sent while the first turn is still running queues
 //     and is processed in order, rather than being dropped or interleaving
 import assert from 'node:assert/strict';
+import { fileURLToPath } from 'node:url';
 import { startSession } from '../src/session.js';
 
-const CWD = new URL('..', import.meta.url).pathname;
+// fileURLToPath, not .pathname - on Windows, new URL('..', import.meta.url)
+// .pathname yields "/D:/Dev/AI/prompt-cockpit/" (leading slash before the
+// drive letter), which Node's child_process.spawn cannot use as `cwd` - it
+// throws ENOENT, which the Agent SDK then misreports as a Claude Code
+// native-binary/libc mismatch. Found live 2026-08-20 while running the
+// sibling thinking-default-probe.manual.mjs on Windows for the first time.
+const CWD = fileURLToPath(new URL('..', import.meta.url));
 const MODEL = 'claude-haiku-4-5-20251001';
 const TIMEOUT_MS = 60_000;
 

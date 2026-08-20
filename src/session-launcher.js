@@ -12,7 +12,11 @@ const PROJECTS_DIR = path.join(homedir(), '.claude', 'projects');
 const MAX_LISTED = 30;
 const MAX_LINES_SCANNED = 200; // enough to find cwd + a label without reading huge transcripts
 
-export async function listResumableSessions(projectsDir = PROJECTS_DIR) {
+// Unbounded file-list underneath listResumableSessions' 30-file/newest-first
+// cap - split out so global-stats.js can walk every session across every
+// project (it needs the full set for accurate totals/streaks, not just the
+// recent ones this app's own resume list cares about).
+export async function listAllSessionFiles(projectsDir = PROJECTS_DIR) {
   let projectDirs;
   try {
     projectDirs = await readdir(projectsDir, { withFileTypes: true });
@@ -41,7 +45,11 @@ export async function listResumableSessions(projectsDir = PROJECTS_DIR) {
       files.push({ filePath, projectDirName: entry.name, sessionId: name.replace(/\.jsonl$/, ''), mtimeMs });
     }
   }
+  return files;
+}
 
+export async function listResumableSessions(projectsDir = PROJECTS_DIR) {
+  const files = await listAllSessionFiles(projectsDir);
   files.sort((a, b) => b.mtimeMs - a.mtimeMs);
   const top = files.slice(0, MAX_LISTED);
 

@@ -44,9 +44,22 @@ export function initDetailPane({ panel, headerLabel, followLiveBtn, tabButtons, 
   // that's still holding a wide desktop width from before the window shrank.
   const isNarrowLayout = () => window.matchMedia('(max-width: 900px)').matches;
 
+  // Keeps --detail-pane-offset (style.css) equal to the pane's real
+  // on-screen width so #approvalBanner/#compose stop at #stream's right
+  // edge instead of running full viewport width underneath the docked
+  // pane. 0 whenever the pane isn't actually taking up horizontal space:
+  // disabled, or the narrow-viewport breakpoint stacked it below #stream
+  // (index.html's @media max-width:900px) instead of docking it beside it.
+  function syncOffset() {
+    const offset = enabled && !isNarrowLayout() ? panel.getBoundingClientRect().width : 0;
+    document.documentElement.style.setProperty('--detail-pane-offset', `${offset}px`);
+  }
+
   if (initialWidth != null && !isNarrowLayout()) {
     panel.style.width = `${Math.max(initialWidth, MIN_WIDTH_PX)}px`;
   }
+  syncOffset();
+  window.addEventListener('resize', syncOffset);
 
   if (resizeHandle) {
     let dragStartX = null;
@@ -67,6 +80,7 @@ export function initDetailPane({ panel, headerLabel, followLiveBtn, tabButtons, 
       // relative to a normal right-edge-of-a-left-docked-panel resize.
       const target = Math.min(Math.max(dragStartWidth + (dragStartX - event.clientX), MIN_WIDTH_PX), maxPx);
       panel.style.width = `${target}px`;
+      syncOffset();
     }
 
     function onDragEnd() {
@@ -330,6 +344,7 @@ export function initDetailPane({ panel, headerLabel, followLiveBtn, tabButtons, 
     enabled = next;
     panel.classList.toggle('enabled', enabled);
     if (enabled) render();
+    syncOffset();
   }
 
   function reset(container) {
@@ -355,5 +370,14 @@ export function initDetailPane({ panel, headerLabel, followLiveBtn, tabButtons, 
     setEnabled,
     reset,
     isEnabled: () => enabled,
+    // Exposed for app.js: setEnabled()'s own syncOffset() call at session
+    // start fires before #streamWrap is flipped back to display:flex (it's
+    // still hidden from the pre-session/previous-session state at that
+    // point), so it measures a zero-width panel and leaves
+    // --detail-pane-offset stuck at 0 - the approval banner/#compose then
+    // run full viewport width under the docked pane for the rest of the
+    // session. app.js calls this again right after streamWrapEl becomes
+    // visible to get a real measurement.
+    syncOffset,
   };
 }
