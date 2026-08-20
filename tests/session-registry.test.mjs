@@ -1306,7 +1306,60 @@ test('removeQueued drops the matching pendingResultTags entry and relays a cance
   assert.match(aImpl.lastInput, /ERROR: the delegated task was removed from the queue before it ran/);
 });
 
-test('reorderQueue keeps pendingResultTags in the same order as the actual (reordered) queue, so shift() still matches the right result', async () => {
+// Follow-up finding while fixing sendNow above: reorderQueue's own mirror
+// had the identical defect. The real frontend's queueIds (public/queue-
+// panel.js's reorderBySwap, sourced from listQueue()) can never name the
+// in-flight turn - it never appears in the visible queue at all - so the
+// old "named ids first, everything unlisted appended after" algorithm
+// always pushed the in-flight entry's tag to the BACK the moment any two
+// queued items were reordered while a delegated turn was running. Proven
+// live via a probe before this fix: pendingResultTags [A(in-flight), C, B]
+// reordered with queueIds [B, C] (realistically excluding A) produced
+// [B, C, A] - A's own result would then have been shift()'d off as B's.
+test('reorderQueue reorders only the still-queued tail; the in-flight entry never moves', async () => {
+  registry._reset();
+  const dAImpl = fakeStartSession();
+  const dA = registry.createSession({ cwd: '/tmp/proj', name: 'DelegatorA', startSessionImpl: dAImpl });
+  const dCImpl = fakeStartSession();
+  const dC = registry.createSession({ cwd: '/tmp/proj', name: 'DelegatorC', startSessionImpl: dCImpl });
+  const dBImpl = fakeStartSession();
+  const dB = registry.createSession({ cwd: '/tmp/proj', name: 'DelegatorB', startSessionImpl: dBImpl });
+  const tImpl = fakeStartSession();
+  const target = registry.createSession({ cwd: '/tmp/proj', name: 'Target', startSessionImpl: tImpl });
+
+  registry.delegateTask(dA.id, 'Target', 'task from A'); // in-flight (pushed first)
+  registry.delegateTask(dC.id, 'Target', 'task from C'); // queued
+  registry.delegateTask(dB.id, 'Target', 'task from B'); // queued
+  const [idA, idC, idB] = target.pendingResultTags.map((e) => e.queueId);
+
+  // Realistic frontend call: queueIds is only the visible (queued) entries,
+  // reordered so B runs before C - never names idA.
+  await registry.reorderQueue(target.id, [idB, idC]);
+  assert.deepEqual(
+    target.pendingResultTags.map((e) => e.queueId),
+    [idA, idB, idC],
+    'A must stay pinned first; only the queued tail (C, B) reorders',
+  );
+
+  // A's own (still in-flight) result must go to A's origin, not B's just
+  // because the queue panel reordered B ahead of C.
+  tImpl.emitMessage({ type: 'assistant', message: { content: [{ type: 'text', text: 'reply to A' }] } });
+  tImpl.emitMessage({ type: 'result' });
+  assert.match(dAImpl.lastInput, /reply to A/);
+  assert.equal(dBImpl.lastInput, undefined, 'B must not receive A\'s reply just because the queue was reordered');
+
+  // B runs next, per the reordered tail.
+  tImpl.emitMessage({ type: 'assistant', message: { content: [{ type: 'text', text: 'reply to B' }] } });
+  tImpl.emitMessage({ type: 'result' });
+  assert.match(dBImpl.lastInput, /reply to B/);
+  assert.equal(dCImpl.lastInput, undefined, 'C must still be waiting behind B');
+});
+
+// A caller naming the in-flight entry's id explicitly (not something the
+// real frontend does, but defense in depth) must not be able to move it
+// either - pinning by position, not by whether the id happens to appear in
+// queueIds.
+test('reorderQueue ignores the in-flight entry even if a caller explicitly names its id', async () => {
   registry._reset();
   const aImpl = fakeStartSession();
   const a = registry.createSession({ cwd: '/tmp/proj', name: 'A', startSessionImpl: aImpl });
@@ -1315,19 +1368,63 @@ test('reorderQueue keeps pendingResultTags in the same order as the actual (reor
   const bImpl = fakeStartSession();
   const b = registry.createSession({ cwd: '/tmp/proj', name: 'B', startSessionImpl: bImpl });
 
-  registry.delegateTask(a.id, 'B', 'task from A'); // pushed first
-  registry.delegateTask(c.id, 'B', 'task from C'); // pushed second
+  registry.delegateTask(a.id, 'B', 'task from A'); // in-flight
+  registry.delegateTask(c.id, 'B', 'task from C'); // queued
   const [idA, idC] = b.pendingResultTags.map((e) => e.queueId);
 
-  // Reorder so C's turn will actually run BEFORE A's.
-  await registry.reorderQueue(b.id, [idC, idA]);
-  assert.deepEqual(b.pendingResultTags.map((e) => e.queueId), [idC, idA]);
+  await registry.reorderQueue(b.id, [idC, idA]); // asks to put C ahead of A
+  assert.deepEqual(
+    b.pendingResultTags.map((e) => e.queueId),
+    [idA, idC],
+    'naming the in-flight id in queueIds must not move it out of position 0',
+  );
+});
 
-  // First result must now go to C (it runs first post-reorder), not A.
-  bImpl.emitMessage({ type: 'assistant', message: { content: [{ type: 'text', text: 'reply to C' }] } });
-  bImpl.emitMessage({ type: 'result' });
-  assert.match(cImpl.lastInput, /reply to C/);
-  assert.equal(aImpl.lastInput, undefined, 'A must not receive C\'s reply just because it was pushed first');
+// Review finding: sendNow used to unshift the target tag all the way to
+// absolute index 0 of pendingResultTags, but index 0 is always the
+// currently in-flight turn (handle.sendNow only reorders the NOT-yet-
+// started sub-queue behind it, per session.js's moveToFront - it can't
+// make a queued turn's result arrive before the already-running turn's
+// own interrupted result does). With A running and B/C queued, sending B
+// now used to produce [B, A, C] - so A's own interrupted result got
+// shifted off as if it were B's answer, and B's real answer would later
+// get mismatched against C. The tag must land right after the in-flight
+// entry instead: [A, B, C].
+test('sendNow inserts the target tag after the in-flight entry, not ahead of it', async () => {
+  registry._reset();
+  const dAImpl = fakeStartSession();
+  const dA = registry.createSession({ cwd: '/tmp/proj', name: 'DelegatorA', startSessionImpl: dAImpl });
+  const dCImpl = fakeStartSession();
+  const dC = registry.createSession({ cwd: '/tmp/proj', name: 'DelegatorC', startSessionImpl: dCImpl });
+  const dBImpl = fakeStartSession();
+  const dB = registry.createSession({ cwd: '/tmp/proj', name: 'DelegatorB', startSessionImpl: dBImpl });
+  const tImpl = fakeStartSession();
+  const target = registry.createSession({ cwd: '/tmp/proj', name: 'Target', startSessionImpl: tImpl });
+
+  registry.delegateTask(dA.id, 'Target', 'task from A'); // in-flight (pushed first)
+  registry.delegateTask(dC.id, 'Target', 'task from C'); // queued
+  registry.delegateTask(dB.id, 'Target', 'task from B'); // queued
+  const [idA, idC, idB] = target.pendingResultTags.map((e) => e.queueId);
+
+  assert.equal(await registry.sendNow(target.id, idB), true);
+  assert.deepEqual(
+    target.pendingResultTags.map((e) => e.queueId),
+    [idA, idB, idC],
+    'B must land right after the in-flight A, not ahead of it',
+  );
+
+  // A's (interrupted) result still arrives first - it must go to A's
+  // origin, never to B's just because B was sent-now'd.
+  tImpl.emitMessage({ type: 'assistant', message: { content: [{ type: 'text', text: 'reply to A' }] } });
+  tImpl.emitMessage({ type: 'result' });
+  assert.match(dAImpl.lastInput, /reply to A/);
+  assert.equal(dBImpl.lastInput, undefined, 'B must not receive A\'s interrupted reply just because it was sent now');
+
+  // B runs next, per the reordered queue.
+  tImpl.emitMessage({ type: 'assistant', message: { content: [{ type: 'text', text: 'reply to B' }] } });
+  tImpl.emitMessage({ type: 'result' });
+  assert.match(dBImpl.lastInput, /reply to B/);
+  assert.equal(dCImpl.lastInput, undefined, 'C must still be waiting behind B');
 });
 
 // Regression test for the closeSession stranding bug found in review:
@@ -1398,6 +1495,36 @@ test('a target session erroring mid-delegated-turn relays an ERROR-tagged notice
 
   assert.ok(originImpl.lastInput.startsWith('[Prompt Cockpit] Relayed reply from "Grok"'));
   assert.match(originImpl.lastInput, /ERROR: CLI crashed/);
+});
+
+// Review finding: handleError used to leave scheduleAutoContinue's timer
+// armed. If a rate-limit hit had armed it before the CLI died, the timer
+// fired later, pushTurn'd 'Continue' into a now-dead handle, and broadcast
+// a live-looking 'running' state for an errored session - a ghost turn
+// with nothing behind it. handleError must clear the timer synchronously,
+// same as closeSession already does.
+test('a crash after a rate-limit hit disarms auto-continue instead of resurrecting the session later', async () => {
+  registry._reset();
+  const impl = fakeStartSession();
+  const row = registry.createSession({ cwd: '/tmp', startSessionImpl: impl });
+
+  // Arm auto-continue on a rate limit due to resolve very soon.
+  row.rateLimitHit = { resetsAt: Date.now() + 10, rateLimitType: 'session_limit_text' };
+  await registry.setAutoContinue(row.id, true);
+  assert.equal(row.autoContinueTimer !== null, true);
+
+  // CLI dies before the timer fires.
+  impl.emitError(new Error('CLI crashed'));
+  assert.equal(row.state, 'error');
+  assert.equal(row.autoContinueTimer, null);
+
+  const inputsBefore = (impl.allInputs || []).length;
+  // Wait past the original resetsAt - if the timer had survived, its
+  // callback would have pushTurn'd 'Continue' by now.
+  await new Promise((resolve) => setTimeout(resolve, 30));
+
+  assert.equal((impl.allInputs || []).length, inputsBefore);
+  assert.equal(row.state, 'error');
 });
 
 // MVP6 seed (backlog.md): the per-process delegation handshake secret -

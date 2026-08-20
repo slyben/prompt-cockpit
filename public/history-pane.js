@@ -68,9 +68,25 @@ export function initHistoryPane({ modal, body, closeButton, titleEl, exportButto
           onSelectToolCall: (container, id) => detailPane.selectToolCall(container, id),
         });
       }
-      if (!messages.length) body.innerHTML = '<span class="tool-pending">(empty transcript)</span>';
+      if (!messages.length) {
+        const empty = document.createElement('span');
+        empty.className = 'tool-pending';
+        empty.textContent = '(empty transcript)';
+        body.replaceChildren(empty);
+      }
     } catch (err) {
-      body.innerHTML = `<span class="msg error"><span class="body">Could not load history: ${String(err.message || err)}</span></span>`;
+      // err.message is usually just a UUID (src/routes/history.js's error
+      // field), but it's still server/SDK-originated text, not a literal -
+      // build this via textContent rather than innerHTML like every other
+      // error block (stream-view.js's appendBlock) instead of being the one
+      // innerHTML-with-untrusted-text spot in the renderer.
+      const wrap = document.createElement('span');
+      wrap.className = 'msg error';
+      const bodyText = document.createElement('span');
+      bodyText.className = 'body';
+      bodyText.textContent = `Could not load history: ${String((err && err.message) || err)}`;
+      wrap.append(bodyText);
+      body.replaceChildren(wrap);
     }
   }
 

@@ -20,6 +20,23 @@ const LINK_RE = /\[([^\]]+)\]\(([^)]+)\)/;
 // escaped character, not a marker - e.g. "\*not bold\*" shouldn't italicize.
 const ESCAPE_RE = /\\([\\`*_{}[\]()#+\-.!~>])/;
 
+// Link destinations are model-generated text, not a trusted URL - without a
+// protocol allowlist a reply (or a prompt-injected one) can turn
+// "[click here](javascript:...)" into a real clickable anchor on this
+// origin, which can then read the session bearer token out of
+// sessionStorage and call the authenticated API. Strip stray whitespace/
+// tab/newline characters first (browsers ignore them mid-URL, so
+// "java" + tab + "script:" still parses as "javascript:"), then allow only
+// the schemes a legitimate reply link or MCP auth link ever needs.
+const SAFE_HREF_RE = /^(https?:|mailto:)/i;
+const STRIP_CHARS = [9, 10, 13].map((code) => String.fromCharCode(code));
+export function isSafeHref(raw) {
+  let cleaned = String(raw ?? '');
+  for (const ch of STRIP_CHARS) cleaned = cleaned.split(ch).join('');
+  cleaned = cleaned.trim();
+  return SAFE_HREF_RE.test(cleaned) ? cleaned : null;
+}
+
 // Finds the earliest-matching inline marker in `text` among the patterns
 // above, applies it, and recurses on both sides - so e.g. "**bold `code`**"
 // nests a <code> inside the <strong> instead of only matching the outermost
@@ -48,12 +65,19 @@ function renderInline(text, out) {
   if (tag === 'esc') {
     out.append(document.createTextNode(match[1]));
   } else if (tag === 'a') {
-    const a = document.createElement('a');
-    a.href = match[2];
-    a.target = '_blank';
-    a.rel = 'noopener noreferrer';
-    renderInline(match[1], a);
-    out.append(a);
+    const href = isSafeHref(match[2]);
+    if (href) {
+      const a = document.createElement('a');
+      a.href = href;
+      a.target = '_blank';
+      a.rel = 'noopener noreferrer';
+      renderInline(match[1], a);
+      out.append(a);
+    } else {
+      // Unsafe scheme (javascript:, data:, vbscript:, ...) - render the
+      // link label as plain text instead of dropping the content.
+      renderInline(match[1], out);
+    }
   } else if (tag === 'code') {
     const code = document.createElement('code');
     code.textContent = match[1];

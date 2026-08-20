@@ -6,7 +6,7 @@ import { homedir } from 'node:os';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
 
-const DEFAULT_REQUEST_TIMEOUT_MS = 10 * 60 * 1000;
+const DEFAULT_REQUEST_TIMEOUT_MS = 20 * 60 * 1000;
 
 // Values that land in argv. Windows still routes .cmd/.bat through cmd.exe
 // even with shell:false, so metacharacters in --model/--effort (or plugin

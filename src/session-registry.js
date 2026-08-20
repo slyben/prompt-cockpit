@@ -1271,18 +1271,40 @@ export async function removeQueued(id, queueId) {
   return removed;
 }
 
-export async function reorderQueue(id, queueIds) {
-  const row = sessions.get(id);
-  if (!row) throw new Error(`unknown session: ${id}`);
-  const result = await row.handle.reorderQueue(queueIds);
-  // MVP5: mirror the exact same reorder onto pendingResultTags that
-  // session.js's own inputQueue.reorder() just performed on the real queue
-  // (named ids first, in the given order; everything else - including
-  // untracked entries whose queueId isn't in the visible queue at all,
-  // e.g. one already running - keeps its original relative position,
-  // appended after) - so this array's order keeps matching actual future
-  // execution order and handleMessage's shift() stays correct.
-  const byQueueId = new Map(row.pendingResultTags.map((e) => [e.queueId, e]));
+// Reorders only the TAIL of row.pendingResultTags (index 1 onward) to match
+// `queueIds`, leaving index 0 untouched. Shared by reorderQueue and sendNow
+// below.
+//
+// pendingResultTags[0], whenever the array is non-empty, is always the
+// currently in-flight turn - the FIFO invariant handleMessage's blind
+// shift() relies on (nothing reorders an entry out of that slot except a
+// 'result' actually consuming it). Both handle.reorderQueue() and
+// handle.sendNow() only ever touch session.js's `pending` sub-queue, which
+// by construction never contains the in-flight entry (createInputQueue's
+// module comment: a push that lands while the consumer is already waiting
+// is handed straight to it and never enters `pending` at all) - so neither
+// operation can ever change what result arrives next, no matter what ids
+// the caller passes.
+//
+// Review finding, confirmed against a live probe: the old code reordered
+// the WHOLE array (named ids first, in the given order, then every
+// unlisted entry appended after). The real frontend's queueIds - built
+// from listQueue()/inputQueue.list(), which also never includes the
+// in-flight entry (public/queue-panel.js's reorderBySwap only ever sees
+// what setQueue() was pushed) - therefore never names the in-flight
+// entry's id, which means it always landed in the "unlisted, appended
+// after" bucket: an ordinary queue-panel drag/swap while a delegated turn
+// was running silently moved that turn's own tag to the BACK of the
+// array. The next 'result' - which is actually the in-flight turn
+// finishing - then got shift()'d off as if it belonged to whatever queued
+// entry ended up first instead, misdelivering it as that turn's delegated
+// answer. sendNow's near-identical bug (unshifting to absolute index 0)
+// was the same root cause the other direction. Pinning index 0 here fixes
+// both call sites the same way.
+function reorderPendingTagsTail(row, queueIds) {
+  const pinned = row.pendingResultTags.length ? [row.pendingResultTags[0]] : [];
+  const tail = row.pendingResultTags.slice(pinned.length);
+  const byQueueId = new Map(tail.map((e) => [e.queueId, e]));
   const used = new Set();
   const ordered = [];
   for (const qid of queueIds) {
@@ -1292,10 +1314,17 @@ export async function reorderQueue(id, queueIds) {
       used.add(qid);
     }
   }
-  for (const entry of row.pendingResultTags) {
+  for (const entry of tail) {
     if (!used.has(entry.queueId)) ordered.push(entry);
   }
-  row.pendingResultTags = ordered;
+  row.pendingResultTags = [...pinned, ...ordered];
+}
+
+export async function reorderQueue(id, queueIds) {
+  const row = sessions.get(id);
+  if (!row) throw new Error(`unknown session: ${id}`);
+  const result = await row.handle.reorderQueue(queueIds);
+  reorderPendingTagsTail(row, queueIds);
   return result;
 }
 
@@ -1303,14 +1332,12 @@ export async function sendNow(id, queueId) {
   const row = sessions.get(id);
   if (!row) throw new Error(`unknown session: ${id}`);
   const result = await row.handle.sendNow(queueId);
-  if (result) {
-    // MVP5: mirror moveToFront - same reasoning as reorderQueue above.
-    const i = row.pendingResultTags.findIndex((e) => e.queueId === queueId);
-    if (i > 0) {
-      const [entry] = row.pendingResultTags.splice(i, 1);
-      row.pendingResultTags.unshift(entry);
-    }
-  }
+  // handle.sendNow() moves queueId to the front of the not-yet-started
+  // sub-queue and interrupts whatever's running - reorderPendingTagsTail's
+  // pinned-index-0 rule already keeps that interrupted turn's own tag
+  // first, so mirroring this as "queueId first among the tail" is exactly
+  // the front-of-the-still-queued-suffix placement this needs.
+  if (result) reorderPendingTagsTail(row, [queueId]);
   return result;
 }
 
@@ -1479,6 +1506,14 @@ function failPendingDelegations(row, errorText) {
 function handleError(id, err) {
   const row = sessions.get(id);
   if (!row) return;
+  // A rate-limit hit can arm scheduleAutoContinue's timer before the CLI
+  // dies. Unlike closeSession, this used to leave that timer armed - it
+  // would fire later, pushTurn 'Continue' into a now-dead handle, and
+  // broadcast a live-looking 'running' state for a session that's actually
+  // errored (confirmed in review: ghost spinner/pending-turn count with
+  // nothing behind it, since compose only re-disables on error/closed, it
+  // never re-enables on a stray running broadcast).
+  clearAutoContinueTimer(row);
   row.state = 'error';
   // MVP5: a crashing row's for-await loop (session.js/grok-session.js) exits
   // without ever emitting the 'result' message handleMessage's delegation

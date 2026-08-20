@@ -7,6 +7,7 @@
 // (shared with plugin-panel.js); this module only owns per-server rendering
 // and the toggle/reconnect actions.
 import { initListPanel } from '/list-panel.js';
+import { isSafeHref } from '/markdown.js';
 
 export function initMcpPanel({ listEl, refreshButton, fetchStatus, toggleServer, reconnectServer }) {
   const panel = initListPanel({
@@ -70,7 +71,10 @@ export function initMcpPanel({ listEl, refreshButton, fetchStatus, toggleServer,
     });
 
     top.append(toggle, name, badge);
-    if (server.status === 'needs-auth' && server.authUrl) {
+    const safeAuthUrl = server.status === 'needs-auth' && server.authUrl
+      ? isSafeHref(server.authUrl)
+      : null;
+    if (safeAuthUrl) {
       // Only appears once session.js's onElicitation has actually caught a
       // URL-mode auth request for this server (see session-registry.js's
       // getMcpServerStatus) - a plain 'needs-auth' status with no link yet
@@ -79,9 +83,12 @@ export function initMcpPanel({ listEl, refreshButton, fetchStatus, toggleServer,
       // in the browser, not the cockpit - reconnect/refresh afterward (or
       // just wait for the push in the module comment above) to see the
       // badge clear once the SDK reports the server connected.
+      // authUrl comes from the MCP server (via SDK elicitation), not this
+      // app, so it gets the same javascript:/data: scheme check as reply
+      // links before ever becoming a real href.
       const authLink = document.createElement('a');
       authLink.className = 'mcp-auth-link';
-      authLink.href = server.authUrl;
+      authLink.href = safeAuthUrl;
       authLink.target = '_blank';
       authLink.rel = 'noopener noreferrer';
       authLink.textContent = 'Authenticate ↗';

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { installDomStub } from './helpers/dom-stub.mjs';
 
 installDomStub();
-const { renderMarkdown } = await import('../public/markdown.js');
+const { renderMarkdown, isSafeHref } = await import('../public/markdown.js');
 
 function html(text) { return renderMarkdown(text).toHTML(); }
 
@@ -31,6 +31,36 @@ test('renderMarkdown renders links with target/rel set for safety', () => {
     html('[text](https://example.com)'),
     '<p><a href="https://example.com" target="_blank" rel="noopener noreferrer">text</a></p>',
   );
+});
+
+test('renderMarkdown does not turn a javascript: link into a real href', () => {
+  assert.equal(html("[click me](javascript:document.title='pwned')"), '<p>click me</p>');
+});
+
+test('renderMarkdown does not turn a data: link into a real href', () => {
+  assert.equal(html('[x](data:text/html,evil)'), '<p>x</p>');
+});
+
+test('renderMarkdown strips whitespace/tab/newline before checking the link scheme', () => {
+  assert.equal(html("[x](java\tscript:document.title='p')"), '<p>x</p>');
+});
+
+test('renderMarkdown allows mailto: links', () => {
+  assert.equal(
+    html('[mail](mailto:a@b.com)'),
+    '<p><a href="mailto:a@b.com" target="_blank" rel="noopener noreferrer">mail</a></p>',
+  );
+});
+
+test('isSafeHref allows http/https/mailto and rejects everything else', () => {
+  assert.equal(isSafeHref('https://example.com'), 'https://example.com');
+  assert.equal(isSafeHref('http://example.com'), 'http://example.com');
+  assert.equal(isSafeHref('mailto:a@b.com'), 'mailto:a@b.com');
+  assert.equal(isSafeHref('javascript:alert(1)'), null);
+  assert.equal(isSafeHref('data:text/html,evil'), null);
+  assert.equal(isSafeHref('vbscript:msgbox(1)'), null);
+  assert.equal(isSafeHref(''), null);
+  assert.equal(isSafeHref(undefined), null);
 });
 
 test('renderMarkdown renders a fenced code block verbatim, no inline parsing inside', () => {
