@@ -135,6 +135,46 @@ test('joinStreamText keeps newlines between markdown block lines', () => {
   assert.equal(joinStreamText('```\ncode\n', '```\n'), '```\ncode\n```\n');
   assert.equal(joinStreamText('## Title\n', 'body'), '## Title\nbody');
   assert.equal(joinStreamText('plain sentence.\n', '- list item'), 'plain sentence.\n- list item');
+  // The block-line check used to run against the whole accumulated string,
+  // so a fence after a paragraph did not count as markdown and the first
+  // payload row glued onto the opener (` ```Mode   LastWriteTime`).
+  assert.equal(
+    joinStreamText('See this:\n\n```\n', 'Mode   LastWriteTime\n'),
+    'See this:\n\n```\nMode   LastWriteTime\n',
+  );
+});
+
+test('joinStreamText keeps newlines inside a tilde fence', () => {
+  assert.equal(joinStreamText('~~~\n', 'code\n'), '~~~\ncode\n');
+  assert.equal(joinStreamText('~~~\ncode\n', '~~~\n'), '~~~\ncode\n~~~\n');
+});
+
+test('joinStreamText does not close a backtick fence with tildes', () => {
+  const joined = ['```\n', '~~~\n', 'still in fence\n', '```\n'].reduce((acc, chunk) => joinStreamText(acc, chunk), '');
+  assert.equal(joined, '```\n~~~\nstill in fence\n```\n');
+});
+
+test('joinStreamText keeps newlines inside a fenced code body', () => {
+  const chunks = [
+    'Listed files:\n\n',
+    '```\n',
+    'Mode   LastWriteTime          Length Name\n',
+    '----   -------------          ------ ----\n',
+    'd----- 2026-08-21 12:34:48 AM        .claude\n',
+    'd--h-- 2026-08-21 12:45:03 AM        .git\n',
+    '```\n',
+    'Eight files.\n',
+  ];
+  const joined = chunks.reduce((acc, chunk) => joinStreamText(acc, chunk), '');
+  assert.equal(
+    joined,
+    'Listed files:\n\n```\n'
+      + 'Mode   LastWriteTime          Length Name\n'
+      + '----   -------------          ------ ----\n'
+      + 'd----- 2026-08-21 12:34:48 AM        .claude\n'
+      + 'd--h-- 2026-08-21 12:45:03 AM        .git\n'
+      + '```\nEight files.\n',
+  );
 });
 
 test('coalesceAssistantMessages keeps markdown structure in streamed text', () => {

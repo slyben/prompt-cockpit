@@ -68,6 +68,19 @@ test('renderMarkdown renders a fenced code block verbatim, no inline parsing ins
   assert.equal(out, '<pre><code data-lang="js">const x = **not bold**;</code></pre>');
 });
 
+test('renderMarkdown keeps c++-style language tags that are not just word chars', () => {
+  const out = html('```c++\nint x = 1;\n```');
+  assert.equal(out, '<pre><code data-lang="c++">int x = 1;</code></pre>');
+});
+
+test('renderMarkdown treats leftover text on a fence opener as the first code line, not a language tag', () => {
+  const out = html('```Mode   LastWriteTime          Length Name\n----   -------------\n```');
+  assert.equal(
+    out,
+    '<pre><code>Mode   LastWriteTime          Length Name\n----   -------------</code></pre>',
+  );
+});
+
 test('renderMarkdown renders ATX headings h1-h6', () => {
   for (let n = 1; n <= 6; n++) {
     assert.equal(html(`${'#'.repeat(n)} Heading`), `<h${n}>Heading</h${n}>`);
@@ -126,6 +139,54 @@ test('renderMarkdown honors backslash-escaped markers as literal characters', ()
   assert.equal(html('\\*not bold\\*'), '<p>*not bold*</p>');
 });
 
+test('renderMarkdown renders *** as bold italic', () => {
+  assert.equal(html('***both***'), '<p><strong><em>both</em></strong></p>');
+});
+
+test('renderMarkdown nests italic inside bold', () => {
+  assert.equal(html('**bold *italic* still**'), '<p><strong>bold <em>italic</em> still</strong></p>');
+});
+
+test('renderMarkdown does not italicize snake_case identifiers', () => {
+  assert.equal(html('see file_name_here please'), '<p>see file_name_here please</p>');
+});
+
+test('renderMarkdown still italicizes flanking underscore words', () => {
+  assert.equal(html('say _this_ please'), '<p>say <em>this</em> please</p>');
+});
+
+test('renderMarkdown does not treat mid-identifier __ as bold', () => {
+  assert.equal(html('foo__bar__baz'), '<p>foo__bar__baz</p>');
+});
+
+test('renderMarkdown strips a GFM link title out of href', () => {
+  assert.equal(
+    html('[x](https://example.com "t")'),
+    '<p><a href="https://example.com" target="_blank" rel="noopener noreferrer">x</a></p>',
+  );
+});
+
+test('renderMarkdown turns image markup into a labeled link, without a leftover bang', () => {
+  assert.equal(
+    html('![alt](https://example.com/a.png)'),
+    '<p><a href="https://example.com/a.png" target="_blank" rel="noopener noreferrer">alt</a></p>',
+  );
+});
+
+test('renderMarkdown does not turn a javascript: image into a real href', () => {
+  assert.equal(html('![x](javascript:alert(1))'), '<p>x</p>');
+});
+
+test('renderMarkdown renders a tilde-fenced code block verbatim', () => {
+  const out = html('~~~\nconst x = **not bold**;\n~~~');
+  assert.equal(out, '<pre><code>const x = **not bold**;</code></pre>');
+});
+
+test('renderMarkdown does not close a backtick fence with tildes', () => {
+  const out = html('```\n~~~\nstill code\n```');
+  assert.equal(out, '<pre><code>~~~\nstill code</code></pre>');
+});
+
 test('renderMarkdown renders a GFM pipe table with column alignment', () => {
   const md = '| A | B |\n| :-- | --: |\n| a1 | b1 |';
   const out = html(md);
@@ -163,6 +224,23 @@ test('Grok-streamed table/list/fence chunks still render as markdown after joinS
   assert.match(fenceHtml, /<pre><code>code line<\/code><\/pre>/);
   assert.match(fenceHtml, /<h2>After<\/h2>/);
   assert.doesNotMatch(fenceHtml, /## After/);
+
+  // Directory-listing rows are not markdown structure; they still have to
+  // survive joinStreamText as separate lines inside the fence.
+  const listing = [
+    'Listed files:\n\n',
+    '```\n',
+    'Mode   LastWriteTime          Length Name\n',
+    '----   -------------          ------ ----\n',
+    'd----- 2026-08-21 12:34:48 AM        .claude\n',
+    '```\n',
+  ].reduce((acc, chunk) => joinStreamText(acc, chunk), '');
+  const listingHtml = html(listing);
+  assert.match(listingHtml, /<p>Listed files:<\/p>/);
+  assert.match(
+    listingHtml,
+    /<pre><code>Mode   LastWriteTime          Length Name\n----   -------------          ------ ----\nd----- 2026-08-21 12:34:48 AM        \.claude<\/code><\/pre>/,
+  );
 });
 
 test('renderMarkdown builds elements via textContent, never HTML injection, even for angle-bracket text', () => {

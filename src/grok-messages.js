@@ -1,5 +1,7 @@
 // Turn ACP session/update payloads into the Claude-shaped sdk:message
 // objects stream-view.js already knows how to render.
+import { joinStreamText } from './stream-join.js';
+export { joinStreamText };
 
 function textFromContent(content) {
   if (!content) return '';
@@ -141,42 +143,6 @@ export function turnResultMessage(sessionId, stopReason) {
     result: '',
     error: ok ? undefined : (stopReason || 'turn ended'),
   };
-}
-
-// Grok streams BPE pieces (Rac + oon). Inventing a space between every
-// bare pair is what turned "Racoon" into "Rac oon". A single trailing
-// newline is usually a word boundary rather than a paragraph (thinking
-// chunks are often "The\n" + "user\n"); a real blank line (\n\n) is kept.
-//
-// Exception: that word-boundary rewrite destroys markdown. Table rows,
-// list items, fences, and headings are each one line with a trailing \n,
-// and turning those into spaces is what flattened Grok replies into one
-// giant paragraph (and let an unclosed ``` swallow the rest of the turn).
-// Keep this in sync with public/stream-view.js joinStreamText.
-const MARKDOWN_BLOCK_RE = /^\s*(```|#{1,6}\s|[-*+]\s|\d+\.\s|>\s?|\|)|^\s*(-{3,}|\*{3,}|_{3,})\s*$/;
-
-function isMarkdownBlockLine(s) {
-  return MARKDOWN_BLOCK_RE.test(String(s).replace(/\n+$/, ''));
-}
-
-export function joinStreamText(existing, next) {
-  const left = existing ?? '';
-  const right = next ?? '';
-  if (!left) return right;
-  if (!right) return left;
-  let a = left;
-  if (a.endsWith('\n') && !a.endsWith('\n\n') && !right.startsWith('\n')) {
-    const withoutNl = a.slice(0, -1);
-    if (isMarkdownBlockLine(withoutNl) || isMarkdownBlockLine(right)) {
-      return a + right;
-    }
-    a = withoutNl;
-    if (/\s$/.test(a) || /^\s/.test(right) || /^[,.;:!?')\]}]/.test(right)) {
-      return a + right;
-    }
-    return `${a} ${right}`;
-  }
-  return a + right;
 }
 
 function canMergeAssistant(prev, msg) {

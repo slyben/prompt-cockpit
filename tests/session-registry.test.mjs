@@ -1179,6 +1179,12 @@ test('a delegated task result relays back into the origin session as a wrapped q
 // 2026-08-20 follow-up: the origin model must only see the final answer, not
 // every buffered narration block - the full trace is relayed separately, out
 // of the model's context, as a cockpit:delegate-full-trace marker.
+//
+// The two narration blocks are separated by a tool call, on purpose: a bare
+// tool_use/tool_result boundary is what actually marks two DISTINCT
+// narration steps (see collectDelegationText's 2026-08-21 comment) - two
+// plain text messages with nothing between them are instead treated as one
+// continuous streamed reply and merged, which is covered separately below.
 test('a multi-block delegated reply relays only the final answer into the origin turn, and ships the full narration as a separate out-of-band marker', () => {
   registry._reset();
   const claudeImpl = fakeStartSession();
@@ -1189,6 +1195,7 @@ test('a multi-block delegated reply relays only the final answer into the origin
   registry.delegateTask(claudeRow.id, 'Grok', 'run the tests and report back');
 
   grokImpl.emitMessage({ type: 'assistant', message: { content: [{ type: 'text', text: 'Let me run the test suite first.' }] } });
+  grokImpl.emitMessage({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 't1', name: 'Bash', input: { command: 'npm test' } }] } });
   grokImpl.emitMessage({ type: 'assistant', message: { content: [{ type: 'text', text: 'All 311 tests pass.' }] } });
   grokImpl.emitMessage({ type: 'result' }); // no result.result field (test stub) - falls back to the last buffered block
 
@@ -1201,6 +1208,37 @@ test('a multi-block delegated reply relays only the final answer into the origin
   assert.ok(trace, 'a full-trace marker must be sent when there is more than just the final answer');
   assert.match(trace.message.text, /Let me run the test suite first\.[\s\S]*All 311 tests pass\./, 'the marker carries the whole narration, in order');
   assert.equal(typeof trace.message.queueId, 'string');
+});
+
+// 2026-08-21 bug fix: Grok streams its reply one BPE piece at a time - a
+// SEPARATE assistant message per word (see grok-messages.js's joinStreamText
+// comment) - not one message per complete sentence like Claude. Before this
+// fix, collectDelegationText pushed a new buffer entry per message
+// regardless, so a Grok delegation's full-trace buffer held one entry per
+// WORD (unreadable once joined with blank lines) and finalAnswerText's
+// "last non-empty block" fallback grabbed a single trailing token/punctuation
+// mark instead of the real last sentence - so the origin model's relayed
+// "final answer" was garbage too (observed: a lone ".").
+test('a Grok-style word-at-a-time streamed reply re-assembles into real sentences, not one buffer entry per word', () => {
+  registry._reset();
+  const claudeImpl = fakeStartSession();
+  const claudeRow = registry.createSession({ cwd: '/tmp/proj', name: 'Claude', startSessionImpl: claudeImpl });
+  const grokImpl = fakeStartSession();
+  registry.createSession({ cwd: '/tmp/proj', name: 'Grok', startSessionImpl: grokImpl });
+
+  registry.delegateTask(claudeRow.id, 'Grok', 'list the files here');
+
+  for (const piece of ['I', "'ll", ' run', ' ', 'ls', ' -', 'la', '.']) {
+    grokImpl.emitMessage({ type: 'assistant', message: { content: [{ type: 'text', text: piece }] } });
+  }
+  grokImpl.emitMessage({ type: 'result' }); // no result.result field - falls back to the last (now fully re-assembled) buffered block
+
+  assert.match(claudeImpl.lastInput, /\n---\nI'll run ls -la\.$/, 'word-at-a-time chunks must re-assemble into one real sentence, not relay a lone trailing token');
+
+  const ws = fakeWs();
+  registry.attachClient(claudeRow.id, ws);
+  const trace = ws.sent.find((m) => m.type === 'sdk:message' && m.message.type === 'cockpit:delegate-full-trace');
+  assert.equal(trace, undefined, 'a single re-assembled sentence has nothing extra beyond the final answer, so no full-trace marker should be sent');
 });
 
 test('a one-shot delegated reply (no narration) does not emit a full-trace marker - nothing extra to show', () => {

@@ -86,6 +86,18 @@ test('GET / serves the launcher page', async () => {
   assert.match(body, /Prompt Cockpit/);
 });
 
+test('GET /stream-join.js and /permissions.js serve the shared src modules', async () => {
+  const join = await fetch(`${ORIGIN}/stream-join.js`);
+  assert.equal(join.status, 200);
+  assert.match(join.headers.get('content-type'), /javascript/);
+  assert.match(await join.text(), /export function joinStreamText/);
+
+  const perm = await fetch(`${ORIGIN}/permissions.js`);
+  assert.equal(perm.status, 200);
+  assert.match(perm.headers.get('content-type'), /javascript/);
+  assert.match(await perm.text(), /export const PERMISSION_MODES/);
+});
+
 test('GET /api/resumable returns an array without needing auth (loopback-only, not internet-exposed)', async () => {
   const res = await fetch(`${ORIGIN}/api/resumable`);
   assert.equal(res.status, 200);

@@ -1,5 +1,5 @@
 // Static file serving for public/ (the frontend's unbundled ES modules) plus
-// the one src/ file the browser also loads directly - split out of
+// the src/ files the browser also loads directly - split out of
 // server.js unchanged when it was split into a router + route modules.
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -7,9 +7,10 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
-// permissions.js has no Node-specific imports and is shared verbatim with
-// the browser (mode-cycle order) rather than duplicated into public/.
-const SHARED_SRC_FILES = new Set(['permissions.js']);
+// No Node-specific imports; shared verbatim with the browser rather than
+// duplicated into public/. permissions.js is mode-cycle order;
+// stream-join.js is Grok token-join whitespace (also imported by grok-messages.js).
+const SHARED_SRC_FILES = new Set(['permissions.js', 'stream-join.js']);
 
 const CONTENT_TYPES = {
   '.html': 'text/html; charset=utf-8',

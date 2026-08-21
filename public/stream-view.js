@@ -36,6 +36,7 @@
 
 import { resetToolCallStore, createToolCallRecord, completeToolCallRecord, mergeToolCallStore, recordOrphanResult, popOrphanResult } from '/tool-call-store.js';
 import { renderMarkdown } from '/markdown.js';
+import { joinStreamText } from '/stream-join.js';
 
 const seenInitByContainer = new WeakMap();
 const groupsByContainer = new WeakMap(); // container -> group[]
@@ -614,9 +615,10 @@ function renderUser(container, message, onRewindClick, hasFileCheckpointing, rew
       ? [{ label, title: 'Fork a new session starting from this message', onClick: () => onRewindClick(message.turnIndex) }]
       : [];
     const delegated = delegatedLabelAndText(content);
-    const cls = delegated && delegated.kind === 'reply' ? 'assistant delegated-reply' : 'user';
-    const wrap = appendBlock(container, cls, delegated ? delegated.label : 'You', delegated ? delegated.text : content, actions, container, null, null, timestampMs);
-    if (delegated && delegated.kind === 'reply') registerDelegatedReplyBubble(container, message.queueId, wrap);
+    const isDelegatedReply = Boolean(delegated && delegated.kind === 'reply');
+    const cls = isDelegatedReply ? 'assistant delegated-reply' : 'user';
+    const wrap = appendBlock(container, cls, delegated ? delegated.label : 'You', delegated ? delegated.text : content, actions, container, null, null, timestampMs, isDelegatedReply);
+    if (isDelegatedReply) registerDelegatedReplyBubble(container, message.queueId, wrap);
     return;
   }
   if (Array.isArray(content)) {
@@ -650,9 +652,10 @@ function renderUser(container, message, onRewindClick, hasFileCheckpointing, rew
       } else if (block.type === 'text') {
         closeGroup(container);
         const delegated = delegatedLabelAndText(block.text);
-        const cls = delegated && delegated.kind === 'reply' ? 'assistant delegated-reply' : 'user';
-        const wrap = appendBlock(container, cls, delegated ? delegated.label : 'You', delegated ? delegated.text : block.text, [], container, null, null, timestampMs);
-        if (delegated && delegated.kind === 'reply') registerDelegatedReplyBubble(container, message.queueId, wrap);
+        const isDelegatedReply = Boolean(delegated && delegated.kind === 'reply');
+        const cls = isDelegatedReply ? 'assistant delegated-reply' : 'user';
+        const wrap = appendBlock(container, cls, delegated ? delegated.label : 'You', delegated ? delegated.text : block.text, [], container, null, null, timestampMs, isDelegatedReply);
+        if (isDelegatedReply) registerDelegatedReplyBubble(container, message.queueId, wrap);
       }
     }
   }
@@ -820,12 +823,12 @@ export function renderBody(body, content, hint = null, markdown = false) {
     }
     return;
   }
-  // Markdown path - only ever passed true for Claude's own reply text (see
-  // appendBlock's caller in renderAssistant). Ignores `hint`: nothing calls
-  // this with both today (see renderBody's own module comment on `hint`
-  // being otherwise unreachable), and mixing the two would need the
-  // markdown fragment squeezed into .body-content's flex row instead of
-  // owning the whole body element.
+  // Markdown path - assistant reply text (renderAssistant) and delegated
+  // /ask replies (renderUser). Ignores `hint`: nothing calls this with both
+  // today (see renderBody's own module comment on `hint` being otherwise
+  // unreachable), and mixing the two would need the markdown fragment
+  // squeezed into .body-content's flex row instead of owning the whole body
+  // element.
   if (markdown && typeof content === 'string') {
     body.className = 'body markdown-body';
     body.textContent = '';
@@ -853,39 +856,9 @@ export function renderBody(body, content, hint = null, markdown = false) {
 // node instead. `container` always stays the scroll-position/registry
 // reference regardless of where the block physically lands, since `parent`
 // is always a descendant of it.
-// Grok streams BPE pieces (Rac + oon). Inventing a space between every
-// bare pair is what turned "Racoon" into "Rac oon". A single trailing
-// newline is usually a word boundary rather than a paragraph (thinking
-// chunks are often "The\n" + "user\n"); a real blank line (\n\n) is kept.
-// Structural markdown lines (tables/lists/fences/headings) keep their
-// trailing newline - stripping those is what flattened Grok replies into
-// one paragraph and let an unclosed fence swallow the rest of the turn.
-// Keep this in sync with src/grok-messages.js joinStreamText.
-const MARKDOWN_BLOCK_RE = /^\s*(```|#{1,6}\s|[-*+]\s|\d+\.\s|>\s?|\|)|^\s*(-{3,}|\*{3,}|_{3,})\s*$/;
-
-function isMarkdownBlockLine(s) {
-  return MARKDOWN_BLOCK_RE.test(String(s).replace(/\n+$/, ''));
-}
-
-function joinStreamText(existing, next) {
-  const left = existing ?? '';
-  const right = next ?? '';
-  if (!left) return right;
-  if (!right) return left;
-  let a = left;
-  if (a.endsWith('\n') && !a.endsWith('\n\n') && !right.startsWith('\n')) {
-    const withoutNl = a.slice(0, -1);
-    if (isMarkdownBlockLine(withoutNl) || isMarkdownBlockLine(right)) {
-      return a + right;
-    }
-    a = withoutNl;
-    if (/\s$/.test(a) || /^\s/.test(right) || /^[,.;:!?')\]}]/.test(right)) {
-      return a + right;
-    }
-    return `${a} ${right}`;
-  }
-  return a + right;
-}
+//
+// joinStreamText lives in src/stream-join.js (served as /stream-join.js) -
+// Grok token join, also used by grok-messages.js.
 
 // If the last block in `container` is already the same kind of streamed
 // assistant/thinking card, append `text` onto it and return true. Used

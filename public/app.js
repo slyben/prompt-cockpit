@@ -1384,6 +1384,15 @@ streamEl.addEventListener('mouseup', (event) => {
   });
 });
 
+// Markdown-rendered bodies store the source on dataset.rawText (stream-view.js
+// appendBlock). textContent of a <p>/<ul>/<table> tree concatenates without
+// block separators, so copy/suggestion must prefer the raw string.
+function assistantBodySource(el) {
+  if (!el) return '';
+  if (Object.prototype.hasOwnProperty.call(el.dataset, 'rawText')) return el.dataset.rawText;
+  return el.textContent || '';
+}
+
 // Copy the most recent assistant reply's text - reads the DOM (not a
 // client-side message array; stream-view.js doesn't keep one, see its
 // module comment) since the DOM is the one place already correct across
@@ -1396,7 +1405,7 @@ copyLastBtn.addEventListener('click', () => {
   const last = replies[replies.length - 1];
   if (!last) return;
   const rect = copyLastBtn.getBoundingClientRect();
-  navigator.clipboard.writeText(last.textContent || '').then(() => {
+  navigator.clipboard.writeText(assistantBodySource(last)).then(() => {
     showCopyToast(rect.left, rect.bottom);
   }).catch(() => {});
 });
@@ -2553,7 +2562,7 @@ function computePromptSuggestion() {
   const replies = streamEl.querySelectorAll('.msg.assistant:not(.delegated-reply) .body');
   const last = replies[replies.length - 1];
   if (!last) return null;
-  const match = (last.textContent || '').match(/^\s*[-*]\s*\[ \]\s*(.+)$/m);
+  const match = assistantBodySource(last).match(/^\s*[-*]\s*\[ \]\s*(.+)$/m);
   return match ? match[1].trim() : null;
 }
 

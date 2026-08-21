@@ -3,19 +3,28 @@
 // thinking, not user messages). Hand-rolled like everything else in this
 // app's public/*.js (no bundler, no npm deps shipped to the client) rather
 // than pulling in marked/markdown-it - this only needs to cover what Claude
-// actually produces in prose replies: headers, bold/italic, inline code,
-// fenced code blocks, links, lists, blockquotes, horizontal rules,
-// GFM pipe tables, paragraphs. Not a spec-complete CommonMark implementation.
+// actually produces in prose replies: headers, bold/italic (including ***),
+// inline code, fenced code blocks (``` / ~~~), links (optional title stripped
+// from href), image markup as a labeled link (never <img>), lists,
+// blockquotes, horizontal rules, GFM pipe tables, paragraphs. Not a
+// spec-complete CommonMark implementation. Underscore italic/bold is
+// word-boundary-only so snake_case identifiers stay literal.
 //
 // Safety: every leaf is built via textContent/createElement, never
 // innerHTML - so there's no HTML-injection surface even though the source
 // text is model-generated and not sanitized upstream.
 
 const INLINE_CODE_RE = /`([^`]+)`/;
-const BOLD_RE = /\*\*([^*]+)\*\*|__([^_]+)__/;
-const ITALIC_RE = /\*([^*]+)\*|_([^_]+)_/;
+const BOLD_EM_RE = /\*\*\*(.+?)\*\*\*/;
+const BOLD_RE = /\*\*(.+?)\*\*|(?<![\w])__(.+?)__(?![\w])/;
+const ITALIC_RE = /\*(.+?)\*|(?<![\w])_(?!_)(.+?)_(?![\w])/;
 const STRIKE_RE = /~~([^~]+)~~/;
-const LINK_RE = /\[([^\]]+)\]\(([^)]+)\)/;
+// Dest allows one nested (...) so `javascript:alert(1)` is one dest, not a
+// cut at the first `)`. Optional GFM title stays in this capture and is
+// stripped by parseLinkDestination.
+const LINK_DEST_RE = /(?:<[^>]+>|(?:[^()]+|\([^()]*\))+)/;
+const IMAGE_RE = new RegExp(`!\\[([^\\]]*)\\]\\((${LINK_DEST_RE.source})\\)`);
+const LINK_RE = new RegExp(`\\[([^\\]]+)\\]\\((${LINK_DEST_RE.source})\\)`);
 // GFM backslash-escape: a backslash before ASCII punctuation is a literal
 // escaped character, not a marker - e.g. "\*not bold\*" shouldn't italicize.
 const ESCAPE_RE = /\\([\\`*_{}[\]()#+\-.!~>])/;
@@ -37,6 +46,20 @@ export function isSafeHref(raw) {
   return SAFE_HREF_RE.test(cleaned) ? cleaned : null;
 }
 
+// GFM optional title: `[text](url "title")` / `[text](url 'title')` /
+// `<url>`. The title is display-only and must not land in href.
+function parseLinkDestination(raw) {
+  const s = String(raw ?? '').trim();
+  if (!s) return '';
+  if (s.startsWith('<')) {
+    const end = s.indexOf('>');
+    if (end !== -1) return s.slice(1, end).trim();
+  }
+  const titled = /^(\S+)(?:\s+(?:"[^"]*"|'[^']*'))$/.exec(s);
+  if (titled) return titled[1];
+  return s;
+}
+
 // Finds the earliest-matching inline marker in `text` among the patterns
 // above, applies it, and recurses on both sides - so e.g. "**bold `code`**"
 // nests a <code> inside the <strong> instead of only matching the outermost
@@ -46,10 +69,12 @@ function renderInline(text, out) {
   const candidates = [
     { re: ESCAPE_RE, tag: 'esc' },
     { re: INLINE_CODE_RE, tag: 'code' },
+    { re: IMAGE_RE, tag: 'img' },
+    { re: LINK_RE, tag: 'a' },
+    { re: BOLD_EM_RE, tag: 'strongem' },
     { re: BOLD_RE, tag: 'strong' },
     { re: ITALIC_RE, tag: 'em' },
     { re: STRIKE_RE, tag: 's' },
-    { re: LINK_RE, tag: 'a' },
   ];
   let earliest = null;
   for (const c of candidates) {
@@ -64,24 +89,32 @@ function renderInline(text, out) {
   if (match.index > 0) out.append(document.createTextNode(text.slice(0, match.index)));
   if (tag === 'esc') {
     out.append(document.createTextNode(match[1]));
-  } else if (tag === 'a') {
-    const href = isSafeHref(match[2]);
+  } else if (tag === 'a' || tag === 'img') {
+    const href = isSafeHref(parseLinkDestination(match[2]));
+    const label = match[1];
     if (href) {
       const a = document.createElement('a');
       a.href = href;
       a.target = '_blank';
       a.rel = 'noopener noreferrer';
-      renderInline(match[1], a);
+      renderInline(label, a);
       out.append(a);
     } else {
       // Unsafe scheme (javascript:, data:, vbscript:, ...) - render the
-      // link label as plain text instead of dropping the content.
-      renderInline(match[1], out);
+      // link/image label as plain text instead of dropping the content.
+      // Images are links-or-text, never <img> (no remote fetch from a reply).
+      renderInline(label, out);
     }
   } else if (tag === 'code') {
     const code = document.createElement('code');
     code.textContent = match[1];
     out.append(code);
+  } else if (tag === 'strongem') {
+    const strong = document.createElement('strong');
+    const em = document.createElement('em');
+    renderInline(match[1], em);
+    strong.append(em);
+    out.append(strong);
   } else {
     const el = document.createElement(tag);
     renderInline(match[1] ?? match[2], el);
@@ -205,19 +238,37 @@ export function renderMarkdown(text) {
     const line = lines[i];
 
     // Fenced code block - verbatim, no inline parsing inside.
-    const fence = /^```(\w*)/.exec(line);
+    // Backtick or tilde fences. Info string is the rest of the opener up to
+    // the first whitespace (` ```js `, ` ```c++ `, ` ~~~js `). Anything
+    // after that on the same line is a lost newline (Grok joining the first
+    // payload row onto the opener), not a language - ` ```Mode   LastWriteTime`
+    // would otherwise eat "Mode" as data-lang and drop the rest of the
+    // header row. Closing fence must use the same marker character and at
+    // least as many as the opener.
+    const fence = /^(`{3,}|~{3,})([^`~\s]*)(.*)$/.exec(line);
     if (fence) {
       flushParagraph(paraBuf);
+      const marker = fence[1];
+      const markerChar = marker[0];
+      const markerLen = marker.length;
       const codeLines = [];
+      let lang = fence[2];
+      const rest = fence[3];
+      if (rest.trim() !== '') {
+        codeLines.push(lang + rest);
+        lang = '';
+      }
       i++;
-      while (i < lines.length && !/^```/.test(lines[i])) {
+      while (i < lines.length) {
+        const close = /^(`{3,}|~{3,})\s*$/.exec(lines[i]);
+        if (close && close[1][0] === markerChar && close[1].length >= markerLen) break;
         codeLines.push(lines[i]);
         i++;
       }
-      i++; // consume closing fence
+      i++; // consume closing fence (or walk one past EOF if unclosed)
       const pre = document.createElement('pre');
       const code = document.createElement('code');
-      if (fence[1]) code.dataset.lang = fence[1];
+      if (lang) code.dataset.lang = lang;
       code.textContent = codeLines.join('\n');
       pre.append(code);
       root.append(pre);

@@ -24,6 +24,7 @@ import { forkConversation, rewindFiles as rewindFilesSdk, resolveTurnUuid } from
 import { resolveGrokPromptIndex } from './grok-rewind.js';
 import { fetchSessionHistory, countWithinTokenBudget, countRealUserTurns, INITIAL_HISTORY_TOKEN_BUDGET } from './session-history.js';
 import { fetchGrokSessionHistory } from './grok-history.js';
+import { joinStreamText } from './grok-messages.js';
 import { createEventLog, append as appendEvent, replay as replayEvents } from './event-log.js';
 import { createUsageAccumulator, costForUsage } from './usage.js';
 import { contextPayload } from './context-usage.js';
@@ -1024,11 +1025,46 @@ function sanitizeName(s) {
 // side-channel and finalAnswerText()'s own fallback source, so trimming it
 // down here would quietly break both. The "final answer only" trim happens
 // downstream in relayDelegationResult instead.
+//
+// Bug fixed 2026-08-21: this used to push(block.text) unconditionally, one
+// buffer entry per assistant message. That's correct for Claude (one
+// message == one already-complete chunk of narration, per the SDK), but
+// Grok streams its reply one BPE piece at a time - a SEPARATE assistant
+// message per word (grok-messages.js's joinStreamText comment). A Grok
+// delegation's buffer ended up with one entry per word: unreadable once
+// relayDelegationResult joined them with blank lines for the full-trace
+// marker, and finalAnswerText's "last non-empty block" fallback grabbed a
+// single trailing token/punctuation mark (often just ".") instead of the
+// actual last sentence, so the ORIGIN model's relayed "final answer" was
+// garbage too.
+//
+// Fix: mirror exactly how stream-view.js's live rendering already resolves
+// this same ambiguity (appendToLastStreamBlock) - a run of consecutive
+// text-only assistant messages merges via joinStreamText into ONE buffer
+// entry (Grok's per-word chunks re-assemble into real sentences); a
+// non-text block (tool_use/thinking) or any other message type in between
+// closes the run, same as closeGroup() does client-side, so the next text
+// block starts a fresh entry. That keeps genuinely distinct narration
+// steps - the ones separated by a tool call - apart, which is what the
+// "final answer vs full trace" split actually needs to distinguish.
 function collectDelegationText(row, message) {
   const tag = row.pendingResultTags[0]?.tag;
-  if (!tag || message.type !== 'assistant' || !message.message || !Array.isArray(message.message.content)) return;
+  if (!tag) return;
+  if (message.type !== 'assistant' || !message.message || !Array.isArray(message.message.content)) {
+    tag.openTextEntry = false;
+    return;
+  }
   for (const block of message.message.content) {
-    if (block.type === 'text' && block.text) tag.buffer.push(block.text);
+    if (block.type !== 'text' || !block.text) {
+      tag.openTextEntry = false;
+      continue;
+    }
+    if (tag.openTextEntry && tag.buffer.length) {
+      tag.buffer[tag.buffer.length - 1] = joinStreamText(tag.buffer[tag.buffer.length - 1], block.text);
+    } else {
+      tag.buffer.push(block.text);
+    }
+    tag.openTextEntry = true;
   }
 }
 

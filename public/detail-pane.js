@@ -60,6 +60,21 @@ export function initDetailPane({ panel, headerLabel, followLiveBtn, tabButtons, 
   }
   syncOffset();
   window.addEventListener('resize', syncOffset);
+  // The explicit syncOffset() calls above and scattered through setEnabled()/
+  // the drag handlers below/app.js's pre-banner re-measure are each correct
+  // individually, but they only cover the timing gaps we've actually caught
+  // in the wild - a resumed session where a pending approval banner can
+  // arrive before some other width-affecting change (class toggle, style
+  // write, breakpoint switch) has been re-measured slips through all of
+  // them. A ResizeObserver on the pane itself needs no call-site to remember
+  // it: it fires on the pane's real on-screen size the instant it changes,
+  // for any reason, so #approvalBanner's offset can never go stale. Kept
+  // alongside (not instead of) the explicit calls since those are cheap and
+  // some (the isNarrowLayout() 0-when-stacked case) encode logic a bare
+  // resize observation can't.
+  if (typeof ResizeObserver !== 'undefined') {
+    new ResizeObserver(syncOffset).observe(panel);
+  }
 
   if (resizeHandle) {
     let dragStartX = null;
