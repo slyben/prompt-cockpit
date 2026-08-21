@@ -2,14 +2,12 @@
 // resumable-sessions list for the launcher. Split out of server.js unchanged
 // (behavior-wise) into its own route module.
 import * as registry from '../session-registry.js';
-import { listResumableSessions, isValidCwd } from '../session-launcher.js';
-import { listGrokSessions } from '../grok-launcher.js';
-import { fetchSessionHistory } from '../session-history.js';
-import { fetchGrokSessionHistory } from '../grok-history.js';
+import { isValidCwd } from '../session-launcher.js';
 import { getSessionTitle, attachTitles, readSessionTitles } from '../session-titles.js';
 import { isSafeGrokArg } from '../grok-acp.js';
 import { readSessionDefaults } from '../session-defaults.js';
 import { respondJson, readJsonBody, extractToken } from '../http-utils.js';
+import { parseProvider } from '../provider-registry.js';
 
 // Applies this cwd's persisted thinking-budget/auto-continue defaults
 // (session-defaults.js) to a freshly created row - both the plain "new
@@ -40,8 +38,13 @@ export async function seedSessionDefaults(row, defaults) {
 
 export function registerSessionRoutes(router) {
   router.get('/api/resumable', async (req, res, url) => {
-    const provider = url.searchParams.get('provider') === 'grok' ? 'grok' : 'claude';
-    const sessions = provider === 'grok' ? await listGrokSessions() : await listResumableSessions();
+    let provider;
+    try {
+      provider = parseProvider(url.searchParams.get('provider'));
+    } catch (err) {
+      return respondJson(res, 400, { error: err.message });
+    }
+    const sessions = await provider.listResumableSessions();
     // Joins in any durable title (session-titles.js) a past session was
     // given from the resume list or a prior tab - one settings.local.json
     // read per distinct cwd (capped at listResumableSessions' own 30-session
@@ -70,11 +73,14 @@ export function registerSessionRoutes(router) {
     // shouldn't block starting the session - query() itself is the
     // authority on whether resume actually works, this is just the
     // transcript backfill for the client's initial view.
-    const provider = body.provider === 'grok' ? 'grok' : 'claude';
+    let provider;
+    try {
+      provider = parseProvider(body.provider);
+    } catch (err) {
+      return respondJson(res, 400, { error: err.message });
+    }
     const history = body.resume
-      ? await (provider === 'grok'
-        ? fetchGrokSessionHistory(body.resume, cwd)
-        : fetchSessionHistory(body.resume, cwd)).catch(() => null)
+      ? await provider.fetchHistory(body.resume, cwd).catch(() => null)
       : null;
     const model = typeof body.model === 'string' && body.model ? body.model : undefined;
     if (model && !isSafeGrokArg(model)) {
@@ -101,7 +107,7 @@ export function registerSessionRoutes(router) {
     }
     let effort;
     if (typeof body.effort === 'string' && body.effort) {
-      const validEfforts = provider === 'grok' ? registry.GROK_EFFORTS : registry.CLAUDE_EFFORTS;
+      const validEfforts = provider.efforts;
       if (!validEfforts.includes(body.effort)) {
         return respondJson(res, 400, { error: `invalid effort: ${body.effort}` });
       }
@@ -109,7 +115,7 @@ export function registerSessionRoutes(router) {
     }
     let row;
     try {
-      row = registry.createSession({ cwd, resume: body.resume, name, model, provider, effort, history });
+      row = registry.createSession({ cwd, resume: body.resume, name, model, provider: provider.id, effort, history });
     } catch (err) {
       if (err.code === 'ERR_NAME_TAKEN') return respondJson(res, 409, { error: err.message });
       throw err;

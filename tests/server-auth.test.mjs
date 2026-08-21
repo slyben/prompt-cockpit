@@ -142,6 +142,41 @@ test('POST /api/sessions rejects a model or grok effort that is not a safe token
   assert.match((await badEffort.json()).error, /invalid effort/);
 });
 
+test('provider routes preserve omitted-Claude behavior and reject explicit unknown providers', async () => {
+  const cwd = process.cwd();
+  const create = await fetch(`${ORIGIN}/api/sessions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ cwd, provider: 'not-a-provider' }),
+  });
+  assert.equal(create.status, 400);
+  assert.match((await create.json()).error, /unknown provider/);
+
+  for (const endpoint of [
+    '/api/resumable?provider=not-a-provider',
+    '/api/history/test-session?provider=not-a-provider',
+    '/api/history/test-session/markdown?provider=not-a-provider',
+  ]) {
+    const response = await fetch(`${ORIGIN}${endpoint}`);
+    assert.equal(response.status, 400, endpoint);
+    assert.match((await response.json()).error, /unknown provider/);
+  }
+});
+
+test('GET /api/providers keeps provider ids and includes descriptor metadata', async () => {
+  const response = await fetch(`${ORIGIN}/api/providers`);
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.ok(Array.isArray(body.providers));
+  assert.ok(Array.isArray(body.providerDetails));
+  assert.deepEqual(body.providerDetails.map(({ id }) => id), body.providers);
+  for (const detail of body.providerDetails) {
+    assert.equal(typeof detail.label, 'string');
+    assert.equal(typeof detail.capabilities, 'object');
+    assert.ok(Array.isArray(detail.launch.efforts));
+  }
+});
+
 test('a request with a foreign Host is rejected, even with the right Origin', async () => {
   // `fetch` treats Host as a forbidden header and silently overrides it
   // from the URL - can't use it to test this. A raw http.request can

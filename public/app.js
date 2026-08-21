@@ -24,6 +24,13 @@ import { initQueuePanel } from '/queue-panel.js';
 import { createPromptHistoryStore, fuzzyScore } from '/prompt-history.js';
 import { initHistorySearch } from '/history-search.js';
 import { PERMISSION_MODES } from '/permissions.js';
+import { createProviderCatalog } from '/provider-catalog.js';
+
+// Starts with the two providers understood by older servers. The launcher
+// replaces this with /api/providers metadata once that request completes.
+// Never infer Claude from an unrecognized provider id: a newer server may
+// introduce Codex before this browser has provider-specific controls for it.
+let providerCatalog = createProviderCatalog({ providers: ['claude', 'grok'] });
 
 const launcherEl = document.getElementById('launcher');
 const streamWrapEl = document.getElementById('streamWrap'); // #stream + #detailPane side-by-side row (index.html) - this, not #stream itself, now owns the pre-session/session display:none<->flex toggle, so an empty flex:1 row doesn't reserve space on the launcher screen before a session exists
@@ -174,13 +181,13 @@ function selectDelegatedTrace(container, queueId, label, text) {
 // ever has this call's initial prompt/final result, never the subagent's
 // own tool calls as they happen.
 function openAgentTab(block) {
-  if (!currentClaudeSessionId) {
+  if (currentProvider !== 'claude' || !currentProviderSessionId) {
     alert("This session's transcript id isn't known yet - try again in a moment.");
     return;
   }
   const label = typeof block.input?.description === 'string' ? block.input.description : '';
   const url = new URL(`${window.location.origin}/agent-view.html`);
-  url.searchParams.set('claudeSessionId', currentClaudeSessionId);
+  url.searchParams.set('claudeSessionId', currentProviderSessionId);
   url.searchParams.set('toolUseId', block.id);
   if (label) url.searchParams.set('label', label);
   window.open(url, '_blank');
@@ -257,17 +264,15 @@ let selectedAgentName = null;
 let currentModel = null; // set from cockpit:hello/state - see applySession
 let currentProvider = 'claude';
 let currentCwd = null; // set from cockpit:hello/state - see applySession; used by the export-session route
-// The transcript's own session id (session-registry.js's row.claudeSessionId),
-// not the cockpit registry's own `sessionId` - the export route reads the
-// on-disk transcript, which is keyed by this one. Null until the SDK's
-// first system/init message reports it (same "not yet known" window
-// row.claudeSessionId itself has server-side), so #exportBtn stays disabled
-// until then rather than pointing at a 404.
-let currentClaudeSessionId = null;
+// The provider-native conversation id, distinct from Cockpit's live-session
+// id. Older servers call it `claudeSessionId`; newer ones expose the neutral
+// `providerSessionId`. The export route currently uses it as a transcript
+// key, so keep the button disabled until it is known.
+let currentProviderSessionId = null;
 let currentSessionName = null; // session.name - the durable title (session-titles.js), if this session has one
 
 function sessionProviderLabel() {
-  return currentProvider === 'grok' ? 'Grok' : 'Claude';
+  return providerCatalog.label(currentProvider);
 }
 
 // Compose-box addressee: the session's own name when it has one (launcher
@@ -1028,7 +1033,7 @@ function applyModelBadge(session) {
     // "thinking default" fallback below rather than silently dropping the
     // part when session.effort happens to be falsy.
     parts.push(`${session.effort ? (GROK_EFFORT_LABELS[session.effort] || session.effort) : 'default'} effort`);
-  } else {
+  } else if (currentProvider === 'claude') {
     // Three distinct states, not two - 0 is a real explicit "Off" (falsy,
     // so it can't share a branch with "unset"; see THINKING_BUDGET_PRESETS'
     // comment for why 0 vs null actually differ on the SDK side). null/
@@ -1054,6 +1059,10 @@ function applyModelBadge(session) {
           ? `thinking ${formatThinkingTokens(session.maxThinkingTokens)}`
           : 'thinking default',
     );
+  } else if (session.effort) {
+    // Other providers can advertise an effort capability without inheriting
+    // Claude's thinking-budget terminology or defaults.
+    parts.push(`${session.effort} effort`);
   }
   modelBadge.textContent = parts.join(' · ');
   modelBadge.style.display = 'inline-block';
@@ -1112,7 +1121,7 @@ function returnToLauncher() {
   copyLastBtn.style.display = 'none';
   exportBtn.style.display = 'none';
   currentCwd = null;
-  currentClaudeSessionId = null;
+  currentProviderSessionId = null;
   currentSessionName = null;
   sessionLabelErrorEl.style.display = 'none';
   modelBadge.style.display = 'none';
@@ -1256,10 +1265,20 @@ const CLAUDE_EFFORT_LABELS = Object.fromEntries(CLAUDE_EFFORT_OPTIONS.map((o) =>
 // across every session tab a browser might switch between via history nav.
 function fillSettingsEffortSelect(provider) {
   const grok = provider === 'grok';
-  const list = grok ? GROK_EFFORT_OPTIONS : CLAUDE_EFFORT_OPTIONS;
+  const claude = provider === 'claude';
+  const advertisedEfforts = providerCatalog.get(provider)?.launch?.efforts;
+  const list = grok
+    ? GROK_EFFORT_OPTIONS
+    : claude
+      ? CLAUDE_EFFORT_OPTIONS
+      : Array.isArray(advertisedEfforts)
+        ? [{ value: '', label: 'Default' }, ...advertisedEfforts.map((value) => ({ value, label: String(value) }))]
+        : [];
   effortBtn.title = grok
     ? 'Grok reasoning effort. Low is cheaper and faster. High / Extra high spend more on reasoning.'
-    : "Claude's reasoning effort for this session - low is cheaper and faster, high/xhigh/max spend more on thinking depth and thoroughness. Default leaves it up to the model.";
+    : claude
+      ? "Claude's reasoning effort for this session - low is cheaper and faster, high/xhigh/max spend more on thinking depth and thoroughness. Default leaves it up to the model."
+      : `${providerCatalog.label(provider)} reasoning effort for this session.`;
   effortBtn.innerHTML = '';
   for (const opt of list) {
     const option = document.createElement('option');
@@ -1414,9 +1433,9 @@ copyLastBtn.addEventListener('click', () => {
 // fetch+Blob dance, since the /markdown route sets content-disposition:
 // attachment itself (src/server.js), so the browser just downloads it.
 exportBtn.addEventListener('click', () => {
-  if (!sessionId || !currentClaudeSessionId) return;
-  const params = new URLSearchParams({ cwd: currentCwd || '', provider: currentProvider || 'claude' });
-  window.location.href = `/api/history/${currentClaudeSessionId}/markdown?${params}`;
+  if (!sessionId || !currentProviderSessionId) return;
+  const params = new URLSearchParams({ cwd: currentCwd || '', provider: currentProvider });
+  window.location.href = `/api/history/${currentProviderSessionId}/markdown?${params}`;
 });
 
 // Cancel the in-flight turn - Grok CLI's Esc/Ctrl+C equivalent (see
@@ -1720,18 +1739,16 @@ async function loadEarlierHistory() {
 }
 
 function rewindButtonLabel() {
-  return currentProvider === 'grok' ? '⤴ fork back to here (conversation only)' : null;
+  return hasFileCheckpointing ? null : '⤴ fork back to here (conversation only)';
 }
 
 async function onRewindClick(turnIndex) {
   const fileNote = hasFileCheckpointing
     ? 'Also reverts files to this point.'
-    : currentProvider === 'grok'
-      ? 'Files on disk are left as-is. This session stays open.'
-      : 'This session has no file snapshots (resumed session) - conversation only, files are untouched.';
-  const lead = currentProvider === 'grok'
-    ? 'Fork back to here? Opens a new Grok session at this turn.'
-    : 'Rewind here? Opens a new session forked at this point.';
+    : 'Files on disk are left as-is. This session stays open.';
+  const lead = hasFileCheckpointing
+    ? 'Rewind here? Opens a new session forked at this point.'
+    : `Fork back to here? Opens a new ${sessionProviderLabel()} session at this turn.`;
   if (!confirm(`${lead} ${fileNote}`)) return;
   const res = await fetch(`/api/sessions/${sessionId}/rewind`, {
     method: 'POST',
@@ -1740,7 +1757,7 @@ async function onRewindClick(turnIndex) {
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
-    const verb = currentProvider === 'grok' ? 'fork' : 'rewind';
+    const verb = hasFileCheckpointing ? 'rewind' : 'fork';
     alert(`${verb} failed: ${err.error || res.statusText}`);
     return;
   }
@@ -1767,13 +1784,17 @@ function formatRelativeTime(ms) {
 }
 
 function selectedProvider() {
-  return startProviderSelect.value === 'grok' ? 'grok' : 'claude';
+  return providerCatalog.validate(startProviderSelect.value);
 }
 
 let resumableGen = 0;
 
 async function loadResumable() {
   const provider = selectedProvider();
+  if (!provider) {
+    resumeListEl.innerHTML = '';
+    return;
+  }
   const gen = ++resumableGen;
   const res = await fetch(`/api/resumable?provider=${encodeURIComponent(provider)}`);
   const sessions = await res.json();
@@ -1831,7 +1852,13 @@ async function loadResumable() {
     viewBtn.title = 'Read-only transcript, no live session started';
     viewBtn.addEventListener('click', (event) => {
       event.stopPropagation();
-      historyPane.open({ sessionId: s.sessionId, cwd: s.cwd, label: s.title || s.label, provider });
+      historyPane.open({
+        sessionId: s.sessionId,
+        cwd: s.cwd,
+        label: s.title || s.label,
+        provider,
+        assistantLabel: providerCatalog.label(provider),
+      });
     });
     li.append(info, renameBtn, viewBtn);
     resumeListEl.append(li);
@@ -1854,8 +1881,31 @@ const GROK_START_MODELS = [
   { value: 'grok-4.6', label: 'Grok 4.6' },
 ];
 
+function launchConfig(provider) {
+  return providerCatalog.get(provider)?.launch || {};
+}
+
+function launchKind(provider) {
+  // These are the only launch contracts the current frontend knows how to
+  // serialize. New providers stay selectable and get a neutral launcher
+  // until their metadata describes additional controls.
+  return provider === 'grok' ? 'grok' : provider === 'claude' ? 'claude' : 'generic';
+}
+
+function launchModels(provider) {
+  const advertised = launchConfig(provider).models;
+  if (Array.isArray(advertised) && advertised.length) {
+    return advertised.map((item) => typeof item === 'string'
+      ? { value: item, label: item }
+      : { value: item?.value ?? item?.id ?? '', label: item?.label ?? item?.id ?? 'Default model' });
+  }
+  if (provider === 'grok') return GROK_START_MODELS;
+  if (provider === 'claude') return CLAUDE_START_MODELS;
+  return [{ value: '', label: 'Default model' }];
+}
+
 function fillStartModels() {
-  const list = startProviderSelect.value === 'grok' ? GROK_START_MODELS : CLAUDE_START_MODELS;
+  const list = launchModels(selectedProvider());
   startModelSelect.innerHTML = '';
   for (const item of list) {
     const opt = document.createElement('option');
@@ -1874,7 +1924,10 @@ function fillStartModels() {
 // after module load finishes) so "effort" means the same thing whether it's
 // picked before or during a session.
 function fillStartEffort() {
-  const grok = startProviderSelect.value === 'grok';
+  const provider = selectedProvider();
+  const grok = provider === 'grok';
+  const claude = provider === 'claude';
+  const generic = !grok && !claude;
   const list = grok ? GROK_EFFORT_OPTIONS : THINKING_BUDGET_PRESETS;
   startEffortSelect.title = grok
     ? 'Grok reasoning effort for this session. Low is cheaper and faster; High/Extra high spend more on reasoning.'
@@ -1888,7 +1941,7 @@ function fillStartEffort() {
   // label, and sits right next to startClaudeEffortSelect's own bare
   // "Default" option, so a plain "Default" here read as ambiguous between
   // the two dials. Spelled out here only, not in the shared preset list.
-  for (const item of list) {
+  for (const item of generic ? [] : list) {
     const opt = document.createElement('option');
     opt.value = item.value;
     opt.textContent = (!grok && item.value === '') ? 'Default Thinking *' : item.label;
@@ -1897,8 +1950,9 @@ function fillStartEffort() {
   // Claude's dedicated effort dial - a real, separate SDK option (not the
   // thinking-token budget above) - only shown for Claude; Grok's own effort
   // concept already lives in the shared slot above.
-  startClaudeEffortSelect.style.display = grok ? 'none' : '';
-  if (!grok) {
+  startEffortSelect.style.display = generic ? 'none' : '';
+  startClaudeEffortSelect.style.display = claude ? '' : 'none';
+  if (claude) {
     startClaudeEffortSelect.innerHTML = '';
     for (const opt of CLAUDE_EFFORT_OPTIONS) {
       const option = document.createElement('option');
@@ -1922,24 +1976,29 @@ fillStartModels();
 // one provider standing, hides the dropdown entirely rather than showing a
 // pointless single-choice select.
 async function applyAvailableProviders() {
-  let providers;
   try {
     const res = await fetch('/api/providers');
     if (!res.ok) return;
     const data = await res.json();
-    providers = Array.isArray(data.providers) && data.providers.length ? data.providers : ['claude'];
-  } catch {
-    return; // launch-time hiccup - leave the dropdown as-is, Claude still works
-  }
-  for (const opt of Array.from(startProviderSelect.options)) {
-    if (!providers.includes(opt.value)) opt.remove();
-  }
-  if (providers.length <= 1) {
-    startProviderSelect.style.display = 'none';
-    startProviderSelect.value = providers[0] || 'claude';
+    const catalog = createProviderCatalog(data);
+    const providers = catalog.list();
+    if (!providers.length) return;
+    providerCatalog = catalog;
+    const selected = providerCatalog.validate(startProviderSelect.value) || providers[0].id;
+    startProviderSelect.innerHTML = '';
+    for (const provider of providers) {
+      const option = document.createElement('option');
+      option.value = provider.id;
+      option.textContent = provider.label;
+      startProviderSelect.append(option);
+    }
+    startProviderSelect.value = selected;
+    startProviderSelect.style.display = providers.length <= 1 ? 'none' : '';
     fillStartModels();
     fillStartEffort();
     loadResumable();
+  } catch {
+    return; // launch-time hiccup - leave the dropdown as-is, Claude still works
   }
 }
 applyAvailableProviders();
@@ -1953,6 +2012,10 @@ startBtn.addEventListener('click', () => {
   // have to resolve.
   const model = startModelSelect.value || undefined;
   const provider = selectedProvider();
+  if (!provider) {
+    alert('Select an available provider before starting a session.');
+    return;
+  }
   // Empty ("Default effort"/"Thinking: off") means skip it entirely below -
   // same "don't send what was never picked" rule as model above.
   const effortValue = startEffortSelect.value || undefined;
@@ -1961,6 +2024,7 @@ startBtn.addEventListener('click', () => {
   // session addresses this one by via `/ask <Name>: ...`. Optional: an
   // unnamed session just can't be delegated to, same as today.
   const name = startNameInput.value.trim() || undefined;
+  const kind = launchKind(provider);
   startSession({
     cwd,
     model,
@@ -1969,8 +2033,8 @@ startBtn.addEventListener('click', () => {
     // Grok's effort rides the shared slot; Claude's rides its own dedicated
     // select - both are real creation-time `effort` values now (session.js
     // forwards Claude's into query()'s options too, see CLAUDE_EFFORTS).
-    effort: provider === 'grok' ? effortValue : claudeEffortValue,
-    thinkingBudget: provider === 'grok' ? undefined : effortValue,
+    effort: kind === 'grok' ? effortValue : kind === 'claude' ? claudeEffortValue : undefined,
+    thinkingBudget: kind === 'claude' ? effortValue : undefined,
   });
 });
 
@@ -2387,10 +2451,15 @@ function shortenCwd(cwd) {
 
 function applySession(session) {
   promptHistory.setCwd(session.cwd); // no-ops if unchanged - safe on every cockpit:state broadcast, not just the first
-  currentProvider = session.provider === 'grok' ? 'grok' : 'claude';
+  // A session can arrive before the async provider catalog refresh, or from
+  // a newer server that advertises a provider this browser has not seen.
+  // Preserve that id and create a neutral descriptor instead of presenting
+  // it as Claude.
+  if (typeof session.provider === 'string' && session.provider) providerCatalog.add(session.provider);
+  currentProvider = providerCatalog.validate(session.provider) || session.provider || currentProvider;
   currentCwd = session.cwd;
-  currentClaudeSessionId = session.claudeSessionId || null;
-  exportBtn.disabled = !currentClaudeSessionId;
+  currentProviderSessionId = session.providerSessionId || session.claudeSessionId || null;
+  exportBtn.disabled = !currentProviderSessionId;
   currentSessionName = session.name || null;
   compose.setDefaultPlaceholder(composePlaceholder());
   copyLastBtn.title = `Copy ${sessionAddressName()}'s most recent reply`;
@@ -2421,10 +2490,9 @@ function applySession(session) {
   currentModel = session.model;
   hasFileCheckpointing = session.hasFileCheckpointing;
   const caps = session.capabilities || {};
-  const grokCapsOff = currentProvider === 'grok';
-  autoContinueLabel.style.display = (caps.autoContinue === false || grokCapsOff) ? 'none' : 'flex';
+  autoContinueLabel.style.display = caps.autoContinue === true ? 'flex' : 'none';
   const thinkingGroup = document.getElementById('thinkingControlsGroup');
-  if (thinkingGroup) thinkingGroup.style.display = caps.thinkingBudget === false ? 'none' : '';
+  if (thinkingGroup) thinkingGroup.style.display = caps.thinkingBudget === true ? '' : 'none';
   const effortGroup = document.getElementById('effortControlsGroup');
   if (effortGroup) effortGroup.style.display = caps.effort ? '' : 'none';
   if (effortBtn) {
@@ -2432,7 +2500,7 @@ function applySession(session) {
     effortBtn.value = session.effort || '';
   }
   for (const tab of document.querySelectorAll('.settings-tab[data-settings-tab="mcp"], .settings-tab[data-settings-tab="plugins"]')) {
-    tab.style.display = caps.mcpToggle === false ? 'none' : '';
+    tab.style.display = caps.mcpToggle === true ? '' : 'none';
   }
   const grokPanel = currentProvider === 'grok';
   const mcpNote = document.getElementById('mcpProviderNote');

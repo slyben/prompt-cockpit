@@ -7,8 +7,6 @@
 // router entries. Split out of server.js unchanged (behavior-wise).
 import * as registry from '../session-registry.js';
 import { PERMISSION_MODES } from '../permissions.js';
-import { fetchSessionHistory } from '../session-history.js';
-import { fetchGrokSessionHistory } from '../grok-history.js';
 import { readAllowRules, addAllowRule, removeAllowRule, formatRule } from '../permission-rules.js';
 import { setSessionTitle } from '../session-titles.js';
 import { setPluginEnabled, readEnabledPlugins } from '../plugin-settings.js';
@@ -17,6 +15,7 @@ import { setSessionDefaults } from '../session-defaults.js';
 import { fileSuggestions, workspaceDiff } from '../sdk-adapter.js';
 import { respondJson, readJsonBody, extractToken } from '../http-utils.js';
 import { seedSessionDefaults } from './sessions.js';
+import { getProvider } from '../provider-registry.js';
 
 export function registerSessionActionRoutes(router) {
   router.any('/api/sessions/:id/:action', async (req, res, url, { id, action }) => {
@@ -137,7 +136,7 @@ export function registerSessionActionRoutes(router) {
         // loaded, which is true regardless of what was last saved (B3). Merge
         // the saved map in here so the panel's toggle reflects what a restart
         // would actually pick up, not just "it's loaded right now".
-        if (row.provider !== 'grok' && Array.isArray(result.plugins)) {
+        if (!getProvider(row.provider).capabilities.pluginToggleViaHandle && Array.isArray(result.plugins)) {
           const enabledMap = await readEnabledPlugins(row.cwd).catch(() => ({}));
           result.plugins = result.plugins.map((plugin) => {
             if (!plugin.source) return plugin;
@@ -156,7 +155,7 @@ export function registerSessionActionRoutes(router) {
       const body = await readJsonBody(req);
       if (!body.pluginKey) return respondJson(res, 400, { error: 'pluginKey required' });
       try {
-        if (row.provider === 'grok') {
+        if (getProvider(row.provider).capabilities.pluginToggleViaHandle) {
           await registry.setHandlePluginEnabled(id, body.pluginKey, Boolean(body.enabled));
         } else {
           await setPluginEnabled(row.cwd, body.pluginKey, Boolean(body.enabled));
@@ -251,8 +250,8 @@ export function registerSessionActionRoutes(router) {
       // same signal (throw a clear error) rather than silently no-op-ing.
       const body = await readJsonBody(req);
       const title = typeof body.title === 'string' ? body.title : '';
-      if (!row.claudeSessionId) {
-        return respondJson(res, 409, { error: 'session has no claude session id yet - try again once it has started' });
+      if (!row.providerSessionId) {
+        return respondJson(res, 409, { error: 'session has no provider session id yet - try again once it has started' });
       }
       // Same MVP5 uniqueness requirement as POST /api/sessions - a rename
       // must not collide with another live session's name in the same cwd
@@ -269,7 +268,7 @@ export function registerSessionActionRoutes(router) {
       try {
         await registry.setSessionName(id, title.trim() || null);
         try {
-          await setSessionTitle(row.cwd, row.claudeSessionId, title);
+          await setSessionTitle(row.cwd, row.providerSessionId, title);
         } catch {
           // ignore - best-effort persistence, see 'thinking' route's comment
         }
@@ -282,7 +281,7 @@ export function registerSessionActionRoutes(router) {
 
     if (action === 'effort' && req.method === 'POST') {
       const body = await readJsonBody(req);
-      const validEfforts = row.provider === 'claude' ? registry.CLAUDE_EFFORTS : registry.GROK_EFFORTS;
+      const validEfforts = getProvider(row.provider).efforts;
       if (!validEfforts.includes(body.effort)) {
         return respondJson(res, 400, { error: `invalid effort: ${body.effort}` });
       }
@@ -392,9 +391,9 @@ export function registerSessionActionRoutes(router) {
           // correctly. A fork is a resume like any other - skipping this
           // left the forked session's own future rewinds targeting the
           // wrong turn.
-          const forkedHistory = row.provider === 'grok'
-            ? await fetchGrokSessionHistory(result.forkedSessionId, row.cwd).catch(() => null)
-            : await fetchSessionHistory(result.forkedSessionId, row.cwd).catch(() => null);
+          const forkedHistory = await getProvider(row.provider)
+            .fetchHistory(result.forkedSessionId, row.cwd)
+            .catch(() => null);
           const forked = registry.createSession({
             cwd: row.cwd,
             resume: result.forkedSessionId,

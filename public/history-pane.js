@@ -31,7 +31,7 @@ export function initHistoryPane({ modal, body, closeButton, titleEl, exportButto
     detailPane.reset(body); // don't leave this session's payload/result sitting next to whatever opens next
   }
 
-  async function open({ sessionId, cwd, label, provider }) {
+  async function open({ sessionId, cwd, label, provider, assistantLabel }) {
     titleEl.textContent = label || sessionId;
     body.innerHTML = '<span class="tool-pending">Loading...</span>';
     detailPane.reset(body); // clear whatever the previously-viewed session (or a failed fetch) left showing before this one's data arrives
@@ -63,7 +63,7 @@ export function initHistoryPane({ modal, body, closeButton, titleEl, exportButto
           onRewindClick: null,
           hasFileCheckpointing: false,
           turnIndexUnreliable: true,
-          assistantLabel: provider === 'grok' ? 'Grok' : 'Claude',
+          assistantLabel: assistantLabel || provider || 'Assistant',
           historical: true, // a fetched transcript, not a live stream - see appendToolCallRow's historical branch
           onSelectToolCall: (container, id) => detailPane.selectToolCall(container, id),
         });

@@ -185,12 +185,15 @@ test('attachClient sends hello then replays buffered messages', () => {
   assert.equal(ws.sent[1].message.subtype, 'init');
 });
 
-test('claudeSessionId on the row tracks message.session_id as messages arrive', () => {
+test('providerSessionId tracks message.session_id and preserves the legacy alias', () => {
   registry._reset();
   const startSessionImpl = fakeStartSession();
   const row = registry.createSession({ cwd: '/tmp', startSessionImpl });
   startSessionImpl.emitMessage({ type: 'system', subtype: 'init', session_id: 'sess-1' });
+  assert.equal(registry.get(row.id).providerSessionId, 'sess-1');
   assert.equal(registry.get(row.id).claudeSessionId, 'sess-1');
+  assert.equal(registry.toSummary(row).providerSessionId, 'sess-1');
+  assert.equal(registry.toSummary(row).claudeSessionId, 'sess-1');
 });
 
 test('an assistant message with usage broadcasts cockpit:usage with running cost/token totals', () => {
@@ -472,6 +475,8 @@ test('hasFileCheckpointing is true only for a freshly-started session, not a res
   // regardless of what the live process is passed.
   const resumed = registry.createSession({ cwd: '/tmp', resume: 'some-claude-session-id', startSessionImpl: fakeStartSession() });
   assert.equal(resumed.hasFileCheckpointing, false);
+  assert.equal(resumed.providerSessionId, 'some-claude-session-id');
+  assert.equal(resumed.claudeSessionId, 'some-claude-session-id');
 });
 
 test('createSession defaults provider to claude; grok disables file checkpointing', () => {

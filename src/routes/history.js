@@ -1,13 +1,12 @@
 // Read-only transcript routes (live or past session, either provider) plus
 // the past-session rename route that has no live registry row to key off.
 // Split out of server.js unchanged (behavior-wise) into its own route module.
-import { fetchSessionHistory } from '../session-history.js';
-import { fetchGrokSessionHistory } from '../grok-history.js';
 import { messagesToMarkdown } from '../transcript-markdown.js';
 import { setSessionTitle } from '../session-titles.js';
 import { isValidCwd } from '../session-launcher.js';
 import { respondJson, readJsonBody } from '../http-utils.js';
 import { findSubagentTranscript, readSubagentTranscript } from '../agent-transcript.js';
+import { parseProvider } from '../provider-registry.js';
 
 export function registerHistoryRoutes(router) {
   router.get('/api/history/:id', async (req, res, url, { id }) => {
@@ -19,11 +18,14 @@ export function registerHistoryRoutes(router) {
     // that matters more for /api/browse, which can enumerate the whole
     // filesystem).
     const cwd = url.searchParams.get('cwd') || process.cwd();
-    const provider = url.searchParams.get('provider') === 'grok' ? 'grok' : 'claude';
+    let provider;
     try {
-      const messages = provider === 'grok'
-        ? await fetchGrokSessionHistory(id, cwd)
-        : await fetchSessionHistory(id, cwd);
+      provider = parseProvider(url.searchParams.get('provider'));
+    } catch (err) {
+      return respondJson(res, 400, { error: err.message });
+    }
+    try {
+      const messages = await provider.fetchHistory(id, cwd);
       return respondJson(res, 200, { messages });
     } catch (err) {
       return respondJson(res, 404, { error: String(err.message || err) });
@@ -35,16 +37,19 @@ export function registerHistoryRoutes(router) {
     // this is that same read, just formatted for the "export .md" button
     // (app.js/history-pane.js) instead of the live stream renderer.
     const cwd = url.searchParams.get('cwd') || process.cwd();
-    const provider = url.searchParams.get('provider') === 'grok' ? 'grok' : 'claude';
+    let provider;
     try {
-      const messages = provider === 'grok'
-        ? await fetchGrokSessionHistory(id, cwd)
-        : await fetchSessionHistory(id, cwd);
+      provider = parseProvider(url.searchParams.get('provider'));
+    } catch (err) {
+      return respondJson(res, 400, { error: err.message });
+    }
+    try {
+      const messages = await provider.fetchHistory(id, cwd);
       const markdown = messagesToMarkdown(messages, {
         title: `Session transcript - ${id}`,
         cwd,
         sessionId: id,
-        assistantLabel: provider === 'grok' ? 'Grok' : 'Claude',
+        assistantLabel: provider.label,
       });
       res.writeHead(200, {
         'content-type': 'text/markdown; charset=utf-8',

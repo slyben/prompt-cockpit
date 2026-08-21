@@ -18,16 +18,14 @@
 // seedSessionDefaults() and the 'thinking'/'auto-continue' routes there) -
 // this module itself stays filesystem-free.
 import { randomUUID, randomBytes, timingSafeEqual } from 'node:crypto';
-import { startSession } from './session.js';
-import { startGrokSession } from './grok-session.js';
 import { forkConversation, rewindFiles as rewindFilesSdk, resolveTurnUuid } from './rewind.js';
 import { resolveGrokPromptIndex } from './grok-rewind.js';
-import { fetchSessionHistory, countWithinTokenBudget, countRealUserTurns, INITIAL_HISTORY_TOKEN_BUDGET } from './session-history.js';
-import { fetchGrokSessionHistory } from './grok-history.js';
+import { countWithinTokenBudget, countRealUserTurns, INITIAL_HISTORY_TOKEN_BUDGET } from './session-history.js';
 import { joinStreamText } from './grok-messages.js';
 import { createEventLog, append as appendEvent, replay as replayEvents } from './event-log.js';
 import { createUsageAccumulator, costForUsage } from './usage.js';
 import { contextPayload } from './context-usage.js';
+import { getProvider, parseProvider, CLAUDE_EFFORTS, GROK_EFFORTS } from './provider-registry.js';
 const sessions = new Map();
 
 // MVP6 seed (backlog.md): a single per-process "handshake secret" minted
@@ -78,16 +76,6 @@ export function isSessionTrusted(row) {
   return Boolean(row.handshakeSecret) && row.handshakeSecret === handshakeSecret;
 }
 
-// `startSessionImpl` defaults to the real SDK-backed session but can be
-// swapped for a stub in tests so unit tests don't spawn a real CLI process.
-// `history` (from server.js's resume flow, already fetched via
-// fetchSessionHistory) seeds the buffer with a recent tail so a resumed
-// session shows its prior conversation immediately rather than starting
-// blank - see loadEarlierHistory() for the rest, on demand.
-function defaultStart(provider) {
-  return provider === 'grok' ? startGrokSession : startSession;
-}
-
 export function createSession({ cwd, resume, name, model, permissionMode, history, provider, effort, startSessionImpl }) {
   // MVP5: authoritative uniqueness check - this function has no `await`
   // before it and none until sessions.set() further down, so this closes
@@ -102,8 +90,11 @@ export function createSession({ cwd, resume, name, model, permissionMode, histor
     err.code = 'ERR_NAME_TAKEN';
     throw err;
   }
-  const resolvedProvider = provider === 'grok' ? 'grok' : 'claude';
-  if (!startSessionImpl) startSessionImpl = defaultStart(resolvedProvider);
+  const providerDescriptor = parseProvider(provider);
+  const resolvedProvider = providerDescriptor.id;
+  // `startSessionImpl` can still be swapped for a stub in tests so unit
+  // tests don't spawn a real CLI process.
+  if (!startSessionImpl) startSessionImpl = providerDescriptor.startSession;
   const id = randomUUID();
   const token = randomUUID();
   const historyShownCount = history ? countWithinTokenBudget(history, INITIAL_HISTORY_TOKEN_BUDGET) : 0;
@@ -121,6 +112,10 @@ export function createSession({ cwd, resume, name, model, permissionMode, histor
     thinkingDisplay: null, // 'summarized' | 'omitted' | null (SDK default when thinking is on)
     state: 'starting', // starting | idle | running | error | closed
     mode: permissionMode || 'default',
+    // Native conversation id reported by the active provider. Keep the
+    // legacy Claude-named alias in sync until older clients/routes have
+    // migrated; shared code should use providerSessionId from here on.
+    providerSessionId: resume || null,
     claudeSessionId: resume || null,
     // See handshakeSecret's own module-level comment above - stamped with
     // the CURRENT canonical value at creation, so a locally-spawned row is
@@ -132,7 +127,7 @@ export function createSession({ cwd, resume, name, model, permissionMode, histor
     // run in a terminal or in a prior cockpit process - has no snapshots
     // for its earlier turns, so file rewind must be off rather than
     // attempted and failed (see rewind() below, which checks this flag).
-    hasFileCheckpointing: resolvedProvider === 'claude' && !resume,
+    hasFileCheckpointing: providerDescriptor.capabilities.fileRewind && !resume,
     // `history` is null here in exactly two cases: no resume was requested
     // (fine, turnIndexOffset is genuinely 0), or a resume WAS requested and
     // fetchSessionHistory threw (server.js's `.catch(() => null)`) - the
@@ -445,6 +440,7 @@ export function getDebugInfo(id) {
 }
 
 export function toSummary(row) {
+  const provider = getProvider(row.provider);
   return {
     id: row.id,
     name: row.name,
@@ -452,6 +448,8 @@ export function toSummary(row) {
     state: row.state,
     mode: row.mode,
     provider: row.provider,
+    providerSessionId: row.providerSessionId,
+    // Backward-compatible response field for existing browser tabs.
     claudeSessionId: row.claudeSessionId,
     hasFileCheckpointing: row.hasFileCheckpointing,
     turnIndexUnreliable: row.turnIndexUnreliable,
@@ -479,15 +477,10 @@ export function toSummary(row) {
     // own comment describes - see forceIdle below for the manual recovery.
     pendingTurnsCount: row.pendingResultTags.length,
     capabilities: {
-      fileRewind: row.provider === 'claude' && row.hasFileCheckpointing,
-      thinkingBudget: row.provider === 'claude',
-      // Both providers support reasoning effort now - Grok as a named tier
-      // (spawn-time flag, grok-acp.js), Claude as the Agent SDK's `effort`
-      // option (session.js), live-adjustable via applyFlagSettings. Distinct
-      // value sets per provider - see GROK_EFFORTS vs CLAUDE_EFFORTS below.
-      effort: true,
-      autoContinue: row.provider === 'claude',
-      mcpToggle: true,
+      ...provider.capabilities,
+      // Checkpointing is session-specific: even a provider that supports
+      // it cannot rewind files for a transcript it resumed midstream.
+      fileRewind: provider.capabilities.fileRewind && row.hasFileCheckpointing,
     },
   };
 }
@@ -639,13 +632,9 @@ export async function setMaxThinkingTokens(id, maxThinkingTokens, thinkingDispla
   );
 }
 
-export const GROK_EFFORTS = ['low', 'medium', 'high', 'xhigh'];
-// Claude's effort ladder (Agent SDK's EffortLevel) - one level wider than
-// Grok's: 'max' is accepted by the SDK type but only actually honored by
-// models that support it (Fable 5, Opus 4.6+, Sonnet 4.6+); on other models
-// the SDK/API silently treats it as 'xhigh' or 'high' rather than erroring,
-// so no server-side model-aware narrowing is done here.
-export const CLAUDE_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
+// Re-exported for callers that used the pre-descriptor constants. New route
+// code should use getProvider(provider).efforts instead.
+export { GROK_EFFORTS, CLAUDE_EFFORTS };
 
 export async function setEffort(id, effort) {
   return queryPassthrough(id, (row) => row.handle.query.setEffort(effort), { effort });
@@ -688,11 +677,10 @@ export function resolveApproval(id, requestId, decision) {
 export async function loadEarlierHistory(id, fetchHistoryImpl) {
   const row = sessions.get(id);
   if (!row) throw new Error(`unknown session: ${id}`);
-  if (!row.claudeSessionId) throw new Error('session has no claude session id yet');
+  if (!row.providerSessionId) throw new Error('session has no provider session id yet');
 
-  const fetchHistory = fetchHistoryImpl
-    || (row.provider === 'grok' ? fetchGrokSessionHistory : fetchSessionHistory);
-  const full = await fetchHistory(row.claudeSessionId, row.cwd);
+  const fetchHistory = fetchHistoryImpl || getProvider(row.provider).fetchHistory;
+  const full = await fetchHistory(row.providerSessionId, row.cwd);
   const earlier = full.slice(0, Math.max(0, full.length - row.historyShownCount));
   row.historyTotal = full.length;
   row.historyShownCount = full.length;
@@ -710,7 +698,7 @@ export async function loadEarlierHistory(id, fetchHistoryImpl) {
 export async function rewind(id, turnIndex, { dryRun = false } = {}) {
   const row = sessions.get(id);
   if (!row) throw new Error(`unknown session: ${id}`);
-  if (!row.claudeSessionId) throw new Error('session has no claude session id yet');
+  if (!row.providerSessionId) throw new Error('session has no provider session id yet');
   if (row.turnIndexUnreliable) {
     throw new Error('could not read this session\'s prior transcript when it started, so turn numbering cannot be trusted - rewind is disabled for it. Resuming it again may resolve this.');
   }
@@ -731,7 +719,7 @@ export async function rewind(id, turnIndex, { dryRun = false } = {}) {
     };
   }
 
-  const userMessageId = await resolveTurnUuid(row.claudeSessionId, row.cwd, turnIndex);
+  const userMessageId = await resolveTurnUuid(row.providerSessionId, row.cwd, turnIndex);
 
   let filesResult = null;
   if (row.hasFileCheckpointing) {
@@ -740,7 +728,7 @@ export async function rewind(id, turnIndex, { dryRun = false } = {}) {
 
   let fork = null;
   if (!dryRun) {
-    fork = await forkConversation(row.claudeSessionId, userMessageId);
+    fork = await forkConversation(row.providerSessionId, userMessageId);
   }
 
   return { filesResult, forkedSessionId: fork ? fork.sessionId : null };
@@ -815,7 +803,10 @@ function setState(id, state) {
 function handleMessage(id, message) {
   const row = sessions.get(id);
   if (!row) return;
-  if (message.session_id) row.claudeSessionId = message.session_id;
+  if (message.session_id) {
+    row.providerSessionId = message.session_id;
+    row.claudeSessionId = message.session_id;
+  }
   // The CLI can move itself out of the mode it was started/set in (e.g.
   // accepting a plan exits `plan`) without any setPermissionMode() call
   // from us - previously only session.js's own private `currentMode`
