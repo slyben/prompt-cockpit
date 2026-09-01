@@ -108,6 +108,7 @@ export function initTurnChart({ panel, svg, axisEl, axisRightEl, initialAxisPosi
   // disappearing or reflowing the rest of the graph.
   let excludeCacheMisses = excludeCacheMissCheckbox ? excludeCacheMissCheckbox.checked : false;
   let expandedBySelection = []; // tool-block elements the current selection expanded, so selecting a new bar (or none) can fold just those back
+  let keepOpenGroups = []; // groups the current selection marked dataset.keepOpen (see selectIndex) - cleared in clearHighlights regardless of expand state, since it tracks "the selection is showing this," not "we opened this"
   let highlightedNodes = []; // wrap elements the current selection is highlighting - kept around so scroll/resize can reposition their boxes (B4)
   const highlightBoxes = [];
   // Set by render() each call; null in per-turn mode, or the bucket array
@@ -302,10 +303,22 @@ export function initTurnChart({ panel, svg, axisEl, axisRightEl, initialAxisPosi
     // first so two blocks sharing one group (a multi-tool-call turn) only
     // click that group's toggle once, not once per block.
     const groupsToExpand = new Set();
+    // Every ancestor group the selection touches, expanded or not - this is
+    // the "1st tier" set: while any of these is the most recent group in its
+    // container, stream-view.js's openGroup skips its own auto-fold for it
+    // (dataset.keepOpen, set below) so a tool call landing right after this
+    // click doesn't fold the very thing the click just opened. Broader than
+    // groupsToExpand on purpose: an already-expanded group (e.g. it's the
+    // in-flight one) still needs the flag even though there's nothing to
+    // click open.
+    const groupsToKeepOpen = new Set();
     let firstToolCallId = null;
     nodes.forEach((wrap) => {
       const group = wrap.closest('.msg.group.collapsible');
-      if (group && !group.classList.contains('expanded')) groupsToExpand.add(group);
+      if (group) {
+        groupsToKeepOpen.add(group);
+        if (!group.classList.contains('expanded')) groupsToExpand.add(group);
+      }
       // A turn can tag several tool-call rows with the same index (one
       // assistant message emitting multiple tool_use blocks all shares one
       // turnPointIndex - see app.js's nextPointIndex() call site) - pin the
@@ -313,6 +326,10 @@ export function initTurnChart({ panel, svg, axisEl, axisRightEl, initialAxisPosi
       // already uses below for scrolling.
       if (!firstToolCallId && wrap.dataset.toolCallId) firstToolCallId = wrap.dataset.toolCallId;
       if (!firstNode) firstNode = wrap;
+    });
+    groupsToKeepOpen.forEach((group) => {
+      group.dataset.keepOpen = 'true';
+      keepOpenGroups.push(group);
     });
     groupsToExpand.forEach((group) => {
       group.click(); // same toggle-handler trick, this time stream-view.js's setGroupExpanded
@@ -359,6 +376,11 @@ export function initTurnChart({ panel, svg, axisEl, axisRightEl, initialAxisPosi
   function clearHighlights() {
     highlightBoxes.splice(0).forEach((box) => box.remove());
     highlightedNodes = [];
+    // Clear the flag unconditionally (not gated on expand state, unlike
+    // expandedBySelection below) - the selection is moving off these groups
+    // either way, so stream-view.js's own auto-fold should resume treating
+    // them normally the moment a newer group opens.
+    keepOpenGroups.splice(0).forEach((group) => delete group.dataset.keepOpen);
     // Fold back only what's still actually expanded (B5) - if the user (or
     // auto-collapse) already collapsed one of these manually since this
     // selection opened it, its own toggle handler already fired once; firing

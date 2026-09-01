@@ -699,7 +699,15 @@ function openGroup(container, firedAtMs = null) {
   if (autoCollapsePreviousGroup) {
     const existing = groupsByContainer.get(container) || [];
     const previous = existing[existing.length - 1];
-    if (previous && previous.expanded) setGroupExpanded(previous, false);
+    // dataset.keepOpen (set/cleared by turn-chart.js's selectIndex/clearHighlights)
+    // means a chart-bar click just expanded this specific group to show the
+    // caller something - if it's also still the most recent group, a new
+    // tool call landing a beat later used to auto-fold it right back out
+    // from under the click (and, mid-race, could leave positionHighlights
+    // measuring a just-collapsed zero-height node - "the highlight didn't
+    // show"). Skip the auto-fold while the flag is set; it resumes the moment the
+    // selection moves elsewhere.
+    if (previous && previous.expanded && !previous.wrap.dataset.keepOpen) setGroupExpanded(previous, false);
   }
 
   const wasAtBottom = isScrolledToBottom(container);
