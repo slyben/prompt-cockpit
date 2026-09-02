@@ -12,7 +12,7 @@ const REQUEST_TIMEOUT_MS = 20 * 60 * 1000;
 const CLIENT_INFO = {
   name: 'prompt_cockpit',
   title: 'Prompt Cockpit',
-  version: '0.1.3',
+  version: '0.1.5', // keep in sync with package.json's version
 };
 
 function pathCandidates(pathVar, installDir, names) {
@@ -127,12 +127,12 @@ export async function unwrapCodexShimAsync(command, {
   return null;
 }
 
-export function resolveCodexSpawn(resolveBin = resolveCodexBin) {
+function resolveCodexSpawn(resolveBin = resolveCodexBin) {
   const command = resolveBin();
   return unwrapCodexShim(command) || { command, prefixArgs: [] };
 }
 
-export async function resolveCodexSpawnAsync(resolveBin = resolveCodexBinAsync) {
+async function resolveCodexSpawnAsync(resolveBin = resolveCodexBinAsync) {
   const command = await resolveBin();
   return await unwrapCodexShimAsync(command) || { command, prefixArgs: [] };
 }
@@ -259,7 +259,7 @@ export function createCodexRpcClient({ writeLine, subscribeLine }) {
   };
 }
 
-export function spawnCodexAppServer({ spawnImpl = spawn, resolveSpawn = resolveCodexSpawn } = {}) {
+function spawnCodexAppServer({ spawnImpl = spawn, resolveSpawn = resolveCodexSpawn } = {}) {
   const { command, prefixArgs } = resolveSpawn();
   const proc = spawnImpl(command, [...prefixArgs, 'app-server'], {
     env: process.env,

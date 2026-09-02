@@ -98,7 +98,12 @@
   .tool-row-meta { flex: 0 0 auto; }
   .tool-row-duration { flex: 0 0 auto; font-variant-numeric: tabular-nums; color: var(--muted); min-width: 3.5em; text-align: right; }
   .tool-row-status { flex: 0 0 auto; width: 1em; text-align: center; }
-  .tool-row-pending .tool-row-status { color: var(--accent); }
+  /* Same hard on/off blink as the Tasks tab's in-progress dot
+     (style-panels.css's task-status-blink keyframe, reused here rather than
+     duplicated - both stylesheets load on every page) and the same
+     deliberate prefers-reduced-motion override: "still running" is a
+     status signal, not decoration. */
+  .tool-row-pending .tool-row-status { color: var(--accent); animation: task-status-blink 1s steps(1, end) infinite; }
   .tool-row-error { color: var(--error); }
   .tool-row-orphan { color: var(--muted); font-style: italic; cursor: default; }
   .tool-row-orphan:hover { background: none; }

@@ -4,6 +4,31 @@
 // of drifting apart via copy-paste.
 import { createResultEpochTracker } from '../src/result-epoch.js';
 
+// Turn-tracking assertions used to read a registry-side
+// `row.pendingResultTags` array. That array is gone - result-epoch.js is
+// now the single owner of both turn ORDER and the delegation tags attached
+// to a turn (see its module comment) - so these three read the same facts
+// off the handle's tracker instead. Kept here rather than inlined so
+// session-registry.test.mjs and delegation.test.mjs assert against one
+// spelling of "what is this row still waiting on".
+
+// Turns this row still expects a `result` for, in the order they'll run.
+export function pendingTurnIds(row) {
+  return row.handle.turns.pendingQueueIds();
+}
+
+export function pendingTurnCount(row) {
+  return row.handle.turns.pendingCount;
+}
+
+// The delegation tag of the in-flight (oldest still-queued) turn, or null
+// when that turn is an ordinary human/auto-continue one.
+export function frontDelegationTag(row) {
+  const turns = row.handle.turns;
+  const front = turns.frontPending();
+  return front ? turns.peekTag(front.queueId) : null;
+}
+
 export function fakeWs() {
   return {
     OPEN: 1,
@@ -41,23 +66,34 @@ export function fakeStartSession({ rejectModes = new Set(), usageExperimental, m
   const resolvers = new Map();
   let mcpAuthPending = [];
   const epochTracker = createResultEpochTracker();
+  // session.js's drainLocalQueue: anything still in the visible queue was
+  // never handed to the CLI, so no result is coming for it.
+  const drainLocalQueue = () => {
+    for (const entry of impl.queue || []) epochTracker.remove(entry.id);
+    impl.queue = [];
+  };
   const impl = (opts) => {
     callbacks = opts;
     impl.lastOpts = opts;
     mode = opts.permissionMode || 'default';
     return {
       ...(withMcpAuthPending ? { getMcpAuthPending: () => mcpAuthPending } : {}),
+      // Mirrors every real provider handle's `turns` (session.js,
+      // grok-session.js, codex-session.js): result-epoch.js owns turn order
+      // AND the delegation tags session-registry.js's pushTurn attaches, so
+      // the registry has no parallel copy of its own to keep in lockstep.
+      turns: epochTracker,
       pushInput: (text) => {
         // Mirrors session.js's real pushInput now returning `null` (not a
         // queueId) once the queue is closed - see the 2026-08-24 review fix
-        // for the pendingResultTags desync this used to cause.
+        // for the turn-tracking desync this used to cause.
         if (impl.closed) return null;
         impl.lastInput = text;
         impl.allInputs = impl.allInputs || [];
         impl.allInputs.push(text);
         // Mirrors session.js's pushInput now returning a queueId so
-        // registry.js's pendingResultTags/removeQueued/reorderQueue/sendNow
-        // mirroring logic has something real to key off in tests.
+        // result-epoch.js's turn tracking (and registry.js's removeQueued/
+        // sendNow tag handling) has something real to key off in tests.
         impl.allQueueIds = impl.allQueueIds || [];
         const queueId = `q-${impl.allQueueIds.length}`;
         impl.allQueueIds.push(queueId);
@@ -67,14 +103,24 @@ export function fakeStartSession({ rejectModes = new Set(), usageExperimental, m
       close: () => {
         impl.closed = true;
       },
+      // Mirrors session.js's real interrupt(): "stop" means stop
+      // everything, so it drains its OWN local queue (dropping those turns
+      // from the turn tracker) before the interrupt itself. The registry
+      // only fails their delegation tags afterwards - it no longer keeps a
+      // copy of the queue order to splice, so a double that skipped this
+      // would leave the tracker claiming turns Stop already cancelled.
       interrupt: async () => {
         impl.interrupted = (impl.interrupted || 0) + 1;
+        drainLocalQueue();
       },
-      // Mirrors session.js's real forceIdle: local bookkeeping reset plus
-      // a result-generation bump so a late `result` cannot steal a tag
-      // pushed after recovery (result-epoch.js).
+      // Mirrors session.js's real forceIdle: drain the never-sent local
+      // queue first (those turns must NOT land in `abandoned`, or a later
+      // live result could FIFO-match one), then bump the result generation
+      // so a late `result` cannot steal a tag pushed after recovery
+      // (result-epoch.js).
       forceIdle: () => {
         impl.forceIdleCalls = (impl.forceIdleCalls || 0) + 1;
+        drainLocalQueue();
         epochTracker.forceIdle();
         callbacks.onStateChange('idle');
       },
@@ -157,7 +203,15 @@ export function fakeStartSession({ rejectModes = new Set(), usageExperimental, m
     callbacks.onMessage(message);
   };
   impl.emitState = (state) => callbacks.onStateChange(state);
-  impl.emitError = (err) => callbacks.onError(err);
+  // Mirrors production exactly (session.js/grok-session.js/codex-session.js
+  // all call onStateChange('error') immediately before onError(err)) - a
+  // fake that only called onError masked a real bug where setState's own
+  // row-reap ran first and left onError's handleError with nothing to clean
+  // up (2026-09-02 review, finding #1).
+  impl.emitError = (err) => {
+    callbacks.onStateChange('error');
+    callbacks.onError(err);
+  };
   // Mirrors session.js's canUseTool routing for ExitPlanMode: registers a
   // pending resolver and fires onApprovalRequest, same as the real thing.
   impl.emitApprovalRequest = (input) => {

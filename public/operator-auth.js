@@ -28,7 +28,10 @@ export function getOperatorToken() {
   }
 }
 
-export function setOperatorToken(value) {
+// Not exported - only initOperatorGate's submit handler (below, in this
+// file) calls it; every other module goes through appendOperatorQuery/the
+// patched fetch instead of setting the token directly.
+function setOperatorToken(value) {
   const trimmed = (value || '').trim();
   try {
     if (trimmed) localStorage.setItem(STORAGE_KEY, trimmed);
@@ -36,11 +39,6 @@ export function setOperatorToken(value) {
   } catch {
     // private mode
   }
-}
-
-export function operatorQuery() {
-  const token = getOperatorToken();
-  return token ? `op=${encodeURIComponent(token)}` : '';
 }
 
 export function appendOperatorQuery(searchParams) {

@@ -57,8 +57,17 @@ test('descriptors own launch, history, and capability metadata', () => {
     id: 'grok',
     label: 'Grok',
     capabilities: { ...grok.capabilities },
-    launch: { efforts: ['low', 'medium', 'high', 'xhigh'] },
+    launch: {
+      efforts: ['low', 'medium', 'high', 'xhigh'],
+      models: grok.models,
+      effortOptions: grok.effortOptions,
+    },
   });
+
+  // Codex defines neither a static model catalog nor effort-option labels
+  // (its launcher falls back to the generic value-list rendering) - launch
+  // stays exactly `{ efforts }`, no empty models/effortOptions arrays.
+  assert.deepEqual(providerDetails('codex').launch, { efforts: codex.efforts });
 });
 
 test('codex.resolveEfforts narrows to the current model\'s supported values, falling back to the static list', async () => {
@@ -81,11 +90,14 @@ test('codex.resolveEfforts narrows to the current model\'s supported values, fal
   });
   assert.deepEqual(noAnnotation, codex.efforts);
 
-  // A live catalog fetch failure (app-server hiccup) must not block every
-  // effort change - fall back rather than propagate.
+  // A live catalog fetch failure (app-server hiccup) fails closed (null),
+  // rather than falling back to the static superset - that fallback used
+  // to let session-actions.js's effort route accept a value the current
+  // model can't actually honor during exactly the failure this check
+  // exists to catch. See session-actions.js's own null handling.
   const fetchFails = await codex.resolveEfforts({
     model: 'gpt-5-codex',
     handle: { query: { supportedModels: async () => { throw new Error('app-server unreachable'); } } },
   });
-  assert.deepEqual(fetchFails, codex.efforts);
+  assert.equal(fetchFails, null);
 });

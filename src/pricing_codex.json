@@ -1,0 +1,15 @@
+{
+  "_comment": "USD per MILLION tokens. From https://developers.openai.com/api/docs/pricing (checked 2026-09-02, cross-verified against each model's own docs page since the current gpt-5.x-codex naming looked surprising at first glance). OpenAI's prompt caching is automatic and has no separate write charge (unlike Anthropic's explicit 5m/1h cache-write tiers) - cache_write_5m/cache_write_1h are set equal to input so cache_creation tokens price as plain uncached input, same convention pricing_grok.json uses for Grok. Only models with confirmed pricing are listed; an unlisted Codex model falls through to costForUsage's unpriced path (tokens still show, cost flagged unpriced) rather than guessing a rate.",
+  "_rate_shape": {
+    "input": "cost per 1M uncached input tokens",
+    "output": "cost per 1M output tokens",
+    "cache_write_5m": "unused on Codex; set equal to input so cache_creation tokens price as uncached input",
+    "cache_write_1h": "unused on Codex; set equal to input so cache_creation tokens price as uncached input",
+    "cache_read": "cost per 1M cached input tokens"
+  },
+  "models": {
+    "gpt-5.1-codex":      { "input": 1.25, "output": 10, "cache_write_5m": 1.25, "cache_write_1h": 1.25, "cache_read": 0.125, "confidence": "developers.openai.com/api/docs/pricing 2026-09-02" },
+    "gpt-5.1-codex-mini": { "input": 0.25, "output": 2,  "cache_write_5m": 0.25, "cache_write_1h": 0.25, "cache_read": 0.025, "confidence": "developers.openai.com/api/docs/pricing 2026-09-02" },
+    "gpt-5.3-codex":      { "input": 1.75, "output": 14, "cache_write_5m": 1.75, "cache_write_1h": 1.75, "cache_read": 0.175, "confidence": "developers.openai.com/api/docs/pricing 2026-09-02" }
+  }
+}

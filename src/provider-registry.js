@@ -19,6 +19,54 @@ export const CLAUDE_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 export const GROK_EFFORTS = ['low', 'medium', 'high', 'xhigh'];
 export const CODEX_EFFORTS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
 
+// Static launch-time catalogs - what the launcher's model/effort dropdowns
+// show *before* a session exists, so there's no running handle to ask (see
+// this module's own header comment on why these live here rather than being
+// fetched live: neither CLI can enumerate its own models pre-launch).
+// Formerly hardcoded in public/app.js as CLAUDE_START_MODELS/
+// GROK_START_MODELS/CLAUDE_EFFORT_OPTIONS/GROK_EFFORT_OPTIONS - moved here
+// so this is the one place a new model or effort tier gets added, and
+// providerDetails() below is the one place it rides to the browser.
+const CLAUDE_START_MODELS = [
+  { value: '', label: 'Default model' },
+  // Marked default (same convention as CLAUDE_EFFORT_OPTIONS below): Sonnet
+  // is what the CLI actually resolves '' to today, not just "a reasonable
+  // pick".
+  { value: 'sonnet', label: 'Sonnet *' },
+  { value: 'opus', label: 'Opus' },
+  { value: 'haiku', label: 'Haiku' },
+];
+const GROK_START_MODELS = [
+  { value: '', label: 'Default model' },
+  { value: 'grok-4.5', label: 'Grok 4.5' },
+  { value: 'grok-build', label: 'Grok Build' },
+  { value: 'grok-4.6', label: 'Grok 4.6' },
+];
+
+const GROK_EFFORT_OPTIONS = [
+  { value: 'low', label: 'Low' },
+  { value: 'medium', label: 'Medium' },
+  { value: 'high', label: 'High' },
+  { value: 'xhigh', label: 'Extra high' },
+];
+// Claude's effort ladder (Agent SDK's EffortLevel - CLAUDE_EFFORTS above) -
+// one level wider than Grok's ('max'), and unlike Grok's select this one
+// needs a blank "Default" option since effort is optional for Claude (unset
+// = model/SDK default) where Grok's spawn-time flag is always some concrete
+// value.
+// 'high' is marked as the real default straight from the installed
+// @anthropic-ai/claude-agent-sdk's sdk.d.ts (0.3.231) EffortLevel doc
+// comment: "'high' — Deep reasoning (default)". Confirmed 2026-08-20 (see
+// .claude/memory/sdk-streaming-input-gotchas.md item 3).
+const CLAUDE_EFFORT_OPTIONS = [
+  { value: '', label: 'Default' },
+  { value: 'low', label: 'Low' },
+  { value: 'medium', label: 'Medium' },
+  { value: 'high', label: 'High *' },
+  { value: 'xhigh', label: 'Extra high' },
+  { value: 'max', label: 'Max' },
+];
+
 const PROVIDERS = Object.freeze({
   claude: Object.freeze({
     id: 'claude',
@@ -28,6 +76,8 @@ const PROVIDERS = Object.freeze({
     listResumableSessions,
     fetchHistory: fetchSessionHistory,
     efforts: CLAUDE_EFFORTS,
+    models: CLAUDE_START_MODELS,
+    effortOptions: CLAUDE_EFFORT_OPTIONS,
     // Moved out of session-registry.js's rewind() (formerly an
     // if (provider === 'grok') {...} else {...this...} branch) so a third
     // conversation-fork-capable provider doesn't fall through to Claude's
@@ -64,6 +114,8 @@ const PROVIDERS = Object.freeze({
     listResumableSessions: listGrokSessions,
     fetchHistory: fetchGrokSessionHistory,
     efforts: GROK_EFFORTS,
+    models: GROK_START_MODELS,
+    effortOptions: GROK_EFFORT_OPTIONS,
     rewind: async (row, turnIndex, { dryRun } = {}) => {
       const points = await row.handle.listRewindPoints();
       const promptIndex = resolveGrokPromptIndex(points, turnIndex);
@@ -110,20 +162,28 @@ const PROVIDERS = Object.freeze({
     // effort route calls this instead of trusting the static list, so a
     // choice the current model can't actually honor is rejected immediately
     // rather than accepted here and only failing when the next turn starts.
-    // Best-effort: falls back to the static list if the live model catalog
-    // can't be fetched (app-server hiccup, unknown model) rather than
-    // blocking every effort change on it.
+    // CODEX_EFFORTS above is still the right fallback when the catalog
+    // fetch *succeeded* but this particular model just doesn't publish a
+    // supportedEfforts list (nothing to restrict by, trust the superset).
+    // A fetch *failure* (app-server hiccup) is different - that used to
+    // fall back to the very same superset, which meant a transient failure
+    // silently widened the accepted set back to "every effort any Codex
+    // model has ever supported," letting session-actions.js's effort route
+    // accept a value this specific model can't actually honor - exactly
+    // the failure this per-model check exists to catch. Returns null for
+    // that case instead; session-actions.js treats null as "can't validate
+    // right now" (503) rather than trusting the wider static list.
     resolveEfforts: async (row) => {
+      let models;
       try {
-        const models = await row.handle.query.supportedModels();
-        const entry = row.model
-          ? models.find((m) => m.value === row.model || m.resolvedModel === row.model)
-          : models[0];
-        if (entry?.supportedEfforts?.length) return entry.supportedEfforts;
+        models = await row.handle.query.supportedModels();
       } catch {
-        // fall through to the static list below
+        return null;
       }
-      return CODEX_EFFORTS;
+      const entry = row.model
+        ? models.find((m) => m.value === row.model || m.resolvedModel === row.model)
+        : models[0];
+      return entry?.supportedEfforts?.length ? entry.supportedEfforts : CODEX_EFFORTS;
     },
     capabilities: Object.freeze({
       fileRewind: false,
@@ -182,6 +242,14 @@ export function providerDetails(provider) {
     capabilities: { ...descriptor.capabilities },
     launch: {
       efforts: [...descriptor.efforts],
+      // Static launch-time catalogs (see this module's CLAUDE_START_MODELS/
+      // GROK_START_MODELS/CLAUDE_EFFORT_OPTIONS/GROK_EFFORT_OPTIONS comment)
+      // - omitted entirely for a provider that doesn't define one (e.g.
+      // Codex today) rather than serialized as an empty array, so the
+      // client's own generic fallback (provider-catalog.js/app.js) can tell
+      // "no static catalog" apart from "catalog is empty".
+      ...(descriptor.models ? { models: descriptor.models.map((m) => ({ ...m })) } : {}),
+      ...(descriptor.effortOptions ? { effortOptions: descriptor.effortOptions.map((o) => ({ ...o })) } : {}),
     },
   };
 }

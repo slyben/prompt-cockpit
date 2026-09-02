@@ -238,8 +238,32 @@ test('a shared app-server dying mid-turn errors the session instead of leaving i
   await waitFor(() => states.at(-1) === 'error', 'session to error out');
   assert.equal(errors.length, 1);
   assert.match(errors[0].message, /codex app-server exited 1/);
-  // pushInput must not accept more work once the session is dead
-  assert.equal(handle.pushInput('another message'), undefined);
+  // pushInput must not accept more work once the session is dead - `null`,
+  // not `undefined` (2026-09-02 review, finding #2): session-registry.js's
+  // pushTurn checks for the exact `null` sentinel to decide whether to
+  // register a delegation tag, same contract session.js/grok-session.js use.
+  // `undefined` slipped past that check and could still setTag(undefined,
+  // tag), stranding a delegation origin.
+  assert.equal(handle.pushInput('another message'), null);
+});
+
+test('a single turn/start failure closes the session so pump() does not keep driving turns into the void', async () => {
+  const manager = createManager();
+  const originalRequest = manager.request.bind(manager);
+  manager.request = async (method, params) => {
+    if (method === 'turn/start') throw new Error('turn/start rejected: bad params');
+    return originalRequest(method, params);
+  };
+  const { handle, errors } = startOptions(manager);
+  handle.pushInput('first');
+  handle.pushInput('second'); // queued behind the first, which will fail
+  await waitFor(() => errors.length > 0, 'runTurn failure to surface');
+  assert.match(errors[0].message, /turn\/start rejected/);
+  // The catch must set `closed`, same as manager.onClose does for a
+  // whole-app-server death - otherwise pump()'s own `finally` block sees
+  // `pending.length` still has 'second' in it and keeps calling turn/start
+  // against a row session-registry.js has already reaped.
+  assert.equal(handle.pushInput('third'), null, 'the session must refuse new work once a turn has fatally failed');
 });
 
 test('closing a session sends turn/interrupt before thread/unsubscribe, not just unsubscribe', async () => {

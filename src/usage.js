@@ -3,8 +3,9 @@
 // stepCost() (itself mirroring that project's parse.py cost_for_usage()) -
 // same pricing table, same formula, so the two tools agree on a dollar
 // figure for the same session. Claude rates live in pricing.json (a copy
-// of the claude-realtime-usage table). Grok rates live in pricing_grok.json
-// so the two catalogs cannot clobber each other.
+// of the claude-realtime-usage table). Grok rates live in pricing_grok.json,
+// Codex rates in pricing_codex.json, so the three catalogs cannot clobber
+// each other.
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -17,9 +18,11 @@ function loadModels(filename) {
 
 const CLAUDE_PRICING = loadModels('pricing.json');
 const GROK_PRICING = loadModels('pricing_grok.json');
+const CODEX_PRICING = loadModels('pricing_codex.json');
 
 function ratesFor(model) {
   if (model && Object.prototype.hasOwnProperty.call(GROK_PRICING, model)) return GROK_PRICING[model];
+  if (model && Object.prototype.hasOwnProperty.call(CODEX_PRICING, model)) return CODEX_PRICING[model];
   if (model && Object.prototype.hasOwnProperty.call(CLAUDE_PRICING, model)) return CLAUDE_PRICING[model];
   return null;
 }
@@ -49,7 +52,12 @@ export function costForUsage(model, usage) {
   }
 
   const rates = ratesFor(model);
-  if (!rates) return null;
+  // No pricing entry: still return the real token breakdown (an unpriced
+  // model shouldn't zero out someone's token counters, only its cost - see
+  // createUsageAccumulator's addAssistantMessage and session-registry.js's
+  // applyAssistantUsage, both of which key off `cost === null` now instead
+  // of treating "no rates" as "nothing to report").
+  if (!rates) return { cost: null, inputTokens: input, outputTokens: output, writeTokens, readTokens: read };
 
   const cost = (input * rates.input + output * rates.output +
     write5m * rates.cache_write_5m + write1h * rates.cache_write_1h + read * rates.cache_read) / 1e6;
@@ -108,20 +116,30 @@ export function createUsageAccumulator() {
     addAssistantMessage(message, toolNames = []) {
       if (!message || !message.usage) return;
       const info = costForUsage(message.model, message.usage);
-      if (!info) {
+      if (!info) return; // no usage - already ruled out above, kept as a guard
+      // Tokens accumulate regardless of whether this model priced (B1) - only
+      // the cost line is skipped, with the model flagged in `unpriced` so the
+      // panel can show "$0.00 (understated)" instead of silently costing a
+      // real turn at zero. Previously the whole message was dropped here,
+      // which also zeroed its token counts - see usage.js's costForUsage.
+      if (info.cost == null) {
         if (message.model) unpriced.add(message.model);
-        return;
+      } else {
+        totals.costUsd += info.cost;
       }
-      totals.costUsd += info.cost;
       totals.inputTokens += info.inputTokens;
       totals.outputTokens += info.outputTokens;
       totals.cacheReadTokens += info.readTokens;
       totals.cacheWriteTokens += info.writeTokens;
 
+      // Tool buckets split cost the same "even across this turn's tool_use
+      // blocks" way regardless of pricing - an unpriced turn's buckets just
+      // carry a 0 cost contribution, same total-tokens invariant as before.
+      const bucketInfo = info.cost == null ? { ...info, cost: 0 } : info;
       if (toolNames.length === 0) {
-        addToolBucket(NO_TOOL_BUCKET, info, 1);
+        addToolBucket(NO_TOOL_BUCKET, bucketInfo, 1);
       } else {
-        for (const name of toolNames) addToolBucket(name, info, toolNames.length);
+        for (const name of toolNames) addToolBucket(name, bucketInfo, toolNames.length);
       }
     },
     snapshot() {

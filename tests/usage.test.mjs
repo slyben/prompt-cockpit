@@ -48,8 +48,26 @@ test('costForUsage prices grok models from pricing_grok.json, not pricing.json',
   assert.equal(info.writeTokens, 1_000_000);
 });
 
-test('costForUsage returns null for an unpriced model rather than guessing', () => {
-  assert.equal(costForUsage('some-future-model', { input_tokens: 100 }), null);
+test('costForUsage prices codex models from pricing_codex.json', () => {
+  const info = costForUsage('gpt-5.1-codex', {
+    input_tokens: 1_000_000,
+    output_tokens: 1_000_000,
+    cache_read_input_tokens: 1_000_000,
+    cache_creation: { ephemeral_5m_input_tokens: 1_000_000 },
+  });
+  // gpt-5.1-codex (src/pricing_codex.json): input 1.25, output 10, cache_read 0.125, write = input
+  assert.equal(info.cost, 1.25 + 10 + 0.125 + 1.25);
+  assert.equal(info.inputTokens, 1_000_000);
+  assert.equal(info.outputTokens, 1_000_000);
+  assert.equal(info.readTokens, 1_000_000);
+  assert.equal(info.writeTokens, 1_000_000);
+});
+
+test('costForUsage returns real tokens with cost: null for an unpriced model, rather than guessing a price or dropping the tokens', () => {
+  const info = costForUsage('some-future-model', { input_tokens: 100, output_tokens: 40 });
+  assert.equal(info.cost, null);
+  assert.equal(info.inputTokens, 100);
+  assert.equal(info.outputTokens, 40);
 });
 
 test('costForUsage returns null when usage is missing', () => {
@@ -65,7 +83,8 @@ test('createUsageAccumulator sums across messages and tracks unpriced models sep
   acc.addAssistantMessage({ model: 'claude-sonnet-5', usage: null }); // no-op
 
   const snap = acc.snapshot();
-  assert.equal(snap.inputTokens, 3000);
+  // 1000 + 2000 + 999 (the unpriced model's tokens still count - B1) = 3999.
+  assert.equal(snap.inputTokens, 3999);
   assert.equal(snap.outputTokens, 1500);
   assert.deepEqual(snap.unpriced, ['some-future-model']);
   assert.ok(snap.costUsd > 0);

@@ -3,6 +3,7 @@
 // Lazy: does nothing until initGlobalStatsPanel()'s returned refresh() is
 // called (app.js does that on the tab's first click, not on every modal
 // open - this is a real transcript scan server-side, not a cheap GET).
+import { escapeHtml } from '/escape-html.js';
 const MIN_WEEKS_SHOWN = 53; // ~a year of columns, GitHub-heatmap style - floor, not a fixed count
 const LEVEL_THRESHOLDS = [1, 5, 15, 40]; // message-count breakpoints for the 5 shade levels (0-4)
 // Pixel width of one grid column step: a cell is 10px wide including its
@@ -280,7 +281,7 @@ function renderModelTable(stats) {
   if (stats.unpricedModels && stats.unpricedModels.length > 0) {
     const note = document.createElement('p');
     note.className = 'stats-note';
-    note.textContent = `Not priced (missing from pricing.json), excluded above: ${stats.unpricedModels.join(', ')}`;
+    note.textContent = `Not priced (missing from pricing.json/pricing_grok.json/pricing_codex.json), excluded above: ${stats.unpricedModels.join(', ')}`;
     wrap.append(note);
   }
 
@@ -346,12 +347,6 @@ function renderAccountLimitsSection() {
   load();
 
   return wrap;
-}
-
-function escapeHtml(s) {
-  const div = document.createElement('div');
-  div.textContent = String(s);
-  return div.innerHTML;
 }
 
 function formatUsd(n) {

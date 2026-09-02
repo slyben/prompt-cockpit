@@ -7,6 +7,7 @@ import { isValidCwd } from '../session-launcher.js';
 import { respondJson, readJsonBody } from '../http-utils.js';
 import { findSubagentTranscript, readSubagentTranscript } from '../agent-transcript.js';
 import { parseProvider } from '../provider-registry.js';
+import { isSafeSessionId } from '../safe-id.js';
 
 export function registerHistoryRoutes(router) {
   router.get('/api/history/:id', async (req, res, url, { id }) => {
@@ -17,6 +18,15 @@ export function registerHistoryRoutes(router) {
     // token-gated (see session-launcher.js's listDirectory comment for why
     // that matters more for /api/browse, which can enumerate the whole
     // filesystem).
+    // isSafeSessionId is where Claude's/Grok's own fetchHistory already
+    // validate `id` before path.join'ing it onto disk (session-history.js/
+    // grok-history.js) - Codex's fetchCodexSessionHistory never did (it
+    // passes threadId straight through to the app-server's own RPC, not a
+    // local path.join, but there is no reason this route's own boundary
+    // should depend on which provider happens to be safe today). Checked
+    // once here for every provider instead (2026-09-02 review, "Tests and
+    // security" section).
+    if (!isSafeSessionId(id)) return respondJson(res, 400, { error: 'invalid session id' });
     const cwd = url.searchParams.get('cwd') || process.cwd();
     let provider;
     try {
@@ -36,6 +46,7 @@ export function registerHistoryRoutes(router) {
     // Same auth boundary and cwd/provider handling as the JSON route above -
     // this is that same read, just formatted for the "export .md" button
     // (app.js/history-pane.js) instead of the live stream renderer.
+    if (!isSafeSessionId(id)) return respondJson(res, 400, { error: 'invalid session id' });
     const cwd = url.searchParams.get('cwd') || process.cwd();
     let provider;
     try {
@@ -53,7 +64,11 @@ export function registerHistoryRoutes(router) {
       });
       res.writeHead(200, {
         'content-type': 'text/markdown; charset=utf-8',
-        'content-disposition': `attachment; filename="session-${id}.md"`,
+        // isSafeSessionId above already rejects path separators, but not a
+        // stray `"` that could break out of the quoted filename attribute -
+        // belt-and-suspenders strip it too rather than assume every id a
+        // provider ever mints is quote-free (2026-09-02 review).
+        'content-disposition': `attachment; filename="session-${id.replace(/"/g, '')}.md"`,
       });
       return res.end(markdown);
     } catch (err) {

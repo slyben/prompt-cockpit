@@ -4,6 +4,8 @@
 // (context percentage, which is its own round trip to the CLI). Formatters
 // mirror claude-realtime-usage/live_watcher_template.html's fmtUSD/fmtTok so
 // the two tools read the same at a glance.
+import { escapeHtml } from '/escape-html.js';
+
 export function initStatsPanel({ el }) {
   reset();
 
@@ -80,9 +82,6 @@ export function initStatsPanel({ el }) {
   // auto-compact threshold when confirmed plausible, else the same 80%
   // this used to hardcode as `remaining < 20`). Yellow starts 30 points
   // before red, preserving the original 50/80 relationship when warn===80.
-  function escapeHtml(s) {
-    return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-  }
 
   // Turn cost is only reported per assistant message by the API - there's
   // no per-tool-call usage - so usage.perTool (usage.js's accumulator)

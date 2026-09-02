@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as registry from '../src/session-registry.js';
-import { fakeWs, fakeStartSession } from './test-helpers.mjs';
+import { fakeWs, fakeStartSession, pendingTurnCount, frontDelegationTag } from './test-helpers.mjs';
 
 test('createSession issues a token that checkToken accepts, and only that token', () => {
   registry._reset();
@@ -31,15 +31,23 @@ test('attachClient sends hello then replays buffered messages', () => {
   assert.equal(ws.sent[1].message.subtype, 'init');
 });
 
-test('providerSessionId tracks message.session_id and preserves the legacy alias', () => {
+test('providerSessionId tracks message.session_id; toSummary derives the legacy claudeSessionId alias from it for a Claude row', () => {
   registry._reset();
   const startSessionImpl = fakeStartSession();
   const row = registry.createSession({ cwd: '/tmp', startSessionImpl });
   startSessionImpl.emitMessage({ type: 'system', subtype: 'init', session_id: 'sess-1' });
   assert.equal(registry.get(row.id).providerSessionId, 'sess-1');
-  assert.equal(registry.get(row.id).claudeSessionId, 'sess-1');
   assert.equal(registry.toSummary(row).providerSessionId, 'sess-1');
   assert.equal(registry.toSummary(row).claudeSessionId, 'sess-1');
+});
+
+test('toSummary derives claudeSessionId as null for a non-Claude row - it never held that provider\'s own id', () => {
+  registry._reset();
+  const startSessionImpl = fakeStartSession();
+  const row = registry.createSession({ cwd: '/tmp', provider: 'grok', startSessionImpl });
+  startSessionImpl.emitMessage({ type: 'system', subtype: 'init', session_id: 'grok-sess-1' });
+  assert.equal(registry.toSummary(row).providerSessionId, 'grok-sess-1');
+  assert.equal(registry.toSummary(row).claudeSessionId, null);
 });
 
 test('an assistant message with usage broadcasts cockpit:usage with running cost/token totals', () => {
@@ -147,6 +155,8 @@ test('an unpriced model accumulates tokens but is flagged rather than silently c
 
   const last = ws.sent.filter((m) => m.type === 'cockpit:usage').at(-1);
   assert.equal(last.usage.costUsd, 0);
+  assert.equal(last.usage.inputTokens, 10);
+  assert.equal(last.usage.outputTokens, 5);
   assert.deepEqual(last.usage.unpriced, ['some-future-model']);
 });
 
@@ -187,16 +197,16 @@ test('forceIdle resets the handle and flips row.state back to idle even with no 
   assert.equal(row.state, 'idle');
 });
 
-test('forceIdle clears pendingResultTags and fails any delegation still waiting on this row, same as closeSession does', async () => {
+test('forceIdle clears the in-flight turn count and fails any delegation still waiting on this row, same as closeSession does', async () => {
   registry._reset();
   const originImpl = fakeStartSession();
   const origin = registry.createSession({ cwd: '/tmp', startSessionImpl: originImpl });
   const targetImpl = fakeStartSession();
   const target = registry.createSession({ cwd: '/tmp', name: 'Target', startSessionImpl: targetImpl });
   registry.delegateTask(origin.id, 'Target', 'do the thing');
-  assert.equal(target.pendingResultTags.length, 1);
+  assert.equal(pendingTurnCount(target), 1);
   await registry.forceIdle(target.id);
-  assert.equal(target.pendingResultTags.length, 0);
+  assert.equal(pendingTurnCount(target), 0);
   const relayed = originImpl.allInputs.find((t) => t.includes('ERROR:') && t.includes('was manually unstuck'));
   assert.ok(relayed, 'origin should have received a failure relay instead of waiting forever');
 });
@@ -208,7 +218,8 @@ test('forceIdle on an unknown session id rejects instead of throwing synchronous
 
 // Residual after the 2026-08-24 FIFO fix: forceIdle fails/clears tags, but
 // the abandoned turn can still emit a `result`. A newly pushed/delegated
-// turn sitting at pendingResultTags[0] used to be shift()'d off by that
+// turn sitting at the front of the registry's own copy of the turn list
+// used to be shift()'d off by that
 // late result and relayed to the wrong origin.
 test('a late result after forceIdle does not steal a newly pushed delegation tag', async () => {
   registry._reset();
@@ -220,25 +231,25 @@ test('a late result after forceIdle does not steal a newly pushed delegation tag
   const target = registry.createSession({ cwd: '/tmp/proj', name: 'Target', startSessionImpl: targetImpl });
 
   registry.delegateTask(originA.id, 'Target', 'task from A');
-  assert.equal(target.pendingResultTags.length, 1);
+  assert.equal(pendingTurnCount(target), 1);
   await registry.forceIdle(target.id);
-  assert.equal(target.pendingResultTags.length, 0);
+  assert.equal(pendingTurnCount(target), 0);
   assert.match(originAImpl.lastInput, /ERROR:.*manually unstuck/);
 
   registry.delegateTask(originB.id, 'Target', 'task from B');
-  assert.equal(target.pendingResultTags.length, 1);
-  assert.equal(target.pendingResultTags[0].tag.fromId, originB.id);
+  assert.equal(pendingTurnCount(target), 1);
+  assert.equal(frontDelegationTag(target).fromId, originB.id);
 
   // Late result for A's abandoned turn - must not pop B's tag or relay to B.
   targetImpl.emitMessage({ type: 'assistant', message: { content: [{ type: 'text', text: 'late reply meant for A' }] } });
   targetImpl.emitMessage({ type: 'result' });
-  assert.equal(target.pendingResultTags.length, 1, 'B\'s tag must still be waiting for B\'s own result');
-  assert.equal(target.pendingResultTags[0].tag.fromId, originB.id);
+  assert.equal(pendingTurnCount(target), 1, 'B\'s turn must still be waiting for B\'s own result');
+  assert.equal(frontDelegationTag(target).fromId, originB.id);
   assert.equal(originBImpl.lastInput, undefined, 'B must not receive A\'s late reply as its delegated answer');
 
   targetImpl.emitMessage({ type: 'assistant', message: { content: [{ type: 'text', text: 'reply to B' }] } });
   targetImpl.emitMessage({ type: 'result' });
-  assert.equal(target.pendingResultTags.length, 0);
+  assert.equal(pendingTurnCount(target), 0);
   assert.match(originBImpl.lastInput, /reply to B/);
   assert.doesNotMatch(originBImpl.lastInput, /late reply meant for A/);
 });
@@ -359,7 +370,7 @@ test('hasFileCheckpointing is true only for a freshly-started session, not a res
   const resumed = registry.createSession({ cwd: '/tmp', resume: 'some-claude-session-id', startSessionImpl: fakeStartSession() });
   assert.equal(resumed.hasFileCheckpointing, false);
   assert.equal(resumed.providerSessionId, 'some-claude-session-id');
-  assert.equal(resumed.claudeSessionId, 'some-claude-session-id');
+  assert.equal(registry.toSummary(resumed).claudeSessionId, 'some-claude-session-id');
 });
 
 test('createSession defaults provider to claude; grok disables file checkpointing', () => {
@@ -476,7 +487,7 @@ test('rewind() refuses to run on a session flagged turnIndexUnreliable, rather t
   registry._reset();
   const impl = fakeStartSession();
   const row = registry.createSession({ cwd: '/tmp', resume: 'some-id', history: null, startSessionImpl: impl });
-  impl.emitMessage({ type: 'system', subtype: 'init', session_id: 'some-id' }); // sets row.claudeSessionId, same as a real init would
+  impl.emitMessage({ type: 'system', subtype: 'init', session_id: 'some-id' }); // sets row.providerSessionId, same as a real init would
   assert.equal(row.turnIndexUnreliable, true);
 
   await assert.rejects(() => registry.rewind(row.id, 1), /turn numbering cannot be trusted/);
@@ -1136,4 +1147,30 @@ test('a crash after a rate-limit hit disarms auto-continue instead of resurrecti
 
   assert.equal((impl.allInputs || []).length, inputsBefore);
   assert.equal(row.state, 'error');
+});
+
+// 2026-09-02 review, finding #1: production always calls
+// onStateChange('error') immediately before onError(err) (session.js/
+// grok-session.js/codex-session.js). setState used to reap the row on
+// 'error' too, so by the time onError's handleError ran, sessions.get(id)
+// already came back empty and silently skipped its cleanup - the crash
+// still "worked" (row ends up gone, state was briefly 'error') but every
+// connected client missed the cockpit:error broadcast and any in-flight
+// turn tracking was never abandoned. fakeStartSession's emitError now fires
+// both callbacks in production's order (test-helpers.mjs), so this would
+// have failed before the setState fix.
+test('a crash (onStateChange(\'error\') then onError) still broadcasts cockpit:error and reaps the row', () => {
+  registry._reset();
+  const impl = fakeStartSession();
+  const row = registry.createSession({ cwd: '/tmp', startSessionImpl: impl });
+  const ws = fakeWs();
+  registry.attachClient(row.id, ws);
+  ws.sent.length = 0; // drop the hello/replay noise from attach
+
+  impl.emitError(new Error('CLI crashed'));
+
+  const errorBroadcasts = ws.sent.filter((m) => m.type === 'cockpit:error');
+  assert.equal(errorBroadcasts.length, 1, 'handleError must still run and broadcast cockpit:error');
+  assert.match(errorBroadcasts[0].error, /CLI crashed/);
+  assert.equal(registry.get(row.id), undefined, 'the row is still reaped once handleError has finished with it');
 });

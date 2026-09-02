@@ -154,7 +154,7 @@ export function createDelegation({ sessions, pushTurn, broadcast, broadcastSumma
       // this, the origin would just wait forever for a reply that's never
       // coming (see the 2026-08-24 review, finding #2's "or the origin
       // strands forever"). relayDelegationResult's own tag.fromId lookup is
-      // enough here - it doesn't need targetRow.pendingResultTags at all.
+      // enough here - it doesn't need the target's turn tracker at all.
       relayDelegationResult(target, tag, { ok: false, errorText: `"${target.name || targetName}" is no longer available to receive this task` });
       return { targetId: target.id, targetName: target.name };
     }
@@ -174,7 +174,7 @@ export function createDelegation({ sessions, pushTurn, broadcast, broadcastSumma
   // row errors out mid-turn, the target row is closed mid-turn, or the
   // delegated turn is removed from the target's queue before it ever ran -
   // all four call this the same way (via session-registry.js's
-  // failPendingDelegations/dropResultTag, or directly on a successful
+  // failPendingDelegations/failDroppedTurn, or directly on a successful
   // 'result'), just with a different `ok`/`errorText`. Delivered as a normal
   // queued user-turn message (reusing origin.handle.pushInput via pushTurn -
   // the same queue a human's own next message would land in, no second queue
@@ -293,8 +293,8 @@ export function createDelegation({ sessions, pushTurn, broadcast, broadcastSumma
   }
 
   // Watches one assistant message for delegated-turn text while this
-  // row has a pending delegation tag (row.pendingResultTags[0] - the OLDEST,
-  // same FIFO reasoning session-registry.js's 'result' branch uses). Only the
+  // row has a pending delegation tag (the tracker's oldest still-queued
+  // turn - i.e. the one actually in flight). Only the
   // plain text blocks are kept (no tool-call trace) - but every block, not
   // just the final one: this buffer now serves double duty as both the "full
   // trace" side-channel and finalAnswerText()'s own fallback source, so
@@ -323,12 +323,15 @@ export function createDelegation({ sessions, pushTurn, broadcast, broadcastSumma
   // steps - the ones separated by a tool call - apart, which is what the
   // "final answer vs full trace" split actually needs to distinguish.
   function collectDelegationText(row, message) {
-    const entry = row.pendingResultTags[0];
-    const tag = entry?.tag;
+    const turns = row.handle?.turns;
+    const entry = turns?.frontPending();
+    const tag = entry ? turns.peekTag(entry.queueId) : null;
     if (!tag) return;
     // Leftover assistant chunks from a force-idled turn must not append into
-    // a newly pushed tag sitting at [0]. Handles stamp `_cockpitEpoch` on
-    // in-flight messages; skip when the epochs disagree.
+    // a newly pushed tag now sitting at the front. Handles stamp
+    // `_cockpitEpoch` on in-flight messages (from the ABANDONED meta while
+    // one is outstanding, see result-epoch.js's currentMeta) - skip when the
+    // epochs disagree.
     if (message._cockpitEpoch != null && entry.epoch != null && message._cockpitEpoch !== entry.epoch) return;
     if (message.type !== 'assistant' || !message.message || !Array.isArray(message.message.content)) {
       tag.openTextEntry = false;
@@ -354,15 +357,20 @@ export function createDelegation({ sessions, pushTurn, broadcast, broadcastSumma
 
   // Called by session-registry.js from closeSession, forceIdle, and
   // handleError - the three ways a row can stop making progress on a turn
-  // without ever emitting the 'result' message the FIFO shift above waits
-  // for, so any tags still pending here would otherwise strand their origin
+  // without ever emitting the 'result' message the delegation relay waits
+  // for, so any tags still held would otherwise strand their origin
   // session(s) waiting forever.
+  //
+  // takeAllTags() releases every tag the tracker still holds for this
+  // session in one move, including one whose turn was already consumed
+  // provider-side without a result ever reaching the registry (grok's
+  // runPrompt error path) - the case a registry-side copy used to cover by
+  // accident, and the reason tag lifetime is deliberately not tied to
+  // consume(). Turn ORDER is untouched: an abandoned turn's late result
+  // must still be recognizable as stale.
   function failPendingDelegations(row, errorText) {
-    const entries = row.pendingResultTags;
-    row.pendingResultTags = [];
-    for (const entry of entries) {
-      if (entry.tag) relayDelegationResult(row, entry.tag, { ok: false, errorText });
-    }
+    const held = row.handle?.turns?.takeAllTags() || [];
+    for (const { tag } of held) relayDelegationResult(row, tag, { ok: false, errorText });
   }
 
   return {

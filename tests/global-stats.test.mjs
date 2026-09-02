@@ -38,11 +38,15 @@ test('aggregateGlobalStats sums tokens, picks the favorite model, and counts act
   assert.equal(stats.sessions, 2);
   assert.equal(stats.activeDays, 2);
 
-  // Per-model cost table (costForUsage-backed): unpriced models are dropped
-  // from perModel and reported separately instead of silently costing $0.
-  const modelNames = stats.perModel.map((m) => m.model);
-  assert.ok(modelNames.includes('claude-sonnet-5'));
-  assert.ok(!modelNames.includes('claude-haiku-4-5')); // no pricing.json entry for this exact id
+  // Per-model cost table (costForUsage-backed): an unpriced model's tokens
+  // still land in perModel (B1) - only its cost is skipped, and it's
+  // reported separately in unpricedModels instead of silently costing $0.
+  const haiku = stats.perModel.find((m) => m.model === 'claude-haiku-4-5');
+  assert.ok(stats.perModel.some((m) => m.model === 'claude-sonnet-5'));
+  assert.ok(haiku); // no pricing.json entry for this exact id, but still present
+  assert.equal(haiku.inputTokens, 5);
+  assert.equal(haiku.outputTokens, 5);
+  assert.equal(haiku.costUsd, 0);
   assert.ok(stats.unpricedModels.includes('claude-haiku-4-5'));
   assert.ok(stats.totalCostUsd > 0);
   assert.equal(stats.currentStreak, 2); // 08-18 and 08-19 are consecutive; 08-20 (now) has no activity yet

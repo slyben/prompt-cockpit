@@ -268,7 +268,7 @@
           <button type="button" class="settings-tab" data-settings-tab="display" role="tab" aria-selected="false" title="Display and thinking settings">Display</button>
           <button type="button" class="settings-tab" data-settings-tab="mcp" role="tab" aria-selected="false" title="MCP server settings">MCP</button>
           <button type="button" class="settings-tab" data-settings-tab="plugins" role="tab" aria-selected="false" title="Plugin settings">Plugins</button>
-          <button type="button" class="settings-tab" data-settings-tab="stats" role="tab" aria-selected="false" title="Local usage stats across every project">Stats</button>
+          <button type="button" class="settings-tab" data-settings-tab="stats" role="tab" aria-selected="false" title="Local usage stats across every Claude Code project - Grok and Codex sessions aren't included">Stats (Claude)</button>
         </div>
 
         <div class="settings-tab-panel" data-settings-tab-panel="project" role="tabpanel">
@@ -411,7 +411,7 @@
                 <button type="button" id="statsRefreshBtn" class="btn" title="Re-scan local session transcripts">Refresh</button>
               </span>
             </div>
-            <p class="mcp-note">Computed live from local session transcripts across every project (<code>~/.claude/projects</code>), not the CLI's own <code>/stats</code> cache - always fresh, but only as deep as whatever transcript files Claude Code hasn't pruned yet.</p>
+            <p class="mcp-note">Claude Code sessions only - Grok and Codex spend isn't tracked here. Computed live from local session transcripts across every project (<code>~/.claude/projects</code>), not the CLI's own <code>/stats</code> cache - always fresh, but only as deep as whatever transcript files Claude Code hasn't pruned yet.</p>
             <div id="statsBody"></div>
           </div>
         </div>

@@ -147,6 +147,10 @@ export function aggregateGlobalStats(sessionScans, { range = 'all', now = Date.n
 
       if (row.model) {
         const info = costForUsage(row.model, row.usage);
+        // info is only null when row.usage itself is missing now - an
+        // unpriced model still returns its real token breakdown (cost:
+        // null), so it stays in the per-model table with a $0 cost line
+        // instead of getting excluded from it entirely.
         if (info) {
           const m = perModelStats.get(row.model)
             || { model: row.model, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 0, calls: 0 };
@@ -154,11 +158,10 @@ export function aggregateGlobalStats(sessionScans, { range = 'all', now = Date.n
           m.outputTokens += info.outputTokens;
           m.cacheReadTokens += info.readTokens;
           m.cacheWriteTokens += info.writeTokens;
-          m.costUsd += info.cost;
+          if (info.cost == null) unpricedModels.add(row.model);
+          else m.costUsd += info.cost;
           m.calls += 1;
           perModelStats.set(row.model, m);
-        } else {
-          unpricedModels.add(row.model);
         }
       }
     }

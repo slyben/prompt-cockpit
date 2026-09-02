@@ -9,7 +9,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as registry from '../src/session-registry.js';
-import { fakeWs, fakeStartSession } from './test-helpers.mjs';
+import { fakeWs, fakeStartSession, pendingTurnIds, pendingTurnCount, frontDelegationTag } from './test-helpers.mjs';
 
 // Cross-session delegation - findByName is the addressing
 // primitive `/ask <Name>: ...` resolves against: case-insensitive within a
@@ -53,9 +53,9 @@ test('delegateTask pushes the task into the named target session and throws on u
     /^\[Prompt Cockpit\] Relayed task from "Claude"\n\n[\s\S]*\n---\nsummarize main\.py$/,
     'the task text pushed into the target session must self-identify its origin via the prose header, symmetric with the relayed-reply header on the response'
   );
-  assert.equal(grok.pendingResultTags.length, 1);
-  assert.equal(grok.pendingResultTags[0].tag.fromId, claude.id);
-  assert.equal(grok.pendingResultTags[0].tag.fromName, 'Claude');
+  assert.equal(pendingTurnCount(grok), 1);
+  assert.equal(frontDelegationTag(grok).fromId, claude.id);
+  assert.equal(frontDelegationTag(grok).fromName, 'Claude');
   assert.match(
     grokImpl.lastInput,
     /handshake secret/,
@@ -89,10 +89,10 @@ test('delegateTask reaches a same-named session in a different cwd via the hands
 // 2026-08-24 review fix, exercised through delegateTask: the TARGET's queue is
 // closed at delegation time, so the task can never run and no `result`
 // will ever arrive for it. Without the fix this pushed a permanent
-// pendingResultTags entry that desynced every later result on that row -
+// tagged turn entry that desynced every later result on that row -
 // with the fix, delegateTask must notice and relay an immediate failure
 // back to the origin instead of leaving it waiting forever.
-test('delegateTask relays an immediate failure to the origin when the target queue is already closed, instead of stranding a dead pendingResultTags entry', () => {
+test('delegateTask relays an immediate failure to the origin when the target queue is already closed, instead of stranding a dead turn entry', () => {
   registry._reset();
   const originImpl = fakeStartSession();
   const origin = registry.createSession({ cwd: '/tmp/proj', name: 'Origin', startSessionImpl: originImpl });
@@ -103,7 +103,8 @@ test('delegateTask relays an immediate failure to the origin when the target que
 
   registry.delegateTask(origin.id, 'Target', 'do the thing');
 
-  assert.equal(target.pendingResultTags.length, 0, 'no dead entry should be left on the target row');
+  assert.equal(pendingTurnCount(target), 0, 'no dead entry should be left on the target row');
+  assert.equal(frontDelegationTag(target), null, 'no orphaned tag should be left behind either');
   assert.match(
     originImpl.lastInput,
     /ERROR:.*no longer available/,
@@ -251,7 +252,7 @@ test('two concurrent delegations to the same target route their results back to 
 
 // Regression test for the FIFO-desync bug found in review: a plain human
 // message typed directly into the target session, interleaved with a
-// pending delegation, used to desync row.pendingResultTags from actual
+// pending delegation, used to desync the registry's own copy of the turn list from actual
 // turn order (only delegateTask's own push was tagged) - the human's own
 // reply could get relayed to the WRONG origin, or a real delegation's reply
 // could get silently dropped. Fixed via pushTurn() tagging every push
@@ -291,13 +292,13 @@ test('a human message typed directly into the target session, interleaved with a
 
 // Regression test for the second FIFO-desync trigger found in review:
 // removeQueued/reorderQueue mutate session.js's real queue but used to
-// leave row.pendingResultTags untouched, so a removed/reordered turn threw
+// leave the registry's copy of the turn list untouched, so a removed/reordered turn threw
 // off every later shift(). Only meaningfully exercisable when a turn is
 // actually queued behind a running one - the fake handle's removeQueued/
 // reorderQueue are simple recorders (no real queue semantics), so this
 // drives registry.js's own mirroring logic directly against the queueIds
 // pushInput handed back.
-test('removeQueued drops the matching pendingResultTags entry and relays a cancellation notice if it was a delegation', async () => {
+test('removeQueued drops the matching turn from the tracker and relays a cancellation notice if it was a delegation', async () => {
   registry._reset();
   const aImpl = fakeStartSession();
   const a = registry.createSession({ cwd: '/tmp/proj', name: 'A', startSessionImpl: aImpl });
@@ -305,23 +306,26 @@ test('removeQueued drops the matching pendingResultTags entry and relays a cance
   const b = registry.createSession({ cwd: '/tmp/proj', name: 'B', startSessionImpl: bImpl });
 
   registry.delegateTask(a.id, 'B', 'task from A');
-  const queueId = b.pendingResultTags[0].queueId;
-  assert.equal(b.pendingResultTags.length, 1);
+  const [queueId] = pendingTurnIds(b);
+  assert.equal(pendingTurnCount(b), 1);
 
   await registry.removeQueued(b.id, queueId);
 
-  assert.equal(b.pendingResultTags.length, 0, 'the tag must be dropped so a later unrelated result cannot be mismatched against it');
+  assert.equal(pendingTurnCount(b), 0, 'the turn must leave the tracker so a later unrelated result cannot be mismatched against it');
+  assert.equal(frontDelegationTag(b), null, 'and its tag must be released, not left for a later result to claim');
   assert.match(aImpl.lastInput, /ERROR: the delegated task was removed from the queue before it ran/);
 });
 
 // Regression test: interruptTurn() (the Stop button) used to call
 // row.handle.interrupt() alone - session.js's interrupt() now also drains
 // its OWN local queue (see its comment), but that's session.js's private
-// bookkeeping, invisible to the registry. row.pendingResultTags (registry-
-// only) was left stale for every turn Stop dropped, so a later unrelated
-// result could be mismatched against a cancelled tag, and a cancelled
-// delegation was never told its task got dropped.
-test('interruptTurn drops pendingResultTags for every turn the Stop-drained local queue held, relaying a cancellation notice for a delegation', async () => {
+// bookkeeping, invisible to the registry. The registry's own parallel copy
+// of the turn list was left stale for every turn Stop dropped, so a later
+// unrelated result could be mismatched against a cancelled tag, and a
+// cancelled delegation was never told its task got dropped. The tracker is
+// now the only copy - but the registry still has to fail the tags, since the
+// provider layer knows nothing about delegation.
+test('interruptTurn releases the delegation tag of every turn the Stop-drained local queue held, relaying a cancellation notice', async () => {
   registry._reset();
   const aImpl = fakeStartSession();
   const a = registry.createSession({ cwd: '/tmp/proj', name: 'A', startSessionImpl: aImpl });
@@ -329,8 +333,8 @@ test('interruptTurn drops pendingResultTags for every turn the Stop-drained loca
   const b = registry.createSession({ cwd: '/tmp/proj', name: 'B', startSessionImpl: bImpl });
 
   registry.delegateTask(a.id, 'B', 'task from A');
-  const queueId = b.pendingResultTags[0].queueId;
-  assert.equal(b.pendingResultTags.length, 1);
+  const [queueId] = pendingTurnIds(b);
+  assert.equal(pendingTurnCount(b), 1);
 
   // session.js's real interrupt() drains its local queue synchronously
   // before handle.interrupt() is even invoked - interruptTurn() has to
@@ -341,7 +345,8 @@ test('interruptTurn drops pendingResultTags for every turn the Stop-drained loca
   await registry.interruptTurn(b.id);
 
   assert.equal(bImpl.interrupted, 1);
-  assert.equal(b.pendingResultTags.length, 0, 'the dropped tag must not be left for a later unrelated result to be mismatched against');
+  assert.equal(pendingTurnCount(b), 0, 'the dropped turn must not be left for a later unrelated result to be mismatched against');
+  assert.equal(frontDelegationTag(b), null, 'the cancelled delegation\'s tag must be released too');
   assert.match(aImpl.lastInput, /ERROR: the delegated task was removed from the queue before it ran/);
 });
 
@@ -352,7 +357,7 @@ test('interruptTurn drops pendingResultTags for every turn the Stop-drained loca
 // old "named ids first, everything unlisted appended after" algorithm
 // always pushed the in-flight entry's tag to the BACK the moment any two
 // queued items were reordered while a delegated turn was running. Proven
-// live via a probe before this fix: pendingResultTags [A(in-flight), C, B]
+// live via a probe before this fix: turn list [A(in-flight), C, B]
 // reordered with queueIds [B, C] (realistically excluding A) produced
 // [B, C, A] - A's own result would then have been shift()'d off as B's.
 test('reorderQueue reorders only the still-queued tail; the in-flight entry never moves', async () => {
@@ -369,13 +374,13 @@ test('reorderQueue reorders only the still-queued tail; the in-flight entry neve
   registry.delegateTask(dA.id, 'Target', 'task from A'); // in-flight (pushed first)
   registry.delegateTask(dC.id, 'Target', 'task from C'); // queued
   registry.delegateTask(dB.id, 'Target', 'task from B'); // queued
-  const [idA, idC, idB] = target.pendingResultTags.map((e) => e.queueId);
+  const [idA, idC, idB] = pendingTurnIds(target);
 
   // Realistic frontend call: queueIds is only the visible (queued) entries,
   // reordered so B runs before C - never names idA.
   await registry.reorderQueue(target.id, [idB, idC]);
   assert.deepEqual(
-    target.pendingResultTags.map((e) => e.queueId),
+    pendingTurnIds(target),
     [idA, idB, idC],
     'A must stay pinned first; only the queued tail (C, B) reorders',
   );
@@ -409,18 +414,18 @@ test('reorderQueue ignores the in-flight entry even if a caller explicitly names
 
   registry.delegateTask(a.id, 'B', 'task from A'); // in-flight
   registry.delegateTask(c.id, 'B', 'task from C'); // queued
-  const [idA, idC] = b.pendingResultTags.map((e) => e.queueId);
+  const [idA, idC] = pendingTurnIds(b);
 
   await registry.reorderQueue(b.id, [idC, idA]); // asks to put C ahead of A
   assert.deepEqual(
-    b.pendingResultTags.map((e) => e.queueId),
+    pendingTurnIds(b),
     [idA, idC],
     'naming the in-flight id in queueIds must not move it out of position 0',
   );
 });
 
 // Review finding: sendNow used to unshift the target tag all the way to
-// absolute index 0 of pendingResultTags, but index 0 is always the
+// absolute index 0 of the turn list, but index 0 is always the
 // currently in-flight turn (handle.sendNow only reorders the NOT-yet-
 // started sub-queue behind it, per session.js's moveToFront - it can't
 // make a queued turn's result arrive before the already-running turn's
@@ -443,11 +448,11 @@ test('sendNow inserts the target tag after the in-flight entry, not ahead of it'
   registry.delegateTask(dA.id, 'Target', 'task from A'); // in-flight (pushed first)
   registry.delegateTask(dC.id, 'Target', 'task from C'); // queued
   registry.delegateTask(dB.id, 'Target', 'task from B'); // queued
-  const [idA, idC, idB] = target.pendingResultTags.map((e) => e.queueId);
+  const [idA, idC, idB] = pendingTurnIds(target);
 
   assert.equal(await registry.sendNow(target.id, idB), true);
   assert.deepEqual(
-    target.pendingResultTags.map((e) => e.queueId),
+    pendingTurnIds(target),
     [idA, idB, idC],
     'B must land right after the in-flight A, not ahead of it',
   );

@@ -309,6 +309,57 @@ test('forceIdle skips a prompt that was still queued on promptTail', async () =>
   assert.equal(prompts[0].params.prompt[0].text, 'first');
 });
 
+// 2026-09-02 review, finding #4: listQueue() used to be hardcoded [],
+// hiding a real turn still waiting behind an in-flight one instead of
+// reporting it like session.js's/codex-session.js's own listQueue do.
+test('listQueue reports a prompt still waiting behind an in-flight one, not just []', async () => {
+  const hangPrompt = {};
+  const { session } = startFake({}, { hangPrompt });
+  await flush();
+  await flush();
+  session.pushInput('first');
+  await flush();
+  await flush();
+  assert.deepEqual(session.listQueue(), [], 'first is the one actually running now, not queued');
+  const secondId = session.pushInput('second');
+  await flush();
+  await flush();
+  assert.deepEqual(session.listQueue(), [{ id: secondId, text: 'second' }]);
+  hangPrompt.resolve();
+  await flush();
+  await flush();
+});
+
+// 2026-09-02 review, finding #4: interrupt() (the Stop button) used to only
+// cancel the in-flight turn, leaving anything already chained on
+// promptTail (a burst of messages sent before the first one even started)
+// to fire on its own once the cancelled turn's own request settled -
+// "Stop" did not actually stop everything. It now drains the same way
+// forceIdle already did.
+test('interrupt (Stop) drains a prompt still queued on promptTail, matching forceIdle', async () => {
+  const hangPrompt = {};
+  const { session, fake, states } = startFake({}, { hangPrompt });
+  await flush();
+  await flush();
+  session.pushInput('first');
+  await flush();
+  await flush();
+  session.pushInput('second');
+  await flush();
+  await flush();
+
+  await session.interrupt();
+  assert.equal(states[states.length - 1], 'idle');
+  assert.deepEqual(session.listQueue(), [], 'interrupt must drain anything still queued, not just cancel what is running');
+
+  hangPrompt.resolve({ stopReason: 'cancelled' });
+  await flush();
+  await flush();
+  const prompts = fake.requests.filter((r) => r.method === 'session/prompt');
+  assert.equal(prompts.length, 1, 'the still-queued second prompt must never be sent after interrupt');
+  assert.equal(prompts[0].params.prompt[0].text, 'first');
+});
+
 test('a new pushInput while a prompt is in flight cancels the current turn', async () => {
   const hangPrompt = {};
   const { session, fake } = startFake({}, { hangPrompt });

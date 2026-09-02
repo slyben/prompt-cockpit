@@ -64,7 +64,7 @@ function fakeStartSession() {
     close: () => {},
     interrupt: async () => { lastInterruptCalled = true; },
     // interruptTurn() (session-registry.js) reads this before calling
-    // interrupt(), to splice pendingResultTags for anything Stop drops from
+    // interrupt(), to fail the delegation tag of anything Stop drops from
     // the local queue - real sessions always have it (session.js's return
     // shape), this stub just needs it to exist.
     listQueue: () => [],
@@ -148,6 +148,32 @@ test('GET /api/history/:sessionId/markdown on an unknown session id returns an e
 test('a malformed percent-escape in a route param returns 400, not a generic 500', async () => {
   const res = await fetch(`${ORIGIN}/api/history/%/markdown`);
   assert.equal(res.status, 400);
+});
+
+// 2026-09-02 review: /api/history/:id used to trust each provider's own
+// fetchHistory to validate `id` before touching disk - true for Claude/Grok
+// (session-history.js/grok-history.js both call isSafeSessionId), but
+// Codex's fetchCodexSessionHistory never did. The route now validates once,
+// for every provider, before ever calling fetchHistory.
+test('GET /api/history/:id rejects a path-traversal id before it reaches any provider', async () => {
+  const jsonRes = await fetch(`${ORIGIN}/api/history/..%2F..%2F..%2Fetc?cwd=/tmp`);
+  assert.equal(jsonRes.status, 400);
+  assert.match((await jsonRes.json()).error, /invalid session id/);
+
+  const mdRes = await fetch(`${ORIGIN}/api/history/..%2F..%2F..%2Fetc/markdown?cwd=/tmp`);
+  assert.equal(mdRes.status, 400);
+  assert.match((await mdRes.json()).error, /invalid session id/);
+});
+
+// A `"` in an id can't come from a real Claude/Grok/Codex session id, but
+// isSafeSessionId (a plain path.basename check) does not itself reject one -
+// belt-and-suspenders stripped separately so it can never break out of the
+// quoted filename attribute in Content-Disposition.
+test('GET /api/history/:id/markdown strips a stray quote from the Content-Disposition filename', async () => {
+  const sessionId = 'weird"session';
+  const res = await fetch(`${ORIGIN}/api/history/${encodeURIComponent(sessionId)}/markdown?cwd=/tmp`);
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get('content-disposition'), 'attachment; filename="session-weirdsession.md"');
 });
 
 test('POST /api/sessions rejects a cwd that is not a directory', async () => {
@@ -937,6 +963,34 @@ test('a delegate ws payload with an unknown target name gets a cockpit:delegate-
     const errorPayload = await errorPromise;
     assert.equal(errorPayload.targetName, 'NoSuchName');
     assert.match(errorPayload.error, /no session named/);
+  } finally {
+    ws.close();
+  }
+});
+
+// 2026-09-02 review: the ws transport had no maxPayload set (ws's own
+// default is 100 MB) while HTTP's readJsonBody already capped bodies at
+// 1 MB - a client could stream an arbitrarily large ws message into memory.
+// server.js now sets maxPayload to that same 1 MB limit; `ws` enforces it by
+// closing the socket with code 1009 (message too big) before 'message' ever
+// fires, rather than buffering the oversized frame.
+test('a ws message over the 1MB payload cap closes the socket with code 1009, not silently buffered', async () => {
+  registry._reset();
+  const row = registry.createSession({ cwd: '/tmp', name: 'Claude', startSessionImpl: fakeStartSession });
+
+  const ws = new WebSocket(wsUrl(`/ws?id=${row.id}&token=${row.token}`), {
+    headers: { Origin: ORIGIN },
+  });
+  try {
+    await new Promise((resolve, reject) => {
+      ws.on('open', resolve);
+      ws.on('error', reject);
+    });
+    const closePromise = new Promise((resolve) => ws.on('close', (code) => resolve(code)));
+    const oversized = 'x'.repeat(2 * 1024 * 1024); // 2MB, well over the 1MB cap
+    ws.send(JSON.stringify({ type: 'input', text: oversized }));
+    const code = await closePromise;
+    assert.equal(code, 1009);
   } finally {
     ws.close();
   }

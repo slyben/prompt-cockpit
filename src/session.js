@@ -99,8 +99,8 @@ function createInputQueue() {
     // pushInput needs this BEFORE it decides whether to push - push()
     // already no-ops on a closed queue, but by then pushInput has already
     // committed to returning a queueId and incrementing pendingTurns,
-    // which is exactly the desync session-registry.js's pendingResultTags
-    // FIFO relies on not happening (see pushTurn's comment there).
+    // which is exactly the desync result-epoch.js's turn ordering relies on
+    // not happening (see session-registry.js's pushTurn comment).
     isClosed() {
       return closed;
     },
@@ -424,15 +424,15 @@ export function startSession({ cwd, resume, model, effort, permissionMode, turnI
           resultEpoch.applyResultStamp(message, consumed);
           // A stale result belongs to a force-idled generation - pendingTurns
           // was already zeroed there. Decrementing it here would also drop a
-          // turn pushed AFTER forceIdle, which is the same steal as shifting
-          // pendingResultTags off the new tag.
+          // turn pushed AFTER forceIdle, which is the same steal as claiming
+          // the new turn's delegation tag.
           if (!consumed.stale) {
             pendingTurns = Math.max(0, pendingTurns - 1);
           }
           // onMessage() before onStateChange(), not after (unlike every other
           // branch here that falls through to the generic onMessage() call
-          // below) - confirmed live: session-registry.js's handleMessage is
-          // what shifts row.pendingResultTags (the array the state
+          // below) - confirmed live: consumeFifo() above is what drops this
+          // turn from result-epoch.js's pending list (which the state
           // broadcast's pendingTurnsCount badge reads off), but setState()
           // (wired to onStateChange) broadcasts immediately and synchronously.
           // Calling onStateChange first shipped a summary with the corrected
@@ -481,10 +481,10 @@ export function startSession({ cwd, resume, model, effort, permissionMode, turnI
     // inputQueue.close() calls above) would never be consumed - no `result`
     // will ever come for it. Returning null here (instead of proceeding to
     // mint a queueId, echo it, and increment pendingTurns as if it were
-    // live) is what lets pushTurn/session-registry.js's pendingResultTags
-    // stay in lockstep with actual results - see finding #2 in the
+    // live) is what lets session-registry.js's pushTurn avoid registering a
+    // delegation tag nothing will ever answer - see finding #2 in the
     // 2026-08-24 review: this used to fall through and leave a permanent
-    // FIFO entry nothing would ever shift off correctly.
+    // FIFO entry nothing would ever match correctly.
     if (inputQueue.isClosed()) return null;
     // The wire message stays exactly this shape - nothing extra. Confirmed
     // live (reproducibly) that adding a client-supplied `uuid` makes the
@@ -697,6 +697,11 @@ export function startSession({ cwd, resume, model, effort, permissionMode, turnI
 
   return {
     query: handle,
+    // The single owner of this session's turn identity (result-epoch.js):
+    // FIFO order plus the delegation tags session-registry.js attaches to a
+    // pushed turn. Exposed so the registry has no parallel copy to keep in
+    // lockstep - see that module's comment for the bugs that caused.
+    turns: resultEpoch,
     pushInput,
     close,
     interrupt,

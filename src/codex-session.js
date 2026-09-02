@@ -232,6 +232,15 @@ export function startCodexSession({
           const consumed = resultEpoch.consume(entry.id);
           resultEpoch.applyResultStamp(message, consumed);
           onMessage(message);
+          // onError routes to session-registry.js's handleError, which reaps
+          // this row - the rest of cockpit now treats this session as dead.
+          // `closed` must agree, or this loop (and any later pushInput) keeps
+          // driving turn/start RPCs against a session nobody can see or
+          // interact with anymore, into the void (2026-09-02 review, finding
+          // #2's "Related" note). manager.onClose already sets `closed` for
+          // the whole-app-server-died case; this covers the per-turn
+          // runTurn() failure case the same way.
+          closed = true;
           onError(err);
         }
       }
@@ -243,7 +252,15 @@ export function startCodexSession({
   }
 
   function pushInput(text) {
-    if (closed) return undefined;
+    // `null`, not undefined - session-registry.js's pushTurn checks for this
+    // exact sentinel ("did not enqueue anything, no result will ever come")
+    // to decide whether to register a delegation tag for the turn (see
+    // grok-session.js's own pushInput comment on the same contract). Codex
+    // returning undefined here let a closed-session push slip past that
+    // check and setTag(undefined, tag), stranding a delegation origin
+    // waiting on a result that was never going to arrive (2026-09-02 review,
+    // finding #2).
+    if (closed) return null;
     const id = randomUUID();
     const meta = resultEpoch.push(id);
     turnCounter += 1;
@@ -352,6 +369,9 @@ export function startCodexSession({
   }
 
   return {
+    // See session.js's own `turns` comment - result-epoch.js owns turn
+    // identity for every provider, the registry keeps no copy.
+    turns: resultEpoch,
     pushInput,
     close,
     interrupt,

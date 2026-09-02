@@ -1,21 +1,22 @@
 # Tests
 
-`npm test` runs the unit suite (`session-registry.test.mjs`, `session-launcher.test.mjs`,
-`server-auth.test.mjs`, `permissions.test.mjs`, `sdk-adapter.test.mjs`,
-`session-history.test.mjs`, `session.test.mjs`, `event-log.test.mjs`, `usage.test.mjs`,
-`context-usage.test.mjs`) via
-Node's built-in test runner. Fast, free, no network calls, no Claude CLI
-spawned - the registry tests inject a stubbed `startSessionImpl`, and
-`session.test.mjs` injects a stubbed `queryImpl` (same pattern, one level
-deeper - `startSession` now takes it the same way `createSession` takes
+`npm test` runs every `tests/*.test.mjs` file (40+ and growing - see the
+directory listing rather than a hand-maintained list here, which drifted
+stale in an earlier version of this doc) via Node's built-in test runner.
+Fast, free, no network calls, no Claude/Grok/Codex CLI spawned - the
+registry tests inject a stubbed `startSessionImpl`, and `session.test.mjs`
+injects a stubbed `queryImpl` (same pattern, one level deeper -
+`startSession` now takes it the same way `createSession` takes
 `startSessionImpl`) instead of the real SDK-backed ones.
 
 ## MVP4 - live stats panel
 
 `usage.test.mjs` covers `src/usage.js` directly: `costForUsage` against the
 copied `src/pricing.json` (input/output/cache-read/cache-write, the legacy
-`cache_creation_input_tokens` field, an unpriced model returning `null`
-rather than guessing), and `createUsageAccumulator`'s running totals and
+`cache_creation_input_tokens` field, an unpriced model returning its real
+token breakdown with `cost: null` rather than guessing a price or dropping
+the tokens - `costForUsage` itself only returns `null` when `usage` is
+missing entirely), and `createUsageAccumulator`'s running totals and
 cache hit rate. `session-registry.test.mjs` covers the wiring one layer up:
 an assistant message with `usage` broadcasts `cockpit:usage` with updated
 totals, a fresh `attachClient` gets a zeroed snapshot immediately (not a

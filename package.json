@@ -3,7 +3,7 @@
   "version": "0.1.5",
   "private": true,
   "license": "MIT",
-  "description": "Browser cockpit for driving Claude Code sessions via the Claude Agent SDK.",
+  "description": "Browser cockpit for driving Claude Code, Grok, and Codex CLI sessions.",
   "type": "module",
   "engines": {
     "node": ">=18.0.0"

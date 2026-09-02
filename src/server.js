@@ -22,6 +22,7 @@ import { registerSystemRoutes } from './routes/system.js';
 import { registerSessionActionRoutes } from './routes/session-actions.js';
 import { serveStatic } from './static-files.js';
 import { checkOperatorToken, getOperatorToken } from './operator-auth.js';
+import { BodyTooLargeError, MAX_BODY_BYTES } from './http-utils.js';
 
 const HOST = '127.0.0.1';
 const PORT = Number(process.env.PORT) || 4317;
@@ -36,6 +37,10 @@ registerSessionActionRoutes(router);
 
 const server = createServer((req, res) => {
   handleRequest(req, res).catch((err) => {
+    if (err instanceof BodyTooLargeError) {
+      if (!res.headersSent) res.writeHead(413, { 'content-type': 'text/plain' });
+      return res.end('request body too large');
+    }
     console.error('request error:', err);
     if (!res.headersSent) res.writeHead(500, { 'content-type': 'text/plain' });
     res.end('internal error');
@@ -60,7 +65,26 @@ function isSpoofedRequest(req) {
   return false;
 }
 
+// Applied to every response regardless of route/outcome. This app has no
+// inline scripts/styles and loads nothing cross-origin (index.html's own
+// comment confirms it), so the CSP can be strict rather than a placeholder.
+// None of this replaces the Origin/Host check above - a compliant browser
+// honors these; isSpoofedRequest is what stops a request from ever reaching
+// a handler in the first place.
+function applySecurityHeaders(res) {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader(
+    'Content-Security-Policy',
+    `default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self' ws://127.0.0.1:${PORT} ws://localhost:${PORT}; frame-ancestors 'none'`
+  );
+  res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+  res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
+}
+
 async function handleRequest(req, res) {
+  applySecurityHeaders(res);
   if (isSpoofedRequest(req)) {
     res.writeHead(403, { 'content-type': 'text/plain' });
     return res.end('forbidden');
@@ -83,7 +107,11 @@ async function handleRequest(req, res) {
 
 // --- websocket -------------------------------------------------------------
 
-const wss = new WebSocketServer({ noServer: true });
+// maxPayload matches readJsonBody's own HTTP body cap - the ws transport was
+// otherwise unbounded (ws's own default is 100 MB) while HTTP already had a
+// 1 MB ceiling (2026-09-02 review). A frame over this size closes the
+// socket with code 1009 (message too big) rather than buffering it.
+const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_BODY_BYTES });
 
 server.on('upgrade', (req, socket, head) => {
   // Host, not just Origin - see isSpoofedRequest's comment on why Origin
@@ -137,6 +165,18 @@ server.on('upgrade', (req, socket, head) => {
 
 wss.on('connection', (ws, req, id, since) => {
   registry.attachClient(id, ws, since);
+
+  // Node's EventEmitter throws an 'error' event as an uncaught exception
+  // when nothing is listening for it - true of ws's Receiver too, which
+  // emits exactly that when a frame exceeds maxPayload (set above). Adding
+  // the cap without this listener trades a graceful close for a process-
+  // level crash on the very oversized-message case it was meant to guard
+  // against (2026-09-02 review, caught by the maxPayload regression test
+  // itself). The socket is already gone by the time this fires - nothing
+  // to send a reply on - so this only needs to stop it from being fatal.
+  ws.on('error', (err) => {
+    console.error(`ws error for ${id}:`, err.message || err);
+  });
 
   ws.on('message', (raw) => {
     let payload;

@@ -1072,6 +1072,18 @@ sessionLabelEl.addEventListener('click', () => {
 // assistant reply resolves it (session-registry.js's applyAssistantUsage) -
 // the badge just stays hidden until then rather than showing a misleading
 // blank chip.
+// Looks up a provider's server-advertised effort-option label (see
+// provider-registry.js's CLAUDE_EFFORT_OPTIONS/GROK_EFFORT_OPTIONS, sent
+// down via /api/providers' launch.effortOptions) - falls back to the raw
+// value itself if the catalog hasn't loaded yet or doesn't know this value,
+// same as the old GROK_EFFORT_LABELS[x] || x / CLAUDE_EFFORT_LABELS[x] || x
+// pattern this replaces.
+function effortLabel(provider, value) {
+  const options = providerCatalog.get(provider)?.launch?.effortOptions;
+  const found = Array.isArray(options) ? options.find((o) => o.value === value) : null;
+  return found ? found.label : value;
+}
+
 function applyModelBadge(session) {
   if (!currentModel) { modelBadge.hidden = true; return; }
   const parts = [currentModel];
@@ -1079,7 +1091,7 @@ function applyModelBadge(session) {
     // Always shown, not just when explicitly set - mirrors thinking's own
     // "thinking default" fallback below rather than silently dropping the
     // part when session.effort happens to be falsy.
-    parts.push(`${session.effort ? (GROK_EFFORT_LABELS[session.effort] || session.effort) : 'default'} effort`);
+    parts.push(`${session.effort ? effortLabel('grok', session.effort) : 'default'} effort`);
   } else if (currentProvider === 'claude') {
     // Three distinct states, not two - 0 is a real explicit "Off" (falsy,
     // so it can't share a branch with "unset"; see THINKING_BUDGET_PRESETS'
@@ -1095,10 +1107,10 @@ function applyModelBadge(session) {
     // as the Grok branch above - an unset effort is still worth surfacing
     // as "default effort", not omitted.
     // Unset effort isn't "no effort" - the SDK still picks a real tier
-    // ('high', per CLAUDE_EFFORT_OPTIONS' own sourced comment), so show that
-    // real value (already carrying its own '*' default marker) instead of
-    // the vague "default effort".
-    parts.push(`${CLAUDE_EFFORT_LABELS[session.effort || 'high'] || session.effort} effort`);
+    // ('high', per provider-registry.js's CLAUDE_EFFORT_OPTIONS own sourced
+    // comment), so show that real value (already carrying its own '*'
+    // default marker) instead of the vague "default effort".
+    parts.push(`${effortLabel('claude', session.effort || 'high')} effort`);
     parts.push(
       session.maxThinkingTokens === 0
         ? 'thinking off'
@@ -1265,34 +1277,13 @@ for (const opt of THINKING_DISPLAY_OPTIONS) {
 thinkingBudgetBtn.addEventListener('change', () => selectThinking());
 thinkingDisplayBtn.addEventListener('change', () => selectThinking());
 
-const GROK_EFFORT_OPTIONS = [
-  { value: 'low', label: 'Low' },
-  { value: 'medium', label: 'Medium' },
-  { value: 'high', label: 'High' },
-  { value: 'xhigh', label: 'Extra high' },
-];
-// Claude's effort ladder (Agent SDK's EffortLevel - session-registry.js's
-// CLAUDE_EFFORTS) - one level wider than Grok's ('max'), and unlike Grok's
-// select this one needs a blank "Default" option since effort is optional
-// for Claude (unset = model/SDK default) where Grok's spawn-time flag is
-// always some concrete value.
-// 'high' is marked as the real default straight from the installed
-// @anthropic-ai/claude-agent-sdk's sdk.d.ts (0.3.231) EffortLevel doc
-// comment: "'high' — Deep reasoning (default)". Confirmed 2026-08-20,
-// same investigation as THINKING_BUDGET_PRESETS' default-marker comment
-// above - see .claude/memory/sdk-streaming-input-gotchas.md item 3.
-const CLAUDE_EFFORT_OPTIONS = [
-  { value: '', label: 'Default' },
-  { value: 'low', label: 'Low' },
-  { value: 'medium', label: 'Medium' },
-  { value: 'high', label: 'High *' },
-  { value: 'xhigh', label: 'Extra high' },
-  { value: 'max', label: 'Max' },
-];
-// Shared with the header badge (applyModelBadge) and the launcher's
-// startEffortSelect below - one label source for "low" -> "Low" etc.
-const GROK_EFFORT_LABELS = Object.fromEntries(GROK_EFFORT_OPTIONS.map((o) => [o.value, o.label]));
-const CLAUDE_EFFORT_LABELS = Object.fromEntries(CLAUDE_EFFORT_OPTIONS.map((o) => [o.value, o.label]));
+// Effort option labels/tooltips (Grok's low/medium/high/xhigh, Claude's
+// wider low..max ladder with its blank "Default" entry) used to be
+// hardcoded here as GROK_EFFORT_OPTIONS/CLAUDE_EFFORT_OPTIONS - both are now
+// static launch-time catalog data owned by provider-registry.js and served
+// on launch.effortOptions (see /api/providers), read back here via
+// launchConfig(). effortLabel() above reads the same field for the header
+// badge.
 
 // Settings modal's Effort select is provider-aware (unlike the launcher's
 // startEffortSelect, which only ever needs to reflect the provider picker
@@ -1300,20 +1291,23 @@ const CLAUDE_EFFORT_LABELS = Object.fromEntries(CLAUDE_EFFORT_OPTIONS.map((o) =>
 // function still needs to run per-summary since the modal's DOM is shared
 // across every session tab a browser might switch between via history nav.
 function fillSettingsEffortSelect(provider) {
-  const grok = provider === 'grok';
-  const claude = provider === 'claude';
-  const advertisedEfforts = providerCatalog.get(provider)?.launch?.efforts;
-  const list = grok
-    ? GROK_EFFORT_OPTIONS
-    : claude
-      ? CLAUDE_EFFORT_OPTIONS
-      : Array.isArray(advertisedEfforts)
-        ? [{ value: '', label: 'Default' }, ...advertisedEfforts.map((value) => ({ value, label: String(value) }))]
-        : [];
-  effortBtn.title = grok
-    ? 'Grok reasoning effort. Low is cheaper and faster. High / Extra high spend more on reasoning.'
-    : claude
-      ? "Claude's reasoning effort for this session - low is cheaper and faster, high/xhigh/max spend more on thinking depth and thoroughness. Default leaves it up to the model."
+  // thinkingBudget is Claude-only today (provider-registry.js's
+  // capabilities) - it's what distinguishes "this provider's effort select
+  // means something different from a bare value picker" from Grok, which
+  // also ships a static effortOptions catalog but no separate thinking-
+  // budget dial.
+  const thinkingBudget = providerCatalog.get(provider)?.capabilities?.thinkingBudget;
+  const options = launchConfig(provider).effortOptions;
+  const advertisedEfforts = launchConfig(provider).efforts;
+  const list = Array.isArray(options)
+    ? options
+    : Array.isArray(advertisedEfforts)
+      ? [{ value: '', label: 'Default' }, ...advertisedEfforts.map((value) => ({ value, label: String(value) }))]
+      : [];
+  effortBtn.title = thinkingBudget
+    ? "Claude's reasoning effort for this session - low is cheaper and faster, high/xhigh/max spend more on thinking depth and thoroughness. Default leaves it up to the model."
+    : Array.isArray(options)
+      ? 'Grok reasoning effort. Low is cheaper and faster. High / Extra high spend more on reasoning.'
       : `${providerCatalog.label(provider)} reasoning effort for this session.`;
   effortBtn.innerHTML = '';
   for (const opt of list) {
@@ -1729,8 +1723,16 @@ function rewindButtonLabel() {
 }
 
 async function onRewindClick(turnIndex) {
+  // The conversation fork is non-destructive (opens as a brand new session,
+  // this one is untouched) - but there is only one folder on disk, shared
+  // by both, so a file revert has nowhere else to happen. It reverts files
+  // in THIS session's own working folder right now, not "in" the new fork -
+  // worded explicitly here after a review found the old copy ("Also reverts
+  // files to this point", right after "opens a new session") read as if the
+  // revert applied to the new fork instead of the session still open right
+  // now (2026-09-02 review, finding #5).
   const fileNote = hasFileCheckpointing
-    ? 'Also reverts files to this point.'
+    ? 'This reverts files on disk right now, in this session\'s own folder - not just in the new forked session.'
     : 'Files on disk are left as-is. This session stays open.';
   const lead = hasFileCheckpointing
     ? 'Rewind here? Opens a new session forked at this point.'
@@ -1859,31 +1861,13 @@ async function loadResumable() {
   }
 }
 
-const CLAUDE_START_MODELS = [
-  { value: '', label: 'Default model' },
-  // Marked default (same convention as THINKING_BUDGET_PRESETS/
-  // CLAUDE_EFFORT_OPTIONS below): Sonnet is what the CLI actually resolves
-  // '' to today, not just "a reasonable pick".
-  { value: 'sonnet', label: 'Sonnet *' },
-  { value: 'opus', label: 'Opus' },
-  { value: 'haiku', label: 'Haiku' },
-];
-const GROK_START_MODELS = [
-  { value: '', label: 'Default model' },
-  { value: 'grok-4.5', label: 'Grok 4.5' },
-  { value: 'grok-build', label: 'Grok Build' },
-  { value: 'grok-4.6', label: 'Grok 4.6' },
-];
+// Static launch-time model/effort catalogs (formerly CLAUDE_START_MODELS/
+// GROK_START_MODELS here) now live in provider-registry.js and ride down on
+// /api/providers' launch.models / launch.effortOptions - see this file's
+// launchConfig()/launchModels() below and fillSettingsEffortSelect() above.
 
 function launchConfig(provider) {
   return providerCatalog.get(provider)?.launch || {};
-}
-
-function launchKind(provider) {
-  // These are the only launch contracts the current frontend knows how to
-  // serialize. New providers stay selectable and get a neutral launcher
-  // until their metadata describes additional controls.
-  return provider === 'grok' ? 'grok' : provider === 'claude' ? 'claude' : 'generic';
 }
 
 function launchModels(provider) {
@@ -1893,8 +1877,6 @@ function launchModels(provider) {
       ? { value: item, label: item }
       : { value: item?.value ?? item?.id ?? '', label: item?.label ?? item?.id ?? 'Default model' });
   }
-  if (provider === 'grok') return GROK_START_MODELS;
-  if (provider === 'claude') return CLAUDE_START_MODELS;
   return [{ value: '', label: 'Default model' }];
 }
 
@@ -1912,28 +1894,35 @@ function fillStartModels() {
 // Launcher's effort/thinking-budget picker - same slot, repopulated per
 // provider (mirrors fillStartModels above) rather than two separate selects
 // the user has to know to pick between. Options and value semantics match
-// the mid-session Settings versions exactly (GROK_EFFORT_OPTIONS/
+// the mid-session Settings versions exactly (fillSettingsEffortSelect above/
 // THINKING_BUDGET_PRESETS, defined further down but already evaluated by
 // the time this runs - both are called from provider-select listeners, well
 // after module load finishes) so "effort" means the same thing whether it's
 // picked before or during a session.
 function fillStartEffort() {
   const provider = selectedProvider();
-  const grok = provider === 'grok';
-  const claude = provider === 'claude';
-  const generic = !grok && !claude;
+  // thinkingBudget capability (Claude-only today) is what actually
+  // distinguishes the three launcher shapes here, not the provider id - see
+  // fillSettingsEffortSelect's matching comment. Grok also ships a static
+  // effortOptions catalog but no separate thinking-budget dial, so it falls
+  // to the second branch; a provider with neither gets the generic
+  // value-list rendering built from launch.efforts.
+  const thinkingBudget = providerCatalog.get(provider)?.capabilities?.thinkingBudget;
+  const options = launchConfig(provider).effortOptions;
+  const grok = !thinkingBudget && Array.isArray(options);
+  const generic = !thinkingBudget && !grok;
   const advertisedEfforts = launchConfig(provider).efforts;
   const genericEfforts = Array.isArray(advertisedEfforts)
     ? [{ value: '', label: 'Default effort' }, ...advertisedEfforts.map((value) => ({ value, label: String(value) }))]
     : [];
-  const list = grok ? GROK_EFFORT_OPTIONS : generic ? genericEfforts : THINKING_BUDGET_PRESETS;
+  const list = grok ? options : generic ? genericEfforts : THINKING_BUDGET_PRESETS;
   startEffortSelect.title = grok
     ? 'Grok reasoning effort for this session. Low is cheaper and faster; High/Extra high spend more on reasoning.'
     : generic
     ? `${providerCatalog.label(provider)} reasoning effort for this session.`
     : "Claude's thinking budget for this session - tokens it can spend reasoning before answering. Default lets the model decide (adaptive thinking on Opus 5/Sonnet 5/Fable 5); Off explicitly disables it.";
   startEffortSelect.innerHTML = '';
-  // GROK_EFFORT_OPTIONS has no '' entry (Grok's spawn-time effort flag is
+  // Grok's effortOptions has no '' entry (Grok's spawn-time effort flag is
   // always a concrete value, unlike Claude's optional one), so this override
   // only ever fires for Claude. THINKING_BUDGET_PRESETS' '' label ("Default
   // *") reads fine in the Settings modal, which has an adjacent "Thinking
@@ -1944,17 +1933,17 @@ function fillStartEffort() {
   for (const item of list) {
     const opt = document.createElement('option');
     opt.value = item.value;
-    opt.textContent = (claude && item.value === '') ? 'Default Thinking *' : item.label;
+    opt.textContent = (thinkingBudget && item.value === '') ? 'Default Thinking *' : item.label;
     startEffortSelect.append(opt);
   }
   // Claude's dedicated effort dial - a real, separate SDK option (not the
   // thinking-token budget above) - only shown for Claude; Grok's own effort
   // concept already lives in the shared slot above.
   startEffortSelect.hidden = generic && !genericEfforts.length;
-  startClaudeEffortSelect.hidden = !claude;
-  if (claude) {
+  startClaudeEffortSelect.hidden = !thinkingBudget;
+  if (thinkingBudget) {
     startClaudeEffortSelect.innerHTML = '';
-    for (const opt of CLAUDE_EFFORT_OPTIONS) {
+    for (const opt of (options || [])) {
       const option = document.createElement('option');
       option.value = opt.value;
       option.textContent = opt.value === '' ? 'Default effort' : opt.label;
@@ -2049,7 +2038,10 @@ document.getElementById('launcherForm').addEventListener('submit', (event) => {
   // session addresses this one by via `/ask <Name>: ...`. Optional: an
   // unnamed session just can't be delegated to, same as today.
   const name = startNameInput.value.trim() || undefined;
-  const kind = launchKind(provider);
+  // Same thinkingBudget capability check as fillStartEffort - Claude is the
+  // only provider today where the shared slot means "thinking budget" and
+  // the dedicated startClaudeEffortSelect carries the real effort value.
+  const thinkingBudgetCapable = providerCatalog.get(provider)?.capabilities?.thinkingBudget;
   startSession({
     cwd,
     model,
@@ -2058,8 +2050,8 @@ document.getElementById('launcherForm').addEventListener('submit', (event) => {
     // Grok's effort rides the shared slot; Claude's rides its own dedicated
     // select - both are real creation-time `effort` values now (session.js
     // forwards Claude's into query()'s options too, see CLAUDE_EFFORTS).
-    effort: kind === 'claude' ? claudeEffortValue : effortValue,
-    thinkingBudget: kind === 'claude' ? effortValue : undefined,
+    effort: thinkingBudgetCapable ? claudeEffortValue : effortValue,
+    thinkingBudget: thinkingBudgetCapable ? effortValue : undefined,
   });
 });
 
@@ -2332,7 +2324,12 @@ function connect(id, token, { reconnect = false } = {}) {
 // rename-tab tooltip (sessionLabelEl.title, set once above) still carries
 // the full path on hover for whoever needs the whole thing.
 function shortenCwd(cwd) {
-  const parts = cwd.split('/').filter(Boolean);
+  // /[\\/]/ , not '/' - matches file-picker.js/settings.js's own path
+  // splitting. A Windows cwd (`D:\Dev\AI\prompt-cockpit`) has no `/` at all,
+  // so the old split() saw one giant "segment" and always fell into the
+  // parts.length <= 2 return-as-is branch below, silently never shortening
+  // on Windows (2026-09-02 review, finding #3).
+  const parts = cwd.split(/[\\/]/).filter(Boolean);
   if (parts.length <= 2) return cwd; // already short - nothing to trim
   return `.../${parts.slice(-2).join('/')}`;
 }
@@ -2362,7 +2359,10 @@ function applySession(session) {
     ? `${currentSessionName}  ·  ${shortenCwd(session.cwd)}`
     : `${shortenCwd(session.cwd)}  ·  ${providerLabel}${session.tabCount > 1 ? `  ·  ${session.tabCount} tabs` : ''}`;
   sessionLabelEl.title = `${session.cwd} - click to rename this session`; // full path survives on hover once the label itself is truncated
-  if (!tabChrome.isUserNamed()) tabChrome.setAutoName(currentSessionName || session.cwd.split('/').filter(Boolean).pop() || session.cwd);
+  // /[\\/]/ , same fix as shortenCwd above - a Windows cwd has no '/', so
+  // this used to always fall through to the full path instead of just its
+  // last segment.
+  if (!tabChrome.isUserNamed()) tabChrome.setAutoName(currentSessionName || session.cwd.split(/[\\/]/).filter(Boolean).pop() || session.cwd);
   setState(session.state);
   // Turns-in-flight badge (session-registry.js's pendingTurnsCount) - debug
   // option, off by default (settings.isPendingTurnsBadgeEnabled(), toggled

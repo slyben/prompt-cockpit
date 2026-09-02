@@ -18,16 +18,11 @@
 // this module itself stays filesystem-free.
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import path from 'node:path';
-import { startSession } from './session.js';
-import { startGrokSession } from './grok-session.js';
-import { forkConversation, rewindFiles as rewindFilesSdk, resolveTurnUuid } from './rewind.js';
-import { resolveGrokPromptIndex } from './grok-rewind.js';
-import { fetchSessionHistory, countWithinTokenBudget, countRealUserTurns, INITIAL_HISTORY_TOKEN_BUDGET } from './session-history.js';
-import { fetchGrokSessionHistory } from './grok-history.js';
+import { countWithinTokenBudget, countRealUserTurns, INITIAL_HISTORY_TOKEN_BUDGET } from './session-history.js';
 import { createEventLog, append as appendEvent, replay as replayEvents } from './event-log.js';
 import { createUsageAccumulator, costForUsage } from './usage.js';
 import { contextPayload } from './context-usage.js';
-import { getProvider, parseProvider, CLAUDE_EFFORTS, GROK_EFFORTS } from './provider-registry.js';
+import { getProvider, parseProvider } from './provider-registry.js';
 import { createDelegation } from './delegation.js';
 const sessions = new Map();
 
@@ -81,11 +76,13 @@ export function createSession({ cwd, resume, name, model, permissionMode, histor
     thinkingDisplay: null, // 'summarized' | 'omitted' | null (SDK default when thinking is on)
     state: 'starting', // starting | idle | running | error | closed
     mode: permissionMode || 'default',
-    // Native conversation id reported by the active provider. Keep the
-    // legacy Claude-named alias in sync until older clients/routes have
-    // migrated; shared code should use providerSessionId from here on.
+    // Native conversation id reported by the active provider. toSummary()
+    // below derives the legacy claudeSessionId wire field from this plus
+    // row.provider instead of this row keeping a second copy in lockstep -
+    // a Grok/Codex row used to get a `claudeSessionId` too (just a copy of
+    // its own, non-Claude, id), which was actively misleading given the
+    // field's name.
     providerSessionId: resume || null,
-    claudeSessionId: resume || null,
     // See delegation.js's own handshakeSecret comment - stamped with
     // the CURRENT canonical value at creation, so a locally-spawned row is
     // trusted for delegation from the moment it exists.
@@ -158,43 +155,21 @@ export function createSession({ cwd, resume, name, model, permissionMode, histor
     // `history` either - a queue only ever holds turns pushed THIS process
     // lifetime, there is nothing about it in a resumed transcript.
     queue: [],
-    // Cross-session delegation: ordered record of every
-    // turn pushed into THIS row that hasn't produced its `result` yet - one
-    // entry per pushTurn() call (see below), `{ queueId, tag }`. `tag` is
-    // `null` for an ordinary human/auto-continue turn, or
-    // `{ fromId, fromName, task, buffer }` for a turn pushed by
-    // delegateTask() on behalf of another session.
+    // Cross-session delegation state does NOT live on the row. Both the
+    // in-flight turn ORDER and the per-turn delegation `tag` are owned by
+    // the handle's result-epoch tracker (`row.handle.turns`, see
+    // result-epoch.js) - this module reads them off it and keeps no copy.
     //
-    // Turns are strictly FIFO per session (session.js's inputQueue,
-    // grok-session.js's promptTail - each pushed input yields exactly one
-    // `result` before the next is pulled), so handleMessage's `result`
-    // branch can `shift()` this array to find the entry that just finished
-    // - PROVIDED this array's order always matches actual execution order.
-    // That's not automatically true: a plain human message typed directly
-    // into this session interleaves with a pending delegation's turn (both
-    // go through the same underlying queue), and the queue pane can
-    // remove/reorder/send-now a still-queued turn out of push order. Naively
-    // tagging only delegated pushes and blind-shifting on every result
-    // silently misroutes a later delegation's reply to the wrong origin
-    // session the moment either happens - a real bug caught in review, not
-    // a hypothetical.
-    //
-    // The fix: EVERY push - human (sendInput), delegated (delegateTask),
-    // a relayed result landing back on its origin (relayDelegationResult),
-    // or auto-continue's synthetic 'Continue' (scheduleAutoContinue) - goes
-    // through pushTurn() below, which always appends an entry (tag or not).
-    // removeQueued/reorderQueue/sendNow mirror the exact same mutation onto
-    // this array that they perform on session.js's own queue (keyed by the
-    // same `queueId` session.js's pushInput now returns), so this array
-    // stays in lockstep with actual future execution order even after a
-    // queue-pane edit - shift() at result time is then always correct.
-    // `queueId` is minted by every provider's pushInput on success
-    // (Claude, Grok, Codex). Grok used to return `undefined` and rely on
-    // positional FIFO; a real id lets a late `result` after forceIdle be
-    // matched instead of blindly shift()'d onto the next tag. Each entry
-    // also carries `epoch` from the handle's result-generation counter
-    // (see result-epoch.js).
-    pendingResultTags: [],
+    // That is deliberate and hard-won: this row used to carry its own
+    // ordered `pendingResultTags` array that every call site had to mirror
+    // by hand onto the provider's real queue, and every time the two copies
+    // drifted, a delegated reply got relayed to the wrong origin session.
+    // result-epoch.js's module comment lists the three production bugs that
+    // produced. `tag` itself is `null` for an ordinary human/auto-continue
+    // turn, or `{ fromId, fromName, task, buffer }` for a turn pushed by
+    // delegateTask() on behalf of another session; it is keyed by the
+    // `queueId` every provider's pushInput mints on success (Claude, Grok,
+    // Codex), never by position.
   };
   // Resumed sessions never replay their history through handleMessage - the
   // tail-append loop below just seeds the event log directly for display, no
@@ -296,23 +271,32 @@ export function findByName(cwd, name) {
 // Cross-session delegation: the ONE place that pushes a turn into a
 // row's handle - every call site (sendInput, delegateTask, a relayed result
 // landing back on its origin, scheduleAutoContinue's synthetic 'Continue')
-// goes through this, so row.pendingResultTags can never silently miss an
-// entry the way it did when only delegateTask tagged its own push (see that
-// field's own comment on createSession's row object for the full failure
-// mode this closes). `tag` is null for a non-delegated turn.
+// goes through this. `tag` is null for a non-delegated turn; a tagged turn
+// registers its tag against the queueId the handle's own turn tracker
+// already minted for it, so there is exactly one record of this turn's
+// identity (see result-epoch.js). Untagged turns register nothing at all -
+// the tracker's ordering already accounts for them, which is the whole
+// reason a plain human message interleaved with a delegation can no longer
+// desync the relay.
+// Turns still awaiting a `result` on this row. `?? 0` covers a handle
+// without a turn tracker at all (older test doubles, and any future row
+// type that isn't backed by a local CLI - see delegation.js's module
+// comment on MVP6) rather than throwing from a summary broadcast.
+function pendingTurnsCount(row) {
+  return row.handle?.turns?.pendingCount ?? 0;
+}
+
 function pushTurn(row, text, tag = null) {
   const queueId = row.handle.pushInput(text);
   // `null` means pushInput did NOT enqueue anything: the target queue was
   // already closed, or (grok only) this exact prompt was already pending.
   // No result will ever come for a turn that was never actually pushed, so
-  // appending a pendingResultTags entry for it here is exactly the desync
-  // bug from the 2026-08-24 review (finding #2) - a later, unrelated
-  // `result` would shift() this dead entry off first and get relayed to
-  // the wrong origin. Best-effort drop instead, same as
-  // relayDelegationResult already does when its own origin lookup misses.
+  // registering a tag for it here would strand its origin forever waiting
+  // on a reply (the 2026-08-24 review's finding #2). Best-effort drop
+  // instead, same as relayDelegationResult already does when its own origin
+  // lookup misses.
   if (queueId === null) return null;
-  const epoch = row.handle.debugSnapshot?.()?.resultEpoch ?? 0;
-  row.pendingResultTags.push({ queueId, tag, epoch });
+  if (tag) row.handle.turns?.setTag(queueId, tag);
   // Returned so relayDelegationResult can correlate this turn's own echoed
   // 'user' message (which session.js stamps with this same queueId, see its
   // pushInput comment) with a later, separate cockpit:delegate-full-trace
@@ -333,7 +317,7 @@ export function closeSession(id) {
   // asynchronously later, per its own comment - but sessions.delete(id)
   // below happens synchronously right now, so by the time that late
   // `result` reaches handleMessage, `sessions.get(id)` finds nothing and
-  // bails before ever reaching the pendingResultTags shift/relay. Without
+  // bails before ever reaching the tag-claim/relay below. Without
   // this, a session closed while it's the target of a delegation strands
   // the origin(s) forever with no error (confirmed in review - unlike a
   // crash, which handleError already covers). Fail them explicitly here,
@@ -377,7 +361,7 @@ export function getDebugInfo(id) {
     pendingApprovalToolName: row.pendingApprovals[0]?.toolName || null,
     pendingApprovalCount: row.pendingApprovals.length,
     queueLength: row.queue.length,
-    pendingResultTagsLength: row.pendingResultTags.length,
+    pendingResultTagsLength: pendingTurnsCount(row),
     autoContinue: row.autoContinue,
     rateLimitHit: row.rateLimitHit,
     handle: row.handle?.debugSnapshot ? row.handle.debugSnapshot() : null,
@@ -402,7 +386,7 @@ export function memorySnapshot() {
     tasks: row.tasks.size,
     pendingTaskOps: row.pendingTaskOps.size,
     pendingApprovals: row.pendingApprovals.length,
-    pendingResultTags: row.pendingResultTags.length,
+    pendingResultTags: pendingTurnsCount(row),
     queue: row.queue.length,
     clients: row.clients.size,
   }));
@@ -423,8 +407,13 @@ export function toSummary(row) {
     mode: row.mode,
     provider: row.provider,
     providerSessionId: row.providerSessionId,
-    // Backward-compatible response field for existing browser tabs.
-    claudeSessionId: row.claudeSessionId,
+    // Backward-compatible response field for existing browser tabs (still
+    // read by public/detail-pane.js and agent-liveness.js, which fetch a
+    // subagent transcript from ~/.claude/projects - a genuinely Claude-only
+    // path). Derived here rather than stored on the row, and only for an
+    // actual Claude session, so a Grok/Codex row no longer claims a
+    // "claudeSessionId" that's really its own provider's id.
+    claudeSessionId: row.provider === 'claude' ? row.providerSessionId : null,
     hasFileCheckpointing: row.hasFileCheckpointing,
     turnIndexUnreliable: row.turnIndexUnreliable,
     createdAt: row.createdAt,
@@ -441,15 +430,15 @@ export function toSummary(row) {
     // value itself is NOT included here (only the server's own canonical
     // copy is meant to be copied around, via the /api/handshake route).
     handshakeTrusted: delegation.isSessionTrusted(row),
-    // Turns cockpit still considers "in flight" for this row - mirrors
-    // session.js/grok-session.js's own pendingTurns 1:1 (both increment on
-    // pushTurn, both decrement on the same 'result' message, see
-    // handleMessage's pendingResultTags.shift() below), just read from the
-    // registry side so app.js can show it next to the spinner without
-    // polling the debug endpoint. A number here that never comes back to 0
-    // despite nothing actually running is exactly the drift getDebugInfo's
-    // own comment describes - see forceIdle below for the manual recovery.
-    pendingTurnsCount: row.pendingResultTags.length,
+    // Turns cockpit still considers "in flight" for this row - read straight
+    // off the handle's turn tracker (result-epoch.js), which is also what
+    // session.js/grok-session.js/codex-session.js's own pendingTurns
+    // counters move in step with. Surfaced here so app.js can show it next
+    // to the spinner without polling the debug endpoint. A number here that
+    // never comes back to 0 despite nothing actually running is exactly the
+    // drift getDebugInfo's own comment describes - see forceIdle below for
+    // the manual recovery.
+    pendingTurnsCount: pendingTurnsCount(row),
     capabilities: {
       ...provider.capabilities,
       // Checkpointing is session-specific: even a provider that supports
@@ -509,7 +498,7 @@ export function detachClient(id, ws) {
 export async function sendInput(id, text) {
   const row = sessions.get(id);
   if (!row) throw new Error(`unknown session: ${id}`);
-  pushTurn(row, text); // Must go through pushTurn, not handle.pushInput directly - see pendingResultTags' comment
+  pushTurn(row, text); // Must go through pushTurn, not handle.pushInput directly - see its comment
 }
 
 // Shared shape behind every route below that calls straight through to the
@@ -542,19 +531,17 @@ export async function setPermissionMode(id, mode) {
 //
 // session.js's interrupt() (the client's Stop button) also drains its own
 // local input queue now, not just the in-flight turn - "stop" means stop
-// everything. It does that synchronously, before this call even returns, so
-// by the time row.handle.interrupt() resolves the queue is already empty -
-// row.pendingResultTags (registry-only bookkeeping session.js has no
-// knowledge of) would go stale for exactly those dropped turns otherwise,
-// the same desync removeQueued() above already guards against for a single
-// manual removal. Snapshot which ids are about to be dropped first so they
-// can be spliced out (and any delegation told its task was cancelled) right
-// alongside.
+// everything. It does that synchronously, before this call even returns, and
+// drops those turns from the turn tracker's ordering as it goes. What it
+// can't do is notify a delegation origin that its task was cancelled (the
+// provider layer knows nothing about delegation), so snapshot which ids are
+// about to be dropped first and fail their tags right alongside - same
+// treatment removeQueued() above gives a single manual removal.
 export async function interruptTurn(id) {
   return queryPassthrough(id, async (row) => {
     const queuedIds = row.handle.listQueue().map((e) => e.id);
     await row.handle.interrupt();
-    for (const queueId of queuedIds) dropResultTag(row, queueId);
+    for (const queueId of queuedIds) failDroppedTurn(row, queueId);
   });
 }
 
@@ -621,10 +608,6 @@ export async function setMaxThinkingTokens(id, maxThinkingTokens, thinkingDispla
     { maxThinkingTokens: maxThinkingTokens ?? null, thinkingDisplay: thinkingDisplay ?? null },
   );
 }
-
-// Re-exported for callers that used the pre-descriptor constants. New route
-// code should use getProvider(provider).efforts instead.
-export { GROK_EFFORTS, CLAUDE_EFFORTS };
 
 export async function setEffort(id, effort) {
   return queryPassthrough(id, (row) => row.handle.query.setEffort(effort), { effort });
@@ -782,16 +765,24 @@ function setState(id, state) {
   // connected client has already been told via the broadcastSummary above -
   // the handle is dead either way, so there's nothing left a manual close
   // would additionally have done.
-  if (state === 'closed' || state === 'error') sessions.delete(id);
+  //
+  // 'error' is deliberately excluded from that reap (2026-09-02 review,
+  // finding #1): every production provider calls onStateChange('error')
+  // immediately followed by onError(err) (session.js/grok-session.js/
+  // codex-session.js), and onError routes to handleError below, which does
+  // its own cleanup - failPendingDelegations, turns.abandonAll(), the
+  // cockpit:error broadcast - before its own sessions.delete. Reaping here
+  // first made handleError's `sessions.get(id)` come back empty, silently
+  // skipping all of that on every real crash. A 'closed' transition has no
+  // such follow-up call (the for-await loop's normal-exit path only ever
+  // calls onStateChange('closed')), so it still reaps here.
+  if (state === 'closed') sessions.delete(id);
 }
 
 function handleMessage(id, message) {
   const row = sessions.get(id);
   if (!row) return;
-  if (message.session_id) {
-    row.providerSessionId = message.session_id;
-    row.claudeSessionId = message.session_id;
-  }
+  if (message.session_id) row.providerSessionId = message.session_id;
   // The CLI can move itself out of the mode it was started/set in (e.g.
   // accepting a plan exits `plan`) without any setPermissionMode() call
   // from us - previously only session.js's own private `currentMode`
@@ -869,21 +860,21 @@ function handleMessage(id, message) {
   const seq = appendEvent(row.eventLog, message);
   broadcast(id, { type: 'sdk:message', message, seq });
   if (message.type === 'result') {
-    // Blind shift() is only safe when this result is for the current
-    // generation's front tag. A force-idled turn can still emit a late
-    // `result` after failPendingDelegations cleared the old tags and a
-    // new turn was tagged - that used to pop the new tag and relay to
-    // the wrong origin (backlog residual after the 2026-08-24 FIFO fix).
-    // Handles stamp `_cockpitStale` / `_cockpitEpoch` via result-epoch.js;
-    // unstamped results (tests that inject a result with no matching push)
-    // keep the old FIFO shift.
-    const front = row.pendingResultTags[0];
-    const stale = message._cockpitStale === true
-      || (front && message._cockpitEpoch != null && front.epoch != null && message._cockpitEpoch !== front.epoch)
-      || (front && message._cockpitQueueId && front.queueId && message._cockpitQueueId !== front.queueId);
-    if (!stale) {
-      const entry = row.pendingResultTags.shift();
-      if (entry?.tag) delegation.relayDelegationResult(row, entry.tag, { ok: true, message });
+    // Which turn just finished is decided by the handle's own turn tracker,
+    // never by position here: every provider stamps the finishing turn's
+    // `_cockpitQueueId` onto its result message (result-epoch.js's stamp/
+    // applyResultStamp), so the delegation tag is looked up by identity.
+    // That is what makes an interleaved human turn, a queue-pane reorder,
+    // and a late result from a force-idled generation all harmless - see
+    // result-epoch.js's module comment for the three bugs the old
+    // shift()-a-parallel-array approach kept re-introducing.
+    //
+    // `_cockpitStale` means this result belongs to an abandoned generation;
+    // its tag (if it had one) was already failed by failPendingDelegations
+    // at force-idle time, so there is deliberately nothing to claim.
+    if (message._cockpitStale !== true) {
+      const tag = row.handle.turns?.claimTag(message._cockpitQueueId);
+      if (tag) delegation.relayDelegationResult(row, tag, { ok: true, message });
     }
     refreshContextUsage(id); // a real round trip to the CLI - once per finished turn, not per message
     refreshRateLimits(id);
@@ -955,9 +946,15 @@ function applyAssistantUsage(row, message) {
     : [];
   row.usageAcc.addAssistantMessage(message.message, toolNames);
   const info = costForUsage(message.message.model, message.message.usage);
+  // info is only null when the message has no usage at all - an unpriced
+  // model still carries real token counts (info.cost === null in that
+  // case), so _usageInfo gets set either way now. Previously this whole
+  // block was gated on `info` truthy, which meant an unpriced model (e.g.
+  // Codex before it has a pricing table) never got a _usageInfo at all -
+  // no tokens, no cost graph bar, nothing - not just an understated cost.
   if (info) {
     message._usageInfo = {
-      costUsd: info.cost,
+      costUsd: info.cost ?? 0,
       inputTokens: info.inputTokens,
       outputTokens: info.outputTokens,
       cacheReadTokens: info.readTokens,
@@ -1159,94 +1156,41 @@ export function listQueue(id) {
 }
 
 // Shared by removeQueued() below and interruptTurn(): queueId's turn will
-// now never run, so it will never produce a `result` either - drop its
-// pendingResultTags entry so a LATER turn's result doesn't get mismatched
-// against it (the same desync review flagged for plain
-// shift()-without-bookkeeping), and if it was a delegation, tell its origin
-// now rather than leaving it waiting forever for a reply that was just
-// cancelled out from under it.
-function dropResultTag(row, queueId) {
-  const i = row.pendingResultTags.findIndex((e) => e.queueId === queueId);
-  if (i === -1) return;
-  const [entry] = row.pendingResultTags.splice(i, 1);
-  if (entry.tag) delegation.relayDelegationResult(row, entry.tag, { ok: false, errorText: 'the delegated task was removed from the queue before it ran' });
+// now never run, so it will never produce a `result` either. The handle's
+// own removeQueued/interrupt has already dropped it from the turn tracker's
+// ordering; all that's left for this layer is the delegation side - if it
+// was a delegated turn, tell its origin now rather than leaving it waiting
+// forever for a reply that was just cancelled out from under it.
+function failDroppedTurn(row, queueId) {
+  const tag = row.handle.turns?.claimTag(queueId);
+  if (tag) delegation.relayDelegationResult(row, tag, { ok: false, errorText: 'the delegated task was removed from the queue before it ran' });
 }
 
 export async function removeQueued(id, queueId) {
   const row = sessions.get(id);
   if (!row) throw new Error(`unknown session: ${id}`);
   const removed = await row.handle.removeQueued(queueId);
-  if (removed) dropResultTag(row, queueId);
+  if (removed) failDroppedTurn(row, queueId);
   return removed;
 }
 
-// Reorders only the TAIL of row.pendingResultTags (index 1 onward) to match
-// `queueIds`, leaving index 0 untouched. Shared by reorderQueue and sendNow
-// below.
-//
-// pendingResultTags[0], whenever the array is non-empty, is always the
-// currently in-flight turn - the FIFO invariant handleMessage's blind
-// shift() relies on (nothing reorders an entry out of that slot except a
-// 'result' actually consuming it). Both handle.reorderQueue() and
-// handle.sendNow() only ever touch session.js's `pending` sub-queue, which
-// by construction never contains the in-flight entry (createInputQueue
-// shifts a message out of pending when it hands it to the CLI) - so neither
-// operation can ever change what result arrives next, no matter what ids
-// the caller passes.
-//
-// Review finding, confirmed against a live probe: the old code reordered
-// the WHOLE array (named ids first, in the given order, then every
-// unlisted entry appended after). The real frontend's queueIds - built
-// from listQueue()/inputQueue.list(), which also never includes the
-// in-flight entry (public/queue-panel.js's reorderBySwap only ever sees
-// what setQueue() was pushed) - therefore never names the in-flight
-// entry's id, which means it always landed in the "unlisted, appended
-// after" bucket: an ordinary queue-panel drag/swap while a delegated turn
-// was running silently moved that turn's own tag to the BACK of the
-// array. The next 'result' - which is actually the in-flight turn
-// finishing - then got shift()'d off as if it belonged to whatever queued
-// entry ended up first instead, misdelivering it as that turn's delegated
-// answer. sendNow's near-identical bug (unshifting to absolute index 0)
-// was the same root cause the other direction. Pinning index 0 here fixes
-// both call sites the same way.
-function reorderPendingTagsTail(row, queueIds) {
-  const pinned = row.pendingResultTags.length ? [row.pendingResultTags[0]] : [];
-  const tail = row.pendingResultTags.slice(pinned.length);
-  const byQueueId = new Map(tail.map((e) => [e.queueId, e]));
-  const used = new Set();
-  const ordered = [];
-  for (const qid of queueIds) {
-    const entry = byQueueId.get(qid);
-    if (entry && !used.has(qid)) {
-      ordered.push(entry);
-      used.add(qid);
-    }
-  }
-  for (const entry of tail) {
-    if (!used.has(entry.queueId)) ordered.push(entry);
-  }
-  row.pendingResultTags = [...pinned, ...ordered];
-}
-
+// Both of these are now pure passthroughs. They used to also re-apply the
+// exact same pin-index-0 tail reorder to a registry-side copy of the
+// in-flight turn list - a second implementation of an algorithm
+// result-epoch.js's reorderTail already owned, and the source of two
+// misrouted-delegation bugs whenever the two drifted (see that module's
+// comment). The provider's own reorderQueue/sendNow drive the tracker
+// directly, so there is nothing left here to mirror.
 export async function reorderQueue(id, queueIds) {
   const row = sessions.get(id);
   if (!row) throw new Error(`unknown session: ${id}`);
-  const result = await row.handle.reorderQueue(queueIds);
-  reorderPendingTagsTail(row, queueIds);
-  return result;
+  return row.handle.reorderQueue(queueIds);
 }
 
 export async function sendNow(id, queueId) {
   const row = sessions.get(id);
   if (!row) throw new Error(`unknown session: ${id}`);
-  const result = await row.handle.sendNow(queueId);
-  // handle.sendNow() moves queueId to the front of the not-yet-started
-  // sub-queue and interrupts whatever's running - reorderPendingTagsTail's
-  // pinned-index-0 rule already keeps that interrupted turn's own tag
-  // first, so mirroring this as "queueId first among the tail" is exactly
-  // the front-of-the-still-queued-suffix placement this needs.
-  if (result) reorderPendingTagsTail(row, [queueId]);
-  return result;
+  return row.handle.sendNow(queueId);
 }
 
 // Wake a minute after the stated reset, not exactly on it - "2:10am" is the
@@ -1315,7 +1259,7 @@ function scheduleAutoContinue(id) {
     // timer sat waiting.
     if (!row.autoContinue || !row.rateLimitHit) return;
     row.rateLimitHit = null;
-    pushTurn(row, 'Continue'); // Must go through pushTurn, not handle.pushInput directly - see pendingResultTags' comment
+    pushTurn(row, 'Continue'); // Must go through pushTurn, not handle.pushInput directly - see its comment
     broadcastSummary(id);
   }, delay);
 }
@@ -1419,10 +1363,16 @@ function handleError(id, err) {
   // branch waits for, so any tags still pending here would otherwise strand
   // their origin session waiting forever.
   delegation.failPendingDelegations(row, String((err && err.message) || err));
+  // ...and the tracker's own in-flight list has to give up on them too, or
+  // this row keeps reporting a non-zero pendingTurnsCount forever (the row
+  // is reaped below, but a summary can still be broadcast off it first).
+  // abandonAll(), not a plain drop: a result that somehow still lands must
+  // read as stale rather than match a slot.
+  row.handle?.turns?.abandonAll();
   broadcast(id, { type: 'cockpit:error', error: String((err && err.stack) || err) });
-  // Same reap as setState's 'error'/'closed' branch - this path sets
-  // row.state directly instead of going through setState, so it needs its
-  // own sessions.delete once the error has been broadcast.
+  // The only reap for an errored row (setState deliberately does not reap
+  // on 'error' - see its own comment) - happens last, after the cleanup
+  // above has had a live row to work with.
   sessions.delete(id);
 }
 

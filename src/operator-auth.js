@@ -13,7 +13,9 @@ import path from 'node:path';
 
 const TOKEN_BYTES = 32;
 
-export function defaultOperatorFilePath(home = homedir()) {
+// Not exported - nothing outside this file references it, it's just called
+// from resolveOperatorToken() below and at module-load time further down.
+function defaultOperatorFilePath(home = homedir()) {
   return path.join(home, '.prompt-cockpit', 'operator-token');
 }
 
@@ -66,7 +68,8 @@ export function getOperatorToken() {
   return operatorToken;
 }
 
-export function extractOperatorToken(req, url) {
+// Not exported - only checkOperatorToken (below, in this file) calls it.
+function extractOperatorToken(req, url) {
   const header = req.headers['x-cockpit-operator'];
   if (typeof header === 'string' && header.trim()) return header.trim();
   const q = url.searchParams.get('op');
