@@ -2,6 +2,27 @@
 
 All notable changes to this project are documented here.
 
+## [0.1.6]
+- Security: CSP/X-Frame-Options/nosniff headers, 1MB request/WS payload
+  caps, timing-safe token comparisons
+- `pricing_codex.json` added: Codex cost/tokens now show instead of
+  dropping silently for unpriced models; Global Stats tab labeled
+  Claude-only
+- Grok Stop button now drains queued prompts, not just the in-flight turn
+- Task/Agent panes folded into the docked detail pane, replacing the old
+  `agent-view.html` pop-out tab
+- Edit/Write/Bash tool payloads syntax-highlighted (Prism.js); Edit/MultiEdit
+  diffs rendered CLI-style with a gutter and block tint
+- Subagent-aware spinner and highlighting; turn-chart keeps a
+  chart-selected tool group open
+- `/healthz` liveness check and `/api/system/memory` introspection added
+- `session-registry.js`/`app.js` split into focused modules
+  (`delegation.js`, `approval-panel.js`, per-concern CSS files, etc.)
+- `result-epoch.js` unifies turn-tracking, replacing duplicated FIFO logic
+  between `session-registry.js` and each provider's handle
+- `session-actions.js` refactored from a 520-line if-chain to a
+  lookup-table dispatcher; dead code and duplicate `escapeHtml` removed
+
 ## [0.1.5]
 - Widened slash-command dropdown; sorted alphabetically, substring match
 - Fixed account-limits tests hanging on Windows (injectable execFile)

@@ -1,6 +1,6 @@
 {
   "name": "claude-prompt-cockpit",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "private": true,
   "license": "MIT",
   "description": "Browser cockpit for driving Claude Code, Grok, and Codex CLI sessions.",
