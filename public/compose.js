@@ -1,19 +1,14 @@
-// The compose box is the primary input surface (no pty, nothing else to
-// type into). Enter sends; Shift+Enter inserts a newline - matches the CLI
-// rather than the usual web-chat inversion. (Ctrl+Enter was dropped: a
-// textarea doesn't insert a newline for it by default, so it was only ever
-// suppressing send with no newline landing - a documented gap that turned
-// out to be a bug, not a feature.) Visible Send button is keyboard-optional
-// (sets up phone approvals, planned as a future addition).
+// The compose box is the primary input surface. Enter sends; Shift+Enter
+// inserts a newline, matching the CLI rather than the usual web-chat
+// inversion. Ctrl+Enter was dropped: a textarea has no native newline
+// behavior for it, so it only suppressed send without adding one. The
+// visible Send button keeps this keyboard-optional for future use.
 
-// Matches index.html's CSS (min-height: 60px, ~2 lines at 14px/1.4 +
-// padding) - kept as one number here rather than read back from computed
-// style, since the two only ever need to agree, not derive from each other.
-// This is the absolute floor only - autosize() below also floors against
-// composeSendGroup's actual rendered height, which is usually taller (the
-// modeBtn+sendBtn stack), so the two stay top-aligned (index.html's
-// `#compose { align-items: stretch }`) even once typing starts driving an
-// explicit inline height.
+// Matches index.html's CSS min-height (60px) - duplicated here rather than
+// read from computed style, since the two only need to agree, not derive
+// from each other. This is just the absolute floor: autosize() below also
+// floors against composeSendGroup's real rendered height (usually taller,
+// the modeBtn+sendBtn stack) so the two stay top-aligned.
 const MIN_HEIGHT_PX = 60;
 
 export function initCompose({ textarea, sendButton, onSend, resizeHandle, streamEl, isScrolledToBottom, isPickerOpen, promptHistory, sendGroupEl }) {
@@ -23,16 +18,11 @@ export function initCompose({ textarea, sendButton, onSend, resizeHandle, stream
   // afterward doesn't silently undo their resize.
   let manualHeight = null;
 
-  // Prompt-suggestion ghost text (mirrors Claude Code's own "prompt
-  // suggestions" feature): app.js computes a
-  // suggested next message from the last assistant reply once a turn ends
-  // idle and hands it to setSuggestion() below. Shown via the textarea's own
-  // `placeholder` attribute rather than an overlay element - the browser
-  // already renders placeholders dim and only while the box is genuinely
-  // empty, which is exactly the behavior wanted here, for free. Tab accepts
-  // it into the box (still editable, not sent); Enter on an empty box with a
-  // live suggestion accepts *and* sends in one step, matching Claude Code's
-  // "tab still accepts for editing" / "Enter accepts and submits" split.
+  // Prompt-suggestion ghost text: app.js computes a suggested next message
+  // once a turn ends idle, handed to setSuggestion() below. Shown via the
+  // textarea's `placeholder` attribute (not an overlay) - browsers already
+  // dim placeholders and show them only while empty, for free. Tab accepts
+  // it into the box; Enter on an empty box with a suggestion sends it too.
   let defaultPlaceholder = textarea.placeholder;
   let currentSuggestion = null;
 
@@ -50,14 +40,11 @@ export function initCompose({ textarea, sendButton, onSend, resizeHandle, stream
     setSuggestion(null);
   }
 
-  // Up/Down history recall (shell/REPL convention). The persisted list
-  // itself lives in prompt-history.js (survives reload, keyed
-  // per cwd, shared with history-search.js's Ctrl+R fuzzy search); this
-  // module only owns the browsing cursor into it. `historyIndex === -1`
-  // means "not currently browsing"; `draftText` is whatever was in the box
-  // when Up was first pressed, so Down all the way back restores it instead
-  // of leaving the box empty. `promptHistory` is optional (tests/other
-  // embedders may not wire it up) - Up/Down recall just no-ops without it.
+  // Up/Down history recall (shell/REPL convention). The persisted list lives
+  // in prompt-history.js; this module only owns the browsing cursor into it.
+  // `historyIndex === -1` means "not browsing"; `draftText` holds whatever
+  // was in the box when Up was first pressed, so Down past the newest entry
+  // restores it. `promptHistory` is optional - Up/Down just no-ops without it.
   let historyIndex = -1;
   let draftText = '';
 
@@ -105,12 +92,10 @@ export function initCompose({ textarea, sendButton, onSend, resizeHandle, stream
   });
 
   // file-picker.js/model-picker.js/command-picker.js each install their own
-  // capturing keydown listener on this same textarea and preventDefault
-  // arrow keys while their dropdown is open, but don't stopPropagation - so
-  // without this check, pressing Up to navigate a suggestion list would
+  // capturing keydown listener here and preventDefault arrow keys without
+  // stopPropagation - without this check, navigating their dropdown would
   // also silently swap in a history entry underneath it. isPickerOpen is
-  // optional (tests/other embedders may not wire it up) - when absent,
-  // history recall just always considers itself clear to act.
+  // optional; when absent, history recall just always considers itself clear.
   function onHistoryKey(event) {
     if (isPickerOpen && isPickerOpen()) return;
     const history = historyList();
@@ -172,12 +157,11 @@ export function initCompose({ textarea, sendButton, onSend, resizeHandle, stream
   if (resizeHandle) {
     let dragStartY = null;
     let dragStartHeight = null;
-    // Captured once at drag start, not re-checked per move: a reader who
-    // was at the bottom when they grabbed the handle almost certainly wants
-    // to stay pinned to the tail of the conversation as the pane shrinks,
-    // same as a new message re-pins it (stream-view.js) - re-testing mid
-    // drag would just drop the pin the instant the shrink itself scrolls
-    // them off "at bottom".
+    // Captured once at drag start, not re-checked per move: a reader at the
+    // bottom when they grabbed the handle almost certainly wants to stay
+    // pinned as the pane shrinks (same as a new message re-pinning it in
+    // stream-view.js). Re-testing mid-drag would drop the pin the instant the
+    // shrink itself scrolls them off "at bottom".
     let pinToBottom = false;
 
     resizeHandle.addEventListener('mousedown', (event) => {
@@ -214,12 +198,11 @@ export function initCompose({ textarea, sendButton, onSend, resizeHandle, stream
     const maxPx = window.innerHeight * 0.5; // mirrors index.html's `max-height: 50vh`
     textarea.style.height = 'auto'; // collapse first so scrollHeight reflects content, not the previous height
     const contentPx = textarea.scrollHeight;
-    // Read fresh each call rather than cached once - composeSendGroup's
-    // real height changes with it (modeBtn hidden until a session connects,
-    // different heights per browser/OS <select> rendering, page zoom) and
-    // this has to track whatever it actually is right now, not a guessed
-    // constant, or CSS's stretch-driven alignment at rest would just get
-    // undone the moment the user types their first character.
+    // Read fresh each call rather than cached once - composeSendGroup's real
+    // height changes with it (modeBtn hidden until a session connects,
+    // different OS <select> rendering, page zoom), so this must track the
+    // actual current value, not a guessed constant, or CSS's stretch-driven
+    // alignment at rest would get undone the moment the user types.
     const sendGroupPx = sendGroupEl ? sendGroupEl.getBoundingClientRect().height : 0;
     const target = Math.min(Math.max(contentPx, MIN_HEIGHT_PX, sendGroupPx, manualHeight || 0), maxPx);
     textarea.style.height = `${target}px`;

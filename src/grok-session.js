@@ -97,13 +97,11 @@ export function startGrokSession({
   // still queued or running - mid-turn that minted two promptIndexes
   // for one message (promptIndex 2 and 3, same body, ~4s apart).
   let openPromptText = null;
-  // queueId -> text for a turn pushInput() has minted but runPrompt() has
-  // not yet started (i.e. still waiting behind promptTail, not the one
+  // queueId -> text for a turn pushInput() has minted but runPrompt()
+  // hasn't started yet (i.e. queued behind promptTail, not the one
   // currently in flight - removed the instant its own runPrompt begins,
-  // same "shift on start" convention session.js's createInputQueue and
-  // codex-session.js's `pending` array both use). Backs listQueue() - see
-  // that function's own comment for why this used to just be `[]`
-  // (2026-09-02 review, finding #4).
+  // same "shift on start" convention createInputQueue and
+  // codex-session.js's pending array use). Backs listQueue().
   const queuedEntries = new Map();
   const resultEpoch = createResultEpochTracker();
   // A turn's bill can arrive twice: `_x.ai/session_notification`
@@ -149,12 +147,11 @@ export function startGrokSession({
         // `_x.ai/session_notification`. The on-disk updates.jsonl rewrites
         // that same event as `_x.ai/session/update`. Accept both.
         if (!isSessionUpdateNotification(method)) return;
-        // Claude never streams the prompt back, so session.js local-echoes.
-        // Grok does emit user_message_chunk for the same turn pushInput
-        // already echoed. Forwarding it painted a second "You" bubble on
-        // every Enter (confirmed against this session's updates.jsonl:
-        // one promptIndex, two bubbles). History still reads the chunk
-        // from disk via grok-history.js - this is live-only.
+        // Claude never streams the prompt back (session.js local-echoes it).
+        // Grok emits user_message_chunk for the same turn pushInput already
+        // echoed - forwarding it paints a duplicate "You" bubble. History
+        // still reads the chunk from disk via grok-history.js; this is
+        // live-only.
         if (update.sessionUpdate === 'user_message_chunk') return;
         for (const message of acpUpdateToMessages(update, sessionId, { model })) {
           if (message.message && message.message.usage) {
@@ -310,11 +307,11 @@ export function startGrokSession({
   }
 
   function pushInput(text) {
-    // `null` specifically means "did not enqueue anything - no result will
-    // ever come for this call". session-registry.js's pushTurn checks for
-    // this exact sentinel to decide whether to register a delegation tag
-    // for the turn (see the 2026-08-24 review finding #2). Success returns a
-    // queueId so registry matching is not positional-only.
+    // `null` means nothing was enqueued - no result will ever come for
+    // this call. session-registry.js's pushTurn checks for this exact
+    // sentinel to decide whether to register a delegation tag for the
+    // turn. Success returns a queueId so registry matching isn't
+    // positional-only.
     if (closed) return null;
     // Same body already queued or running: a second Enter (or Grok treating
     // mid-turn session/prompt as queue+send-now plus our chained retry)
@@ -333,12 +330,11 @@ export function startGrokSession({
     openPromptText = text;
     onMessage({ ...wireMessage, turnIndex: turnCounter, queueId, _cockpitEpoch: meta.epoch, _cockpitQueueId: queueId });
     onStateChange('running');
-    // Cancel the in-flight prompt so the next session/prompt is not
-    // delivered on top of a still-running turn (that path cancelled the
-    // old turn and then recorded the new text twice). cancelInFlight(), not
-    // interrupt() - see cancelInFlight's own comment for why the full-drain
-    // version would wrongly invalidate the very turn this call is about to
-    // chain on promptTail.
+    // Cancel the in-flight prompt so the next session/prompt doesn't land
+    // on top of a still-running turn (that path double-recorded the new
+    // text). Uses cancelInFlight(), not interrupt() - the full-drain
+    // version would wrongly invalidate the very turn this call is about
+    // to chain on promptTail.
     if (promptInFlight) cancelInFlight();
     promptTail = promptTail.then(() => runPrompt(text, meta)).catch((err) => {
       if (closed) return;
@@ -372,12 +368,10 @@ export function startGrokSession({
   }
 
   // Fire-and-forget cancel notify only - no epoch bump, no queue drain.
-  // pushInput's own "a new message supersedes whatever's running" path
-  // (below) needs exactly this and nothing more: its own new turn's `meta`
-  // is stamped with the CURRENT epoch just before this runs, so bumping the
-  // epoch here would immediately mark that brand-new turn stale too. Kept
-  // private - the external Stop button needs the fuller drain interrupt()
-  // now does instead (see its own comment).
+  // The new turn's meta is stamped with the CURRENT epoch just before
+  // this runs, so bumping the epoch here would mark that brand-new turn
+  // stale too. Kept private - the Stop button needs interrupt()'s
+  // fuller drain instead.
   function cancelInFlight() {
     if (closed || !sessionId || !connection) return;
     try {
@@ -387,16 +381,11 @@ export function startGrokSession({
     }
   }
 
-  // Stop button - "stop" means stop everything, not just the turn actively
-  // running (2026-09-02 review, finding #4). Grok has no real pull queue:
-  // pushInput() chains straight onto `promptTail`, so a rapid burst of
-  // messages sent before the first one even started running just sit there
-  // as already-attached `.then()` continuations - cancelling only the
-  // in-flight turn (the old behavior here) left every one of those to fire
-  // on its own once the cancelled turn's session/prompt request settled.
-  // Bumping the epoch (via resultEpoch.forceIdle()) makes runPrompt's own
-  // staleness check skip all of them, same mechanism forceIdle already
-  // relied on - which is why forceIdle is now just this.
+  // Stop means stop everything, not just the turn actively running.
+  // Grok has no real pull queue: pushInput() chains queued messages
+  // straight onto promptTail as already-attached `.then()`
+  // continuations, which would still fire if only the in-flight turn
+  // were cancelled. Bumping the epoch via forceIdle() skips them all.
   async function interrupt() {
     if (closed) return;
     resultEpoch.forceIdle();
@@ -461,20 +450,19 @@ export function startGrokSession({
     return { ...result, newSessionId: childId };
   }
 
-  // Real entries now (2026-09-02 review, finding #4) - queuedEntries tracks
-  // every turn pushInput() has minted that runPrompt() hasn't started yet
-  // (see its own module comment). Order is insertion order, i.e. the order
-  // they'll actually run in, same guarantee session.js's own list() makes.
+  // queuedEntries tracks every turn pushInput() has minted that
+  // runPrompt() hasn't started yet. Order is insertion order, i.e. the
+  // order they'll actually run in - same guarantee session.js's own
+  // list() makes.
   function listQueue() {
     return [...queuedEntries.entries()].map(([id, text]) => ({ id, text }));
   }
 
-  // Same debug capture as session.js's own debugSnapshot - see that
-  // comment. `promptTail` itself isn't inspectable (it's a plain Promise
-  // chain), but `promptInFlight`/`openPromptText` are the two fields that
-  // matter for telling "a real turn is running" apart from "the chain is
-  // stuck behind an interrupt that never resolved its session/prompt
-  // request" (see pushInput's interrupt()-then-chain comment above).
+  // Same debug capture as session.js's own debugSnapshot. `promptTail`
+  // itself isn't inspectable (a plain Promise chain), but
+  // `promptInFlight`/`openPromptText` are the two fields that matter for
+  // telling "a real turn is running" apart from "the chain is stuck
+  // behind an interrupt that never resolved its session/prompt request".
   function debugSnapshot() {
     return {
       pendingTurns,
@@ -486,11 +474,9 @@ export function startGrokSession({
     };
   }
 
-  // Same manual recovery as session.js's own forceIdle - see that comment
-  // for the failure mode. Now identical to interrupt() above (2026-09-02
-  // review): both are "give up on everything in flight or queued, go idle
-  // now" - forceIdle used to be the only one of the two that actually did
-  // that; Stop needed the same drain, so this is just interrupt() now.
+  // Same manual recovery as session.js's own forceIdle. Identical to
+  // interrupt() above - both mean "give up on everything in flight or
+  // queued, go idle now".
   function forceIdle() {
     interrupt();
   }

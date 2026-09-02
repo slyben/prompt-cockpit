@@ -110,12 +110,11 @@ export function createResultEpochTracker() {
       return resultEpoch;
     },
     currentMeta,
-    // The oldest still-queued turn - i.e. the one currently in flight,
-    // since a provider never hands the CLI more than one turn at a time.
-    // delegation.js's collectDelegationText buffers assistant text against
-    // this turn's tag. Deliberately NOT currentMeta(): an abandoned turn's
-    // leftover narration must not append into a live turn's buffer (the
-    // epoch stamped on the message is what tells those apart).
+    // The oldest still-queued turn = the one currently in flight (a
+    // provider never hands the CLI more than one turn at a time).
+    // delegation.js buffers assistant text against this turn's tag.
+    // Deliberately NOT currentMeta(): an abandoned turn's leftover
+    // narration must not append into a live turn's buffer.
     frontPending() {
       return pending[0] || null;
     },
@@ -167,12 +166,11 @@ export function createResultEpochTracker() {
       tags.clear();
       return all;
     },
-    // Crash path only (session-registry.js's handleError): the provider's
-    // turn loop has exited, so nothing pending will ever be consumed the
-    // normal way. Moves it into `abandoned` rather than dropping it - a
-    // result that somehow still lands must read as stale, not steal a slot -
-    // which also zeroes pendingCount, same as force-idle does. No epoch
-    // bump: forceIdle owns that, and these turns are already unreachable.
+    // Crash path only: the provider's turn loop has exited, so nothing
+    // pending will be consumed normally. Moves entries to `abandoned`
+    // rather than dropping them - a result that somehow still lands must
+    // read as stale, not steal a slot. No epoch bump: forceIdle owns
+    // that, and these turns are already unreachable.
     abandonAll() {
       if (pending.length) abandoned.push(...pending);
       pending.length = 0;
@@ -186,13 +184,10 @@ export function createResultEpochTracker() {
       return true;
     },
     // pending[0] is the in-flight turn; only the TAIL follows queue-pane
-    // edits. Both handle.reorderQueue() and handle.sendNow() only ever touch
-    // the provider's not-yet-started sub-queue, which by construction never
-    // contains the in-flight entry - so neither operation can change what
-    // result arrives next, no matter what ids the caller passes. Pinning
-    // index 0 here is what closes bugs 2 and 3 in the module comment above,
-    // including the "caller explicitly names the in-flight id" case (pinned
-    // by position, not by absence from `queueIds`).
+    // edits. reorderQueue()/sendNow() only touch the not-yet-started
+    // sub-queue, which never contains the in-flight entry by construction
+    // - pinning index 0 guarantees neither operation can change what
+    // result arrives next, even if the caller names the in-flight id.
     reorderTail(queueIds) {
       const pinned = pending.length ? [pending[0]] : [];
       const tail = pending.slice(pinned.length);

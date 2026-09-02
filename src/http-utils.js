@@ -4,12 +4,11 @@
 // create a circular import, since server.js is what wires the route modules
 // together).
 
-// 1 MB is generous for this app's actual bodies (session config, chat text,
-// file paths) - it exists to stop a runaway or malicious client from
-// streaming an unbounded request into memory, not to constrain real usage.
-// Exported so server.js's WebSocketServer can cap `maxPayload` at the exact
-// same limit (2026-09-02 review) instead of leaving the ws transport
-// unbounded while only HTTP bodies were capped.
+// 1 MB is generous for this app's actual bodies (session config, chat
+// text, file paths) - it exists to stop a runaway or malicious client
+// from streaming an unbounded request into memory, not to constrain
+// real usage. Exported so server.js's WebSocketServer can cap
+// `maxPayload` at the same limit instead of leaving ws unbounded.
 export const MAX_BODY_BYTES = 1024 * 1024;
 
 export class BodyTooLargeError extends Error {}

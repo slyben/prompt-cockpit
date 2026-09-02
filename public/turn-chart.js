@@ -1,40 +1,15 @@
-// Per-turn cost graph - ported from claude-realtime-usage's
-// live_watcher_template.html (`turn-chart-panel`, renderTurnChart(),
-// updateChartOverlay()). Same bar-per-turn SVG and metric selector; adapted
-// to this app's own data source (session-registry.js's message._usageInfo,
-// already computed per assistant message for the header stats strip - see
-// app.js) and its own scroll container (#stream, not claude-realtime-
-// usage's #transcript). The viewport-position indicator diverged from the
-// original: it's a slider track below the bars (see updateSlider), not an
-// SVG rect drawn over them - that used to silently eat any bar click that
-// landed under it.
-//
-// Off by default (settings.js) - this module only ever runs once a caller
-// opts in via setEnabled(true); addPoint() is cheap to call unconditionally
-// either way, so app.js doesn't need to gate its own call site on the
-// setting.
-//
-// Selection is click-only, not hover: click a bar to jump the transcript to
-// that turn, expand its tool-call block(s), and highlight them. The
-// highlight stays until another bar is clicked (or reset() runs, e.g. on
-// session switch) - there used to be a mousemove-driven hover version of
-// this but it didn't work reliably, so it's gone.
-//
-// Y-axis: labels and gridlines follow the metric currently in the dropdown
-// (cost dollars, or tokens in/out/cached), using the same max as the bars
-// themselves - including "exclude cache misses from scale." The viewport
-// slider below the bars is a transcript-scroll thumb, not a zoom; the
-// chart always shows the whole session (bucketed once n is large), so
-// dragging it does not rescale the axis.
+// Per-turn cost graph, bar-per-turn SVG with a metric selector. Off by
+// default; addPoint() is cheap to call unconditionally regardless. The
+// viewport slider below the bars (not an SVG rect over them, which used to
+// eat bar clicks) is a scroll thumb, not a zoom. Selection is click-only,
+// no hover highlight - click a bar to jump/expand/highlight its turn.
 
 const CACHE_MISS_COLOR = '#f0648b';
 
-// Below this bar width, individual per-turn bars stop being readable (and
-// eventually stop being clickable) - render() switches to summing turns into
-// fixed-width buckets instead of shrinking bars further. Sum (not average)
-// per bucket so one expensive turn among many cheap ones still stands out
-// rather than getting diluted - same reasoning as the cache-miss color
-// below, which flags a bucket if ANY turn inside it missed the cache.
+// Below this bar width, per-turn bars stop being readable/clickable -
+// render() sums turns into fixed-width buckets instead of shrinking bars
+// further. Sum (not average) per bucket so one expensive turn among cheap
+// ones still stands out rather than getting diluted.
 const MIN_BAR_WIDTH = 3;
 
 // `cacheMissColor` opts a metric into the distinct prompt-cache-miss color
@@ -86,26 +61,18 @@ export function initTurnChart({ panel, svg, axisEl, axisRightEl, initialAxisPosi
   const points = []; // one per assistant message that carried a priced usage figure
   let enabled = false;
   let dragging = false;
-  // 'left' (default) | 'right' | 'both' - which side(s) of the plot show the
-  // axis labels. Two fixed elements flank .turn-chart-plot (axisEl on the
-  // left, axisRightEl on the right); this just toggles which one(s) render
-  // ticks and are visible, rather than moving a single element around.
-  // Settings-driven (settings.js's turnChartAxisPosition) rather than a
-  // fixed side, since a wide detail pane pushes the chart into a narrow
-  // column where the labels sometimes read better hugging the plot's other
-  // edge, or both edges - see index.html's Display tab row.
+  // 'left' (default) | 'right' | 'both' - two fixed elements flank
+  // .turn-chart-plot; this toggles which render ticks and are visible. A
+  // wide detail pane pushes the chart into a narrow column where labels
+  // sometimes read better hugging the other edge, or both.
   let axisPosition = initialAxisPosition || 'left';
   if (axisEl) axisEl.hidden = axisPosition === 'right';
   if (axisRightEl) axisRightEl.hidden = !(axisPosition === 'right' || axisPosition === 'both');
-  // A prompt-cache-miss turn (info.writeTokens >= info.readTokens - not
-  // necessarily the *first* turn of a session, despite the old "cold start"
-  // name: a long idle gap or a context change can miss the cache mid-session
-  // too) runs up to 10-20x the tokens of a normal turn, so left un-excluded
-  // it alone sets the y-axis max and every other bar gets squashed to a
-  // sliver. The checkbox only changes what's fed into the max-height calc
-  // below - the bars themselves stay put and simply clip at the panel's
-  // height when they blow past the new (smaller) scale, rather than
-  // disappearing or reflowing the rest of the graph.
+  // A prompt-cache-miss turn (info.writeTokens >= info.readTokens) runs up
+  // to 10-20x the tokens of a normal turn, so left un-excluded it alone
+  // sets the y-axis max and squashes every other bar to a sliver. The
+  // checkbox only feeds the max-height calc - bars still clip at the
+  // panel's height rather than disappearing or reflowing the graph.
   let excludeCacheMisses = excludeCacheMissCheckbox ? excludeCacheMissCheckbox.checked : false;
   let expandedBySelection = []; // tool-block elements the current selection expanded, so selecting a new bar (or none) can fold just those back
   let keepOpenGroups = []; // groups the current selection marked dataset.keepOpen (see selectIndex) - cleared in clearHighlights regardless of expand state, since it tracks "the selection is showing this," not "we opened this"
@@ -146,20 +113,10 @@ export function initTurnChart({ panel, svg, axisEl, axisRightEl, initialAxisPosi
     if (highlightedNodes.length) positionHighlights();
   });
 
-  // Mousedown-and-drag on the bars still scrubs the transcript's scroll
-  // position proportionally (unchanged). A plain click (mousedown with no
-  // meaningful movement before mouseup) is treated separately below as
-  // "jump to this turn" - the two aren't mutually exclusive, a click also
-  // does its usual proportional scrollToFrac first, then the precise jump
-  // corrects it once we know exactly which turn was clicked.
-  //
-  // The viewport-position slider (below the bars, not drawn over them - see
-  // #turnChartSlider's own comment in index.html for why it used to be an
-  // SVG rect on top of the bars and why that silently ate bar clicks) is a
-  // second, independent drag surface for the same scrollToFrac gesture -
-  // `dragEl` records which element's own bounding rect a given drag's x
-  // position should be measured against, since the slider and the bars
-  // aren't the same width or position.
+  // Mousedown-and-drag scrubs scroll position proportionally; a plain click
+  // does that scrollToFrac first, then the per-turn jump below corrects
+  // it. `dragEl` records which element's rect a drag's x is measured
+  // against, since the slider track and bars differ in width/position.
   let dragOrigin = null; // 'bars' | 'slider' | null - which surface started this drag, so a click-without-drag only ever jumps to a turn when it started on the bars
   let dragEl = null;
   let dragStartX = 0;
@@ -167,22 +124,10 @@ export function initTurnChart({ panel, svg, axisEl, axisRightEl, initialAxisPosi
   let hasDragged = false;
   const CLICK_MOVE_THRESHOLD = 3; // px of mouse movement before a mousedown/mouseup pair stops counting as a click
 
-  // Every scrollToFrac() call below is immediately followed by its own
-  // updateSlider() rather than leaning on scrollContainer's 'scroll'
-  // listener (above) to eventually catch up. Two real bugs otherwise: (1) a
-  // plain click (mousedown+mouseup, no movement) on the slider track used to
-  // do nothing at all - scrollToFrac only ever ran inside the mousemove
-  // handler, never on mousedown itself, unlike the bars below. (2) during an
-  // actual fast drag, the browser throttles/coalesces native 'scroll' events
-  // to roughly one per animation frame, which can visibly lag behind a burst
-  // of mousemove events - the transcript (scrolled by the browser's own
-  // machinery, not this code) keeps pace with the mouse while the thumb
-  // appears frozen mid-drag and only catches up once movement settles. Bug
-  // report: "slider doesn't slide the graph, only the text scrolls."
-  // Calling updateSlider() synchronously here removes that dependency
-  // entirely - the scroll listener's own updateSlider() call is now
-  // redundant but harmless (e.g. still covers scroll-wheel/keyboard
-  // scrolling, which never goes through scrollToFrac).
+  // scrollToFrac() is always paired with its own updateSlider() call
+  // rather than leaning on the 'scroll' listener above - the browser
+  // throttles native 'scroll' events to roughly one per frame, visibly
+  // lagging a fast drag (thumb freezes mid-drag).
   svg.addEventListener('mousedown', (e) => {
     dragging = true;
     dragOrigin = 'bars';
@@ -221,7 +166,7 @@ export function initTurnChart({ panel, svg, axisEl, axisRightEl, initialAxisPosi
   // the transcript (stream-view.js tags them with data-turn-point, set by
   // app.js from addPoint's return value). Stays highlighted until another
   // bar is clicked - there's no hover-driven highlight anymore (it didn't
-  // work reliably, see backlog), so this is the only entry point now.
+  // work reliably), so this is the only entry point now.
   function selectFromEvent(e) {
     const n = points.length;
     if (!n) return;
@@ -234,13 +179,10 @@ export function initTurnChart({ panel, svg, axisEl, axisRightEl, initialAxisPosi
   }
 
   // Groups points[] into fixed-width buckets once n won't fit at
-  // MIN_BAR_WIDTH per turn. Sums (not averages) conf.get(p) per bucket so
-  // one expensive turn among cheap neighbors still reads as a tall bar
-  // instead of getting smoothed away. spikeIndex is the single turn within
-  // the bucket a click should jump to: the cache-miss turn if the bucket has
-  // one (it's already visually flagged via hasCacheMiss below), otherwise
-  // whichever turn in the bucket has the highest value for the metric - "the
-  // bar is tall because of this turn" should also be "click lands on this turn."
+  // MIN_BAR_WIDTH per turn, summing (not averaging) so one expensive turn
+  // among cheap neighbors still reads as a tall bar. spikeIndex is the
+  // single turn a click should jump to: the cache-miss turn if the bucket
+  // has one, else whichever turn has the highest value for the metric.
   function buildBuckets(conf, bucketCount) {
     const bucketSize = Math.ceil(points.length / bucketCount);
     const buckets = [];
@@ -253,13 +195,9 @@ export function initTurnChart({ panel, svg, axisEl, axisRightEl, initialAxisPosi
       let spikeIndex = start;
       let spikeVal = -Infinity;
       // Tracks whether the *current* spike holder is a cache-miss turn,
-      // separately from spikeIndex's own value - `spikeIndex === start` used
-      // to double as the "still uninitialized" sentinel, but start is also a
-      // perfectly valid winning index: a cache-miss turn sitting first in
-      // its bucket would win the branch above (spikeIndex = start), then
-      // immediately lose it to the very next point, since that point's own
-      // check couldn't tell "already correctly assigned" from "nothing's
-      // been picked yet" - both looked like spikeIndex === start.
+      // separately from spikeIndex's own value - `spikeIndex === start`
+      // can't double as an "uninitialized" sentinel since start is also a
+      // valid winning index.
       let spikeIsCacheMiss = false;
       for (let i = start; i < end; i++) {
         const p = points[i];
@@ -291,26 +229,16 @@ export function initTurnChart({ panel, svg, axisEl, axisRightEl, initialAxisPosi
     const nodes = scrollContainer.querySelectorAll(`[data-turn-point="${i}"]`);
     if (!nodes.length) return;
     let firstNode = null;
-    // A tool-call block's own collapse state (below) isn't the only thing
-    // that can hide it - it also lives inside a tool-call group
-    // (stream-view.js's openGroup), and autoCollapsePreviousGroup (on by
-    // default) auto-folds a group the moment a newer one opens. A bar whose
-    // turn has since scrolled into an auto-collapsed group used to expand
-    // just the inner block and stop there: the group's own .group-body is
-    // still display:none, so the "expanded" node has a zero-size rect and
-    // positionHighlights silently dropped it as "scrolled out of view" -
-    // clicking the bar looked like it did nothing. Collected into a Set
-    // first so two blocks sharing one group (a multi-tool-call turn) only
-    // click that group's toggle once, not once per block.
+    // A block can also be hidden by its enclosing tool-call group being
+    // auto-collapsed - expanding just the inner block leaves the group's
+    // .group-body display:none, so positionHighlights sees a zero-size
+    // rect and silently drops it. Collected into a Set so a multi-tool-call
+    // turn sharing one group only clicks that group's toggle once.
     const groupsToExpand = new Set();
-    // Every ancestor group the selection touches, expanded or not - this is
-    // the "1st tier" set: while any of these is the most recent group in its
-    // container, stream-view.js's openGroup skips its own auto-fold for it
-    // (dataset.keepOpen, set below) so a tool call landing right after this
-    // click doesn't fold the very thing the click just opened. Broader than
-    // groupsToExpand on purpose: an already-expanded group (e.g. it's the
-    // in-flight one) still needs the flag even though there's nothing to
-    // click open.
+    // Broader than groupsToExpand: every ancestor group touched, expanded
+    // or not, so stream-view.js's auto-fold skips it via dataset.keepOpen
+    // and a tool call landing right after this click doesn't fold what was
+    // just opened.
     const groupsToKeepOpen = new Set();
     let firstToolCallId = null;
     nodes.forEach((wrap) => {
@@ -480,20 +408,18 @@ export function initTurnChart({ panel, svg, axisEl, axisRightEl, initialAxisPosi
 
     bars.forEach((bar, i) => {
       if (bar.sum <= 0) return;
-      // A cache-miss turn (or a bucket containing one) excluded from the
-      // scale can still exceed it (that's the whole point) - clip its bar to
-      // the panel height instead of drawing past it, same idea as an axis break.
+      // A cache-miss turn excluded from the scale can still exceed it -
+      // clip its bar to the panel height instead of drawing past it, same
+      // idea as an axis break.
       const h = Math.min(height, (bar.sum / maxVal) * height);
       const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
       rect.setAttribute('x', i * step);
       rect.setAttribute('y', height - h);
       rect.setAttribute('width', barWidth);
       rect.setAttribute('height', h);
-      // Prompt-cache-miss turns (or buckets containing one) get a distinct
-      // color; there's no custom mousemove-driven hover on this chart (see
-      // module comment) but a plain SVG <title> costs nothing and gets a
-      // free native tooltip from the browser, so it stays even though the
-      // old JS hover highlight didn't.
+      // Prompt-cache-miss turns get a distinct color; a plain SVG <title>
+      // costs nothing and gets a free native tooltip even with no custom
+      // hover on this chart.
       rect.setAttribute('fill', conf.cacheMissColor && bar.hasCacheMiss ? CACHE_MISS_COLOR : conf.color);
       const title = document.createElementNS('http://www.w3.org/2000/svg', 'title');
       const bucketed = bar.end - bar.start > 1;
@@ -547,12 +473,9 @@ export function initTurnChart({ panel, svg, axisEl, axisRightEl, initialAxisPosi
     }
   }
 
-  // Positions the slider thumb (a persistent DOM element - see index.html's
-  // #turnChartSlider - set up once, not recreated on every render() like
-  // the old SVG overlay rect was) to reflect how much of the transcript is
-  // currently visible and where. Percentages, not pixels: the slider track
-  // has its own width independent of the SVG's, so this doesn't need
-  // svg.clientWidth at all anymore.
+  // Positions the persistent slider thumb to reflect how much of the
+  // transcript is visible and where. Percentages, not pixels: the slider
+  // track has its own width independent of the SVG's.
   function updateSlider() {
     const scrollable = scrollContainer.scrollHeight > scrollContainer.clientHeight;
     const frac = scrollable ? scrollContainer.clientHeight / scrollContainer.scrollHeight : 1;

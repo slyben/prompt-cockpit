@@ -9,7 +9,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 // No Node-specific imports; shared verbatim with the browser rather than
 // duplicated into public/. permissions.js is mode-cycle order;
-// stream-join.js is Grok token-join whitespace (also imported by grok-messages.js).
+// stream-join.js is Grok token-join whitespace (also used by grok-messages.js).
 const SHARED_SRC_FILES = new Set(['permissions.js', 'stream-join.js']);
 
 const CONTENT_TYPES = {

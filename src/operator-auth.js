@@ -1,11 +1,8 @@
-// Process-level operator token. Distinct from per-session bearer tokens
-// and from the /ask handshake secret. Required on every /api/* route and
-// the websocket upgrade; static HTML/JS/CSS stay Origin/Host only.
-//
-// Persisted under ~/.prompt-cockpit/operator-token so a local tab survives
-// `npm start` (option B, 2026-08-24). Override with COCKPIT_OPERATOR_TOKEN
-// (skips the file) or COCKPIT_OPERATOR_FILE (path). Tests set the env var
-// so they never write into the real home directory.
+// Process-level operator token, distinct from per-session bearer
+// tokens and the /ask handshake secret. Required on every /api/*
+// route and the websocket upgrade; static HTML/JS/CSS stay Origin/Host
+// only. Persisted under ~/.prompt-cockpit/operator-token so a local
+// tab survives `npm start`; COCKPIT_OPERATOR_TOKEN/_FILE override it.
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';

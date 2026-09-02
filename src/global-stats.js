@@ -1,21 +1,8 @@
-// All-projects usage stats for cockpit's Settings > Stats tab - a GitHub-
-// style heatmap plus overview numbers, in the spirit of Claude Code's own
-// `/stats`. Deliberately NOT built on `~/.claude/stats-cache.json` (the
-// CLI's own persisted cache for that screen): that file only exists/updates
-// when `/stats` has actually been opened in the terminal at least once, and
-// its `lastComputedDate` can lag real usage by a day or more - exactly the
-// "requires a previous CLI launch" and "not live" gaps flagged in review
-// (2026-08-20). This module instead re-derives everything itself, on every
-// request, straight from the same `~/.claude/projects/**/*.jsonl` transcripts
-// session-launcher.js/session-history.js already read - real per-message
-// `usage` blocks, not an estimate, and available from a fresh cockpit
-// install with no CLI warm-up step.
-//
-// The one honest limitation, not papered over: Claude Code prunes old
-// transcript files (see `~/.claude/.last-cleanup`), so history older than
-// whatever's still on disk simply isn't visible here - narrower than the
-// CLI's own cache in that one respect, but everything shown is exact for
-// the window it does cover.
+// All-projects usage stats for cockpit's Settings > Stats tab. Deliberately
+// NOT built on `~/.claude/stats-cache.json`, which only updates once
+// `/stats` has run in the terminal and can lag real usage. Instead
+// re-derives everything from `~/.claude/projects/**/*.jsonl` directly -
+// no CLI warm-up needed, though history pruned from disk isn't visible.
 import { createReadStream } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { homedir } from 'node:os';
@@ -98,11 +85,11 @@ export function aggregateGlobalStats(sessionScans, { range = 'all', now = Date.n
 
   const dailyCounts = new Map(); // dayKey -> assistant-message count
   const modelTokens = new Map(); // model -> input+output tokens (favorite-model ranking only)
-  // model -> {inputTokens,outputTokens,cacheReadTokens,cacheWriteTokens,costUsd,calls} for the
-  // per-model cost table. Built via costForUsage (src/usage.js) - the exact same per-message
-  // pricing math the live per-session stats panel uses, not a separate estimate - so a model
-  // missing from pricing.json/pricing_grok.json is tracked in unpricedModels below instead of
-  // silently contributing a wrong $0.
+  // model -> {inputTokens,outputTokens,cacheReadTokens,cacheWriteTokens,
+  // costUsd,calls} for the per-model cost table. Built via costForUsage
+  // (src/usage.js), the same per-message pricing math the live stats panel
+  // uses - a model missing from pricing.json/pricing_grok.json is tracked
+  // in unpricedModels below instead of silently contributing a wrong $0.
   const perModelStats = new Map();
   const unpricedModels = new Set();
   let totalInput = 0;
@@ -117,11 +104,10 @@ export function aggregateGlobalStats(sessionScans, { range = 'all', now = Date.n
     if (inRangeRows.length === 0) continue;
     sessionsInRange += 1;
     // "Longest session" must be the span WITHIN the selected range, not the
-    // whole file's firstTs/lastTs (2026-08-24 review) - a session with one
-    // message inside a `range=7d` window but a real span going back a
-    // month used to report that full month as its duration here. When the
-    // range is 'all' there's no filtering to do, so the whole-file span
-    // (cheaper - scanSessionFile already tracked it) is exact either way.
+    // whole file's firstTs/lastTs - otherwise one message inside a `range=7d`
+    // window but a real span going back a month would report that full
+    // month as its duration. 'all' needs no filtering, so the whole-file
+    // span (already tracked by scanSessionFile) is exact either way.
     const inRangeTimestamps = cutoff ? inRangeRows.map((r) => r.ts).filter((ts) => ts != null) : null;
     const rangeFirstTs = cutoff ? (inRangeTimestamps.length ? Math.min(...inRangeTimestamps) : null) : firstTs;
     const rangeLastTs = cutoff ? (inRangeTimestamps.length ? Math.max(...inRangeTimestamps) : null) : lastTs;
@@ -232,18 +218,11 @@ function computeStreaks(sortedDayKeys, now) {
   return { longestStreak: longest, currentStreak: current };
 }
 
-// /api/stats (route module) has no session token gate - like /api/browse
-// and /api/account-limits, Origin/Host allowlisting is the only boundary
-// (an operator-level token to close that gap across all three is still an
-// open idea). Unlike the other two this one re-reads and re-parses EVERY
-// transcript under ~/.claude/projects on every call with no cache at all (2026-08-24
-// review) - a short TTL here means a burst of Stats-tab opens/refreshes
-// (or anyone else hitting the route) shares one scan instead of paying the
-// full re-parse each time. Scoped to real usage only: keyed on `range`,
-// and only engaged when `projectsDir` is the real default - a caller that
-// passes its own dir (every test in global-stats.test.mjs does) always
-// gets a fresh, uncached scan, so this can't leak stale data across a
-// custom-dir caller or make tests order-dependent.
+// /api/stats has no session token gate, only Origin/Host allowlisting,
+// and re-parses EVERY transcript under ~/.claude/projects per call. This
+// TTL lets a burst of Stats-tab opens share one scan instead of paying
+// the full re-parse each time. Only engaged when `projectsDir` is the
+// real default, so tests passing their own dir always get a fresh scan.
 const STATS_CACHE_TTL_MS = 15_000;
 const statsCache = new Map(); // range -> { result, atMs }
 const statsInFlight = new Map(); // range -> Promise

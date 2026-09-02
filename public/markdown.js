@@ -1,34 +1,19 @@
-// Minimal Markdown -> DOM renderer for Claude's own reply text (stream-
-// view.js's renderAssistant, text blocks only - not tool args/results, not
-// thinking, not user messages). Hand-rolled like everything else in this
-// app's public/*.js (no bundler, no npm deps shipped to the client) rather
-// than pulling in marked/markdown-it - this only needs to cover what Claude
-// actually produces in prose replies: headers, bold/italic (including ***),
-// inline code, fenced code blocks (``` / ~~~), links (optional title stripped
-// from href), image markup as a labeled link (never <img>), lists,
-// blockquotes, horizontal rules, GFM pipe tables, paragraphs. Not a
-// spec-complete CommonMark implementation. Underscore italic/bold is
-// word-boundary-only so snake_case identifiers stay literal.
-//
-// Safety: every leaf is built via textContent/createElement, never
-// innerHTML - so there's no HTML-injection surface even though the source
-// text is model-generated and not sanitized upstream.
+// Minimal Markdown -> DOM renderer for Claude's reply text only, hand-
+// rolled to cover prose Claude actually produces, not spec-complete
+// CommonMark. Underscore italic/bold is word-boundary-only so snake_case
+// stays literal. Safety: every leaf is built via textContent/createElement,
+// never innerHTML - no injection surface despite model-generated text.
 
 const INLINE_CODE_RE = /`([^`]+)`/;
 const BOLD_EM_RE = /\*\*\*(.+?)\*\*\*/;
 const BOLD_RE = /\*\*(.+?)\*\*|(?<![\w])__(.+?)__(?![\w])/;
 const ITALIC_RE = /\*(.+?)\*|(?<![\w])_(?!_)(.+?)_(?![\w])/;
 const STRIKE_RE = /~~([^~]+)~~/;
-// Dest allows one nested (...) so `javascript:alert(1)` is one dest, not a
-// cut at the first `)`. Optional GFM title stays in this capture and is
-// stripped by parseLinkDestination.
-// The alternation body is a single `(?:[^()]|\([^()]*\))*` rather than
-// `(?:[^()]+|\([^()]*\))+` - the "+ of an alternation whose branches
-// overlap on plain characters" shape is classic ReDoS: on a truncated dest
-// (streaming text with `[label](https://...` and no closing `)` yet) the
-// engine backtracks through every split of the plain-char run before
-// failing, cost doubling per character. A streamed reply hits this on
-// every link mid-flight, so this must stay linear.
+// Dest allows one nested (...) so `javascript:alert(1)` stays one dest;
+// GFM title in this capture is stripped by parseLinkDestination.
+// Body is `(?:[^()]|\([^()]*\))*`, not `(?:[^()]+|\([^()]*\))+` - that
+// overlapping-alternation `+` is classic ReDoS: a truncated streamed dest
+// backtracks through every split before failing. Must stay linear.
 const LINK_DEST_RE = /(?:<[^>]+>|(?:[^()]|\([^()]*\))*)/;
 const IMAGE_RE = new RegExp(`!\\[([^\\]]*)\\]\\((${LINK_DEST_RE.source})\\)`);
 const LINK_RE = new RegExp(`\\[([^\\]]+)\\]\\((${LINK_DEST_RE.source})\\)`);
@@ -36,14 +21,11 @@ const LINK_RE = new RegExp(`\\[([^\\]]+)\\]\\((${LINK_DEST_RE.source})\\)`);
 // escaped character, not a marker - e.g. "\*not bold\*" shouldn't italicize.
 const ESCAPE_RE = /\\([\\`*_{}[\]()#+\-.!~>])/;
 
-// Link destinations are model-generated text, not a trusted URL - without a
-// protocol allowlist a reply (or a prompt-injected one) can turn
-// "[click here](javascript:...)" into a real clickable anchor on this
-// origin, which can then read the session bearer token out of
-// sessionStorage and call the authenticated API. Strip stray whitespace/
-// tab/newline characters first (browsers ignore them mid-URL, so
-// "java" + tab + "script:" still parses as "javascript:"), then allow only
-// the schemes a legitimate reply link or MCP auth link ever needs.
+// Link destinations are model-generated (or prompt-injected) text, not a
+// trusted URL - unfiltered, a reply could turn "[click](javascript:...)"
+// into a clickable anchor that reads the session bearer token out of
+// sessionStorage. Strip whitespace/tab/newline first (browsers ignore
+// them mid-URL, so "java"+tab+"script:" still parses), then allowlist.
 const SAFE_HREF_RE = /^(https?:|mailto:)/i;
 const STRIP_CHARS = [9, 10, 13].map((code) => String.fromCharCode(code));
 export function isSafeHref(raw) {
@@ -244,14 +226,11 @@ export function renderMarkdown(text) {
   while (i < lines.length) {
     const line = lines[i];
 
-    // Fenced code block - verbatim, no inline parsing inside.
-    // Backtick or tilde fences. Info string is the rest of the opener up to
-    // the first whitespace (` ```js `, ` ```c++ `, ` ~~~js `). Anything
-    // after that on the same line is a lost newline (Grok joining the first
-    // payload row onto the opener), not a language - ` ```Mode   LastWriteTime`
-    // would otherwise eat "Mode" as data-lang and drop the rest of the
-    // header row. Closing fence must use the same marker character and at
-    // least as many as the opener.
+    // Fenced code block, verbatim (no inline parsing). Backtick or tilde
+    // fences; info string runs to the first whitespace. Anything after that
+    // on the same opener line is a lost newline (Grok joining the first
+    // payload row onto the opener), not a language - e.g. a stray
+    // ` ```Mode   LastWriteTime` would otherwise eat "Mode" as data-lang.
     const fence = /^(`{3,}|~{3,})([^`~\s]*)(.*)$/.exec(line);
     if (fence) {
       flushParagraph(paraBuf);

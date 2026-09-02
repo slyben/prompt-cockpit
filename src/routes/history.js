@@ -12,20 +12,10 @@ import { isSafeSessionId } from '../safe-id.js';
 export function registerHistoryRoutes(router) {
   router.get('/api/history/:id', async (req, res, url, { id }) => {
     // No per-session token like the live-session routes, since there's no
-    // registry row to hold one for a session this cockpit process never
-    // started. Same auth boundary as /api/resumable and /api/browse:
-    // Origin/Host only, checked once for every request in server.js - not
-    // token-gated (see session-launcher.js's listDirectory comment for why
-    // that matters more for /api/browse, which can enumerate the whole
-    // filesystem).
-    // isSafeSessionId is where Claude's/Grok's own fetchHistory already
-    // validate `id` before path.join'ing it onto disk (session-history.js/
-    // grok-history.js) - Codex's fetchCodexSessionHistory never did (it
-    // passes threadId straight through to the app-server's own RPC, not a
-    // local path.join, but there is no reason this route's own boundary
-    // should depend on which provider happens to be safe today). Checked
-    // once here for every provider instead (2026-09-02 review, "Tests and
-    // security" section).
+    // registry row for a session this process never started - Origin/Host
+    // only, same as /api/resumable and /api/browse. isSafeSessionId is
+    // checked once here per provider rather than relying on each
+    // provider's own fetchHistory to validate `id`, since not all do.
     if (!isSafeSessionId(id)) return respondJson(res, 400, { error: 'invalid session id' });
     const cwd = url.searchParams.get('cwd') || process.cwd();
     let provider;
@@ -64,10 +54,9 @@ export function registerHistoryRoutes(router) {
       });
       res.writeHead(200, {
         'content-type': 'text/markdown; charset=utf-8',
-        // isSafeSessionId above already rejects path separators, but not a
-        // stray `"` that could break out of the quoted filename attribute -
-        // belt-and-suspenders strip it too rather than assume every id a
-        // provider ever mints is quote-free (2026-09-02 review).
+        // isSafeSessionId above rejects path separators but not a stray `"`
+        // that could break out of the quoted filename attribute - strip it
+        // too rather than assume every id a provider mints is quote-free.
         'content-disposition': `attachment; filename="session-${id.replace(/"/g, '')}.md"`,
       });
       return res.end(markdown);
@@ -77,12 +66,9 @@ export function registerHistoryRoutes(router) {
   });
 
   router.get('/api/history/:id/agent/:toolUseId', async (req, res, url, { id, toolUseId }) => {
-    // Backs public/detail-pane.js's Agent tab, which polls this for an Agent
-    // (Task) tool row - `id` here is the *parent* session's claudeSessionId
-    // (app.js's currentClaudeSessionId at click time), not this cockpit's
-    // own registry id. Same auth boundary as /api/history/:id above: no
-    // session token, since a subagent transcript on disk outlives the tab
-    // (and often the live registry row) that spawned it - Origin/Host only.
+    // `id` here is the *parent* session's claudeSessionId, not this
+    // cockpit's own registry id. No session token: a subagent transcript
+    // on disk outlives the tab (and often the live row) that spawned it.
     try {
       const found = await findSubagentTranscript(id, toolUseId);
       if (!found) return respondJson(res, 404, { error: 'no subagent transcript found for this tool call' });

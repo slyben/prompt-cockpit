@@ -90,12 +90,9 @@ export function startCodexSession({
     return new Promise((resolve, reject) => completionWaiters.set(turnId, { resolve, reject }));
   }
 
-  // The app-server is a shared, long-lived process (see codex-app-server.js) -
-  // if it crashes or exits mid-turn, rejectAll() only reaches in-flight RPC
-  // requests, not a waitForTurn() promise parked with no request behind it.
-  // Without this, the session sits in 'running' forever. Mirrors how
-  // grok-session.js's own proc 'exit'/'error' handlers fail() a session
-  // whose process died out from under it.
+  // If the shared app-server crashes mid-turn, rejectAll() only reaches
+  // in-flight RPC requests, not a waitForTurn() promise parked with no
+  // request behind it - without this the session sits in 'running' forever.
   const unsubscribeManagerClose = manager.onClose((err) => {
     if (closed) return;
     closed = true;
@@ -232,14 +229,10 @@ export function startCodexSession({
           const consumed = resultEpoch.consume(entry.id);
           resultEpoch.applyResultStamp(message, consumed);
           onMessage(message);
-          // onError routes to session-registry.js's handleError, which reaps
-          // this row - the rest of cockpit now treats this session as dead.
-          // `closed` must agree, or this loop (and any later pushInput) keeps
-          // driving turn/start RPCs against a session nobody can see or
-          // interact with anymore, into the void (2026-09-02 review, finding
-          // #2's "Related" note). manager.onClose already sets `closed` for
-          // the whole-app-server-died case; this covers the per-turn
-          // runTurn() failure case the same way.
+          // onError reaps this row elsewhere, so `closed` must agree here too
+          // or this loop keeps driving turn/start RPCs against a session
+          // nobody can see anymore. manager.onClose covers the whole-app-
+          // server-died case; this covers the per-turn failure case.
           closed = true;
           onError(err);
         }
@@ -252,14 +245,11 @@ export function startCodexSession({
   }
 
   function pushInput(text) {
-    // `null`, not undefined - session-registry.js's pushTurn checks for this
-    // exact sentinel ("did not enqueue anything, no result will ever come")
-    // to decide whether to register a delegation tag for the turn (see
-    // grok-session.js's own pushInput comment on the same contract). Codex
-    // returning undefined here let a closed-session push slip past that
-    // check and setTag(undefined, tag), stranding a delegation origin
-    // waiting on a result that was never going to arrive (2026-09-02 review,
-    // finding #2).
+    // `null`, not undefined - pushTurn checks for this exact sentinel
+    // ("did not enqueue anything, no result will ever come") to decide
+    // whether to register a delegation tag for the turn. Returning undefined
+    // instead lets a closed-session push slip past that check and strand a
+    // delegation origin waiting on a result that will never arrive.
     if (closed) return null;
     const id = randomUUID();
     const meta = resultEpoch.push(id);
@@ -302,15 +292,11 @@ export function startCodexSession({
     unsubscribeRequests();
     unsubscribeManagerClose();
     if (threadId) {
-      // Per the Codex app-server protocol, thread/unsubscribe only detaches
-      // this connection from the thread - the thread itself (and any turn
-      // still running on it) stays alive server-side for up to 30 minutes.
-      // That's not cancellation: an active turn's commands/file writes would
-      // otherwise keep running invisibly after the cockpit tab is closed.
-      // turn/interrupt has to be sent - and given the chance to reach the
-      // server - before we unsubscribe. Always sent regardless of ref
-      // count: it targets this session's own turn, not the shared
-      // subscription.
+      // thread/unsubscribe only detaches this connection - the thread (and
+      // any running turn) stays alive server-side for up to 30 minutes, so
+      // an active turn's commands/file writes would keep running invisibly
+      // after the tab closes unless turn/interrupt is sent first. Always
+      // sent regardless of ref count: it targets this session's own turn.
       const interrupted = activeTurnId
         ? manager.request('turn/interrupt', { threadId, turnId: activeTurnId }).catch(() => {})
         : Promise.resolve();
@@ -397,12 +383,9 @@ export function startCodexSession({
           displayName: entry.displayName || entry.model || entry.id,
           description: entry.description || '',
           resolvedModel: entry.model || entry.id,
-          // Not every model supports every value in CODEX_EFFORTS
-          // (provider-registry.js) - e.g. some models don't support
-          // 'none'/'minimal', others don't support 'ultra'. Carried through
-          // here so provider-registry.js's resolveEfforts() can validate
-          // against what the currently-selected model actually accepts
-          // instead of the global advertised list.
+          // Not every model supports every advertised effort value (e.g.
+          // some lack 'none'/'minimal', others lack 'ultra') - carried
+          // through so resolveEfforts() can validate per-model.
           supportedEfforts: Array.isArray(entry.supportedReasoningEfforts) ? entry.supportedReasoningEfforts : null,
         }));
       },

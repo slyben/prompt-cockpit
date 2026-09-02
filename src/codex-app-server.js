@@ -294,12 +294,9 @@ export function createCodexAppServerManager({ connectImpl = spawnCodexAppServer 
   const notificationHandlers = new Set();
   const requestHandlers = new Set();
   const closeHandlers = new Set();
-  // thread/unsubscribe is scoped to this one shared connection, not to
-  // whichever Cockpit session asked for it - if two rows both resumed the
-  // same Codex thread (two tabs on the same past session, say), one of them
-  // closing and unsubscribing would silently cut the other's live stream
-  // too. Ref-count instead: only actually send thread/unsubscribe once
-  // nothing still wants that thread.
+  // thread/unsubscribe is scoped to this shared connection, not to whichever
+  // session asked for it - two tabs resuming the same thread would have one
+  // closing silently cut the other's stream. Ref-count instead.
   const threadRefCounts = new Map();
   let closed = false;
 
@@ -362,12 +359,9 @@ export function createCodexAppServerManager({ connectImpl = spawnCodexAppServer 
     retainThread(threadId) {
       threadRefCounts.set(threadId, (threadRefCounts.get(threadId) || 0) + 1);
     },
-    // Call when a session is done with a thread (closing, or switching to a
-    // different one). Returns true when this was the last interested
-    // session, meaning the caller should actually send thread/unsubscribe;
-    // false means some other session still needs the thread's events, so
-    // the caller must not unsubscribe the shared connection out from under
-    // it.
+    // Returns true when this was the last interested session (caller should
+    // send thread/unsubscribe), false if another session still needs the
+    // thread's events (caller must not unsubscribe the shared connection).
     releaseThread(threadId) {
       const count = threadRefCounts.get(threadId) || 0;
       if (count <= 1) {
@@ -377,12 +371,10 @@ export function createCodexAppServerManager({ connectImpl = spawnCodexAppServer 
       threadRefCounts.set(threadId, count - 1);
       return false;
     },
-    // Fires once, when the app-server dies for any reason (crash, exit, or
-    // an explicit close() below) - a Codex session subscribes to this to
-    // reject its own pending turn waiter and surface an error instead of
-    // sitting in 'running' forever. Unlike notificationHandlers/requestHandlers,
-    // deliberately not cleared on close(): a handler fired exactly once by
-    // fail() has nothing left to unsubscribe from afterward.
+    // Fires once when the app-server dies (crash, exit, or close() below) so
+    // a session can reject its pending turn waiter instead of hanging in
+    // 'running' forever. Deliberately left uncleared on close(): a handler
+    // fired once by fail() has nothing left to unsubscribe from.
     onClose(handler) {
       closeHandlers.add(handler);
       return () => closeHandlers.delete(handler);

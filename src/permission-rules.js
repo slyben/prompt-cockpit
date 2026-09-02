@@ -1,19 +1,8 @@
-// Durable "always allow this tool in this project" rules - the wider-scope
-// increment beyond session.js's per-tool-name/in-memory/this-session-only
-// version. Stored under `permissions.allow` in the same per-cwd
-// `.claude/settings.local.json` file session-defaults.js/plugin-settings.js
-// use (settings-file.js), which is *itself* what makes this cwd-scoped -
-// no matching code of our own needed, the file already lives one per
-// project. Rule strings are deliberately shaped like the SDK's own
-// PermissionRuleValue ({toolName, ruleContent}) serialized as "Tool" or
-// "Tool(content)" - this repo doesn't build input-pattern (`ruleContent`)
-// rules yet, but a future one landing in this same string format is a
-// straight read, not a migration.
-//
-// server.js is the only writer, same boundary as session-defaults.js: it
-// calls addAllowRule()/removeAllowRule() as a side effect of a live
-// resolveApproval()/settings-panel action, keeping session.js/session-
-// registry.js free of filesystem knowledge.
+// Durable "always allow this tool" rules - the wider-scope counterpart
+// to session.js's in-memory, per-session version, stored in the same
+// per-cwd `.claude/settings.local.json` used by session-defaults.js.
+// Rule strings mirror the SDK's PermissionRuleValue format so a future
+// input-pattern rule is a straight read. server.js is the only writer.
 import { readSettingsFile, updateSettingsFile } from './settings-file.js';
 
 export function formatRule({ toolName, ruleContent }) {

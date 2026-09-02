@@ -19,14 +19,11 @@ export const CLAUDE_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 export const GROK_EFFORTS = ['low', 'medium', 'high', 'xhigh'];
 export const CODEX_EFFORTS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
 
-// Static launch-time catalogs - what the launcher's model/effort dropdowns
-// show *before* a session exists, so there's no running handle to ask (see
-// this module's own header comment on why these live here rather than being
-// fetched live: neither CLI can enumerate its own models pre-launch).
-// Formerly hardcoded in public/app.js as CLAUDE_START_MODELS/
-// GROK_START_MODELS/CLAUDE_EFFORT_OPTIONS/GROK_EFFORT_OPTIONS - moved here
-// so this is the one place a new model or effort tier gets added, and
-// providerDetails() below is the one place it rides to the browser.
+// Static launch-time catalogs - what the launcher's model/effort
+// dropdowns show before a session exists (neither CLI can enumerate
+// its own models pre-launch). This is the one place a new model or
+// effort tier gets added; providerDetails() below is the one place it
+// rides to the browser.
 const CLAUDE_START_MODELS = [
   { value: '', label: 'Default model' },
   // Marked default (same convention as CLAUDE_EFFORT_OPTIONS below): Sonnet
@@ -49,15 +46,11 @@ const GROK_EFFORT_OPTIONS = [
   { value: 'high', label: 'High' },
   { value: 'xhigh', label: 'Extra high' },
 ];
-// Claude's effort ladder (Agent SDK's EffortLevel - CLAUDE_EFFORTS above) -
-// one level wider than Grok's ('max'), and unlike Grok's select this one
-// needs a blank "Default" option since effort is optional for Claude (unset
-// = model/SDK default) where Grok's spawn-time flag is always some concrete
-// value.
-// 'high' is marked as the real default straight from the installed
-// @anthropic-ai/claude-agent-sdk's sdk.d.ts (0.3.231) EffortLevel doc
-// comment: "'high' — Deep reasoning (default)". Confirmed 2026-08-20 (see
-// .claude/memory/sdk-streaming-input-gotchas.md item 3).
+// Claude's effort ladder (Agent SDK's EffortLevel) is one level wider
+// than Grok's ('max') and needs a blank "Default" option since effort
+// is optional for Claude (unset = model/SDK default), unlike Grok's
+// always-concrete spawn-time flag. 'high' is the SDK's documented
+// default EffortLevel.
 const CLAUDE_EFFORT_OPTIONS = [
   { value: '', label: 'Default' },
   { value: 'low', label: 'Low' },
@@ -155,24 +148,11 @@ const PROVIDERS = Object.freeze({
     listResumableSessions: listCodexSessions,
     fetchHistory: fetchCodexSessionHistory,
     efforts: CODEX_EFFORTS,
-    // CODEX_EFFORTS above is the advertised superset (what the launcher
-    // shows before a session/model is chosen) - not every model supports
-    // every value in it (some don't support 'none'/'minimal', others don't
-    // support 'ultra'). Once a live session exists, routes/session-actions.js's
-    // effort route calls this instead of trusting the static list, so a
-    // choice the current model can't actually honor is rejected immediately
-    // rather than accepted here and only failing when the next turn starts.
-    // CODEX_EFFORTS above is still the right fallback when the catalog
-    // fetch *succeeded* but this particular model just doesn't publish a
-    // supportedEfforts list (nothing to restrict by, trust the superset).
-    // A fetch *failure* (app-server hiccup) is different - that used to
-    // fall back to the very same superset, which meant a transient failure
-    // silently widened the accepted set back to "every effort any Codex
-    // model has ever supported," letting session-actions.js's effort route
-    // accept a value this specific model can't actually honor - exactly
-    // the failure this per-model check exists to catch. Returns null for
-    // that case instead; session-actions.js treats null as "can't validate
-    // right now" (503) rather than trusting the wider static list.
+    // CODEX_EFFORTS is the advertised superset - not every model supports
+    // every value. session-actions.js's effort route calls this to
+    // validate against the live model rather than trusting the static
+    // list: no supportedEfforts on the model means trust the superset;
+    // a catalog fetch failure returns null so the caller 503s instead.
     resolveEfforts: async (row) => {
       let models;
       try {
@@ -199,12 +179,11 @@ const PROVIDERS = Object.freeze({
       // .claude/settings.local.json, a store that isn't Codex's.
       pluginToggleViaFile: false,
       conversationFork: false,
-      // Per the app-server's documented approval-decision shapes (accept/
-      // acceptForSession/decline/cancel), there is no project-level grant -
-      // only turn-scoped (default) or session-scoped. codex-session.js's
-      // resolveApproval already only ever produces 'acceptForSession';
-      // this capability is what stops the UI from offering "always in this
-      // project" as if it would be honored.
+      // Per the app-server's approval-decision shapes (accept/
+      // acceptForSession/decline/cancel), there's no project-level grant -
+      // only turn-scoped or session-scoped. codex-session.js's resolveApproval
+      // only ever produces 'acceptForSession'; this capability stops the UI
+      // from offering "always in this project" as if it would be honored.
       projectPersistentApprovals: false,
     }),
   }),
@@ -242,12 +221,11 @@ export function providerDetails(provider) {
     capabilities: { ...descriptor.capabilities },
     launch: {
       efforts: [...descriptor.efforts],
-      // Static launch-time catalogs (see this module's CLAUDE_START_MODELS/
-      // GROK_START_MODELS/CLAUDE_EFFORT_OPTIONS/GROK_EFFORT_OPTIONS comment)
-      // - omitted entirely for a provider that doesn't define one (e.g.
-      // Codex today) rather than serialized as an empty array, so the
-      // client's own generic fallback (provider-catalog.js/app.js) can tell
-      // "no static catalog" apart from "catalog is empty".
+      // Static launch-time catalogs are omitted entirely for a provider
+      // that doesn't define one (e.g. Codex today) rather than serialized
+      // as an empty array, so the client's generic fallback
+      // (provider-catalog.js/app.js) can tell "no static catalog" apart
+      // from "catalog is empty".
       ...(descriptor.models ? { models: descriptor.models.map((m) => ({ ...m })) } : {}),
       ...(descriptor.effortOptions ? { effortOptions: descriptor.effortOptions.map((o) => ({ ...o })) } : {}),
     },

@@ -1,20 +1,8 @@
 // Drag-and-drop from Finder onto the compose box, inserting a file
-// reference at the drop point. **Path-only, not content/image
-// attachment** - deliberately narrower than the plan doc's deferred
-// "drag-and-drop file/image injection", built on direct request instead.
-//
-// The browser genuinely cannot hand a web page the dropped file's real
-// filesystem path (`DataTransferItem`/`File` only exposes `.name`, the
-// basename - the old non-standard `File.path` was locked down for
-// fingerprinting/privacy reasons and isn't available here, this being a
-// plain browser tab rather than Electron). So this can only ever be a
-// best-effort: insert the basename immediately for feedback, then try to
-// resolve it to a real project-relative path via the same
-// file-suggestions search `@`-autocomplete already uses (file-picker.js) -
-// if the dropped file lives under the session's cwd, the resolved token
-// upgrades in place. If it's from outside the project (a Desktop
-// screenshot, say), it silently stays a bare filename - there is no path
-// to fall back to, and it should look like a typed name, not a broken link.
+// reference at the drop point (path-only, not content/image). The
+// browser can't expose the real filesystem path, so this is best-
+// effort: insert the basename, then resolve it via the same
+// file-suggestions search `@`-autocomplete uses (bare filename if outside cwd).
 export function initDropTarget({ textarea, getSessionId, getSessionToken }) {
   textarea.addEventListener('dragover', (event) => {
     event.preventDefault(); // required for 'drop' to fire at all

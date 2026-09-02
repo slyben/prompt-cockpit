@@ -8,14 +8,11 @@ import { isSafeSessionId } from './safe-id.js';
 
 const MAX_HISTORY_MESSAGES = 5000; // safety cap against a pathologically long session, not a UX truncation
 
-// Sized in tokens, not message count, mirroring claude-realtime-usage's
-// live_watcher (`initial?tail=...` + a "Load full history" button): a
-// message's actual size varies wildly (a one-line reply vs. a huge
-// tool_result dump), so a fixed message count under- or over-shoots badly.
-// Most sessions fit inside this entirely; long ones get a fast initial
-// paint plus a "Load earlier history" button for the rest, refetched on
-// demand rather than cached (same tradeoff the reference implementation
-// makes for its own "load full history" button).
+// Sized in tokens, not message count: message size varies wildly (a one-line
+// reply vs. a huge tool_result dump), so a fixed message count under- or
+// over-shoots badly. Long sessions get a fast initial paint plus a "Load
+// earlier history" button for the rest, refetched on demand rather than
+// cached.
 export const INITIAL_HISTORY_TOKEN_BUDGET = 1_000_000;
 
 const CHARS_PER_TOKEN_ESTIMATE = 4; // no real tokenizer available for persisted transcript messages
@@ -72,11 +69,10 @@ function isSentinel(content) {
 }
 
 // Real user-authored turns only - `type: 'user'` entries that are neither
-// the priming sentinel (see isSentinel above) nor a tool_result (those have
-// array content, not a string). This is the single source of truth for
-// "what counts as a turn" - rewind.js's turn-index targeting and
-// session.js's live turnCounter both have to agree with this definition or
-// rewind resolves to the wrong message (see resolveTurnUuid in rewind.js).
+// the priming sentinel nor a tool_result (those have array content, not a
+// string). This is the single source of truth for "what counts as a turn";
+// rewind's turn-index targeting must agree with this definition or it
+// resolves to the wrong message.
 export function isRealUserTurn(m) {
   if (m.type !== 'user') return false;
   const content = m.message && m.message.content;

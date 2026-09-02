@@ -1,38 +1,8 @@
-// Renders the SDK message stream: assistant text, tool calls, tool
-// results, thinking blocks. Whole-message rendering (no token-level
-// partials - out of scope for now). Hook/thinking-token/rate-limit chatter
-// and repeat init messages are dropped entirely rather than dumped as raw
-// JSON. Per-tool approval (accept-this-once / no) is a banner driven by
-// cockpit:approval-request, handled in app.js - not part of this module.
-//
-// Tool calls render Trajectory-style (docs/deepseek.jpg): each tool_use gets
-// one fixed-height one-line row (name + brief args + inline usage/duration),
-// not a click-to-expand block - see appendToolCallRow. Its matching
-// tool_result patches that same row in place (duration, status glyph)
-// instead of appending a second block, so a call/result pair merges into one
-// line. Full payload/result/timing for a row lives in tool-call-store.js and
-// is surfaced by the docked detail pane (detail-pane.js, wired in app.js via
-// the onSelectToolCall/onToolCallStarted/onToolResultArrived callbacks
-// threaded through renderMessage) - click a row to pin it there, or leave it
-// on "follow the most recent call" by default. Thinking blocks always render
-// fully expanded now too (plain appendBlock, no collapse state) - the whole
-// click-to-collapse/Ctrl+O-to-expand interaction this app used to have is
-// gone, not just narrowed to tool calls.
-//
-// Consecutive tool calls are still folded into one "group" block (e.g.
-// "3 tool calls: Bash → Read → Edit") rather than each getting its own
-// top-level row - that's what actually made a multi-tool turn noisy, more
-// than any single row's verbosity, and is a deliberately-kept exception to
-// the no-collapse rule above (a locked-in design decision, not an oversight -
-// folding a long tool-call run to one line is worth keeping even though
-// per-block collapse wasn't). A group stays open across tool calls and their
-// results and closes the moment real Claude text or a thinking block
-// appears, or the turn ends - see closeGroup call sites. Groups render
-// expanded as they accumulate; by default (settings-panel toggle,
-// autoCollapsePreviousGroup below) the previous group auto-folds the moment
-// the next one opens, so only the run currently in flight stays open. Only a
-// direct click toggles a group now (no keyboard shortcut, no "expand/collapse
-// all" button - both were removed along with the rest of the old interaction).
+// Renders the SDK message stream. Tool calls render one fixed-height row
+// (see appendToolCallRow); a matching tool_result patches that row in place
+// rather than appending a second block. Consecutive tool calls fold into
+// one "group" summary row ("3 tool calls: Bash -> Read -> Edit") that stays
+// open until real text/thinking or turn end (see closeGroup call sites).
 
 import { resetToolCallStore, createToolCallRecord, completeToolCallRecord, mergeToolCallStore, recordOrphanResult, popOrphanResult } from '/tool-call-store.js';
 import { renderMarkdown } from '/markdown.js';
@@ -41,31 +11,23 @@ import { createDelegateView } from '/delegate-view.js';
 import { diffLines, countDiff, diffSummaryText } from '/diff-lines.js';
 
 // One tracker per streamed-block body element, so joinStreamText resumes
-// its fence scan instead of rescanning the whole reply on every chunk. A
-// fresh `body` is created per stream block (appendToLastStreamBlock only
-// ever appends onto the current one), so keying on it doubles as the
-// "reset on a new run" behavior grok-messages.js/session-registry.js also
-// need - no explicit cleanup required since it's a WeakMap.
+// its fence scan instead of rescanning the whole reply on every chunk.
+// WeakMap keyed on `body` needs no explicit cleanup and naturally resets on
+// a new stream block (a fresh `body` per block).
 const fenceTrackerByBody = new WeakMap();
 
 const seenInitByContainer = new WeakMap();
 const groupsByContainer = new WeakMap(); // container -> group[]
 const openGroupByContainer = new WeakMap(); // container -> the currently-accumulating group, if any
-// Cross-session delegation ('/ask') message rendering lives in
-// delegate-view.js now - see that module's own comment for why it takes
-// appendBlock/closeGroup as constructor params instead of importing this
-// module back (would be a cycle). Both are function DECLARATIONS further
-// down this file - fully hoisted before any top-level statement (this one
-// included) runs, so referencing them here is safe regardless of textual
-// order.
+// delegate-view.js takes appendBlock/closeGroup as constructor params
+// instead of importing this module back (would be a cycle). Both are
+// function declarations further down, fully hoisted before this runs.
 const delegateView = createDelegateView({ appendBlock, closeGroup });
 
-// Settings-panel toggle (default on - see settings.js). When true, the
-// moment a new top-level tool-call group opens, the immediately preceding
-// one auto-folds to its one-line summary instead of sitting there expanded
-// forever - a long turn's tool history reads like a list of past runs, not
-// a wall of them all still open. Off just restores the old always-expanded
-// behavior; either way a click on the group's own header still re-expands it.
+// When true, a new top-level tool-call group opening auto-folds the
+// immediately preceding one to its summary line, so a long turn's tool
+// history reads as a list of past runs rather than a wall of open ones. A
+// click on a group's header always re-expands it either way.
 let autoCollapsePreviousGroup = true;
 export function setAutoCollapsePreviousGroup(enabled) {
   autoCollapsePreviousGroup = enabled;
@@ -96,12 +58,10 @@ export function resetStreamView(container) {
 }
 
 // Renders `messages` (oldest-first) into a detached fragment, then inserts
-// them all at once above whatever's already in `container` - used for the
-// "Load earlier history" button (app.js) so a resumed session's older
-// turns land above its initial tail in one DOM operation, in the right
-// order. Historical entries have no `turnIndex` (that's minted only for
-// this session's own live pushInput calls - see session.js), so their
-// rewind buttons don't appear; a real limitation, not an oversight.
+// them all at once above `container`'s existing content in one DOM
+// operation, in order. Historical entries have no `turnIndex` (minted only
+// for this session's own live pushInput calls), so their rewind buttons
+// don't appear - a real limitation, not an oversight.
 export function prependHistory(container, messages, options = {}) {
   if (!groupsByContainer.has(container)) resetStreamView(container);
 
@@ -114,15 +74,11 @@ export function prependHistory(container, messages, options = {}) {
     renderMessage(fragment, message, { ...options, historical: true });
   }
 
-  // Groups built into the fragment registered themselves under the
-  // fragment's own WeakMap entry (renderMessage's container param) - merge
-  // them into the real container's list. The fragment's own dangling open
-  // group (if the history slice ends mid-run) is discarded, not merged - it
-  // belongs to a different DOM subtree and can never accept another tool
-  // call now that it's sealed. Each group's `container` field also gets
-  // re-pointed at the real container - it was stamped `fragment` during
-  // creation, and fragment is discarded below, so anything still
-  // referencing it would look up an empty list.
+  // Groups registered under the fragment's own WeakMap entry get merged
+  // into the real container's list, with `container` re-pointed on each
+  // (it was stamped `fragment` at creation). Any dangling open group (the
+  // history slice ending mid-run) is discarded, not merged - it belongs to
+  // a different DOM subtree and can't accept another tool call once sealed.
   const fragmentGroups = groupsByContainer.get(fragment) || [];
   const containerGroups = groupsByContainer.get(container) || [];
   fragmentGroups.forEach((g) => { g.container = container; });
@@ -131,19 +87,15 @@ export function prependHistory(container, messages, options = {}) {
   groupsByContainer.delete(fragment);
   openGroupByContainer.delete(fragment);
 
-  // Tool-call records built during the fragment render (see tool-call-store.js's
-  // mergeToolCallStore doc comment) need the same fold-in, so a click on a
-  // just-prepended historical row still resolves to its record.
+  // Tool-call records need the same fold-in, so a click on a just-prepended
+  // historical row still resolves to its record.
   const mergedIds = mergeToolCallStore(fragment, container);
 
   container.prepend(fragment);
 
   // A tool_use that just arrived via this merge might be the match an
-  // earlier orphan result (rendered before this history page ever loaded -
-  // see appendOrphanResultRow/renderUser's tool_result handling) has been
-  // waiting for. Resolve it now instead of leaving that row pending forever:
-  // complete the record and patch its row exactly like a live result
-  // arriving would, then drop the now-redundant orphan placeholder row.
+  // earlier orphan result has been waiting for - resolve it now rather than
+  // leaving that row pending forever, and drop the redundant orphan row.
   for (const id of mergedIds) {
     const orphan = popOrphanResult(container, id);
     if (!orphan) continue;
@@ -155,30 +107,21 @@ export function prependHistory(container, messages, options = {}) {
   }
 }
 
-// receivedAtMs: the cockpit's own receive-time (Date.now() at the moment
-// app.js got this message over the websocket), used whenever the SDK's own
-// message.timestamp is absent (older emitters, or the Grok provider, which
-// has no timestamp field at all - see src/grok-messages.js). The SDK's own
-// field is "for display only, do not order messages by this field" per its
-// doc comment, which is exactly the use made of it here. history-pane.js
-// passes no receivedAtMs, so a transcript with no recorded timestamp simply
-// shows none rather than a fabricated "just now".
+// receivedAtMs: the cockpit's own receive-time, used whenever the SDK's own
+// message.timestamp is absent (older emitters, or Grok, which has no
+// timestamp field at all). history-pane.js passes no receivedAtMs, so a
+// transcript with no recorded timestamp shows none rather than a
+// fabricated "just now".
 export function renderMessage(container, message, { onRewindClick, hasFileCheckpointing = true, turnIndexUnreliable = false, turnPointIndex = null, assistantLabel = 'Claude', rewindLabel, receivedAtMs = null, historical = false, onSelectToolCall, onOpenAgentTab, onToolCallStarted, onToolResultArrived, onShowDelegatedTrace } = {}) {
   if (!groupsByContainer.has(container)) resetStreamView(container);
 
   const parsed = message.timestamp ? Date.parse(message.timestamp) : NaN;
   const timestampMs = Number.isFinite(parsed) ? parsed : receivedAtMs;
-  // Detail-pane hooks (all optional, default no-ops via `?.()` at every call
-  // site below) - threaded through the same way onRewindClick already is,
-  // rather than a global event bus, so app.js stays the only place that
-  // knows the detail-pane instance exists. `historical` (forced true by
-  // prependHistory/history-pane.js, false for the one live-streaming call
-  // site in app.js) tells appendToolCallRow/renderUser's tool_result handler
-  // whether Date.now() is a real per-block timestamp (live) or would just be
-  // "whenever this synchronous render loop happened to run" (a batch of
-  // already-past messages, rendered in one tick with no real elapsed time
-  // between them) - see the Timing-tab honesty note this drives in
-  // detail-pane.js.
+  // Detail-pane hooks (all optional, default no-ops via `?.()`) - threaded
+  // through like onRewindClick rather than a global event bus. `historical`
+  // tells appendToolCallRow/renderUser's tool_result handler whether
+  // Date.now() is a real per-block timestamp (live) or meaningless
+  // ("whenever this batch render loop happened to run").
   const toolOpts = { historical, onSelectToolCall, onOpenAgentTab, onToolCallStarted, onToolResultArrived };
 
   switch (message.type) {
@@ -257,10 +200,9 @@ function renderAssistant(container, message, turnPointIndex = null, assistantLab
       if (appendToLastStreamBlock(container, 'thinking', block.thinking, false)) continue;
       appendBlock(container, 'thinking', 'Thinking', block.thinking, [], container, null, usage, timestampMs); // always fully rendered now, no collapse/expand affordance (see module comment)
     } else if (block.type === 'tool_use') {
-      // Same live-vs-historical split as appendToolCallRow's own startedAtMs
-      // below: Date.now() is the real fired-at moment for a message arriving
-      // live; a historical batch render has no such moment; message.timestampMs
-      // is the coarser fallback (see appendToolCallRow's comment).
+      // Same live-vs-historical split as appendToolCallRow's own startedAtMs:
+      // Date.now() is the real fired-at moment live; message.timestampMs is
+      // the coarser fallback for a historical batch render.
       const groupFiredAtMs = toolOpts.historical ? timestampMs : Date.now();
       const parent = addToolCallToGroup(container, block.name, message._usageInfo, groupFiredAtMs);
       appendToolCallRow(container, block, message._usageInfo, parent, turnPointIndex, toolOpts, timestampMs);
@@ -268,34 +210,20 @@ function renderAssistant(container, message, turnPointIndex = null, assistantLab
   }
 }
 
-// Trajectory-style fixed one-liner per tool call - verb + brief args (reuses
-// summarizeToolInput, unchanged) + inline usage + a duration placeholder
-// filled in by updateToolCallRow once the matching tool_result arrives. This
-// is the *only* DOM node for the tool call: the tool_result handler below
-// patches it in place rather than appending a second block, so the run
-// merges into one line per group entry instead of a call/result pair.
+// This is the *only* DOM node for the tool call: the tool_result handler
+// below patches it in place rather than appending a second block, so the
+// run merges into one line per group entry instead of a call/result pair.
 function appendToolCallRow(container, block, usageInfo, parent, turnPointIndex, toolOpts = {}, messageTimestampMs = null) {
-  // Live: Date.now() is a real per-block stamp, the whole point of this
-  // instrumentation. Historical (prependHistory/history-pane.js force
-  // toolOpts.historical = true): every message in the batch renders in one
-  // synchronous loop with no real elapsed time between iterations, so
-  // Date.now() here would just be "whenever this loop happened to run," not
-  // when the tool call actually started - that's what produced the
-  // misleading "0ms" on every historical row. Use the assistant message's
-  // own timestamp instead (still a real, if coarser, signal); if it's
-  // missing too (older emitters, Grok), leave it null and let the Timing tab
-  // / duration cell show "-" rather than a fabricated number.
+  // Historical batch renders happen in one synchronous loop with no real
+  // elapsed time between iterations, so Date.now() would misleadingly read
+  // "0ms" - use the assistant message's own (coarser) timestamp instead, or
+  // null if that's missing too, letting the Timing tab show "-" honestly.
   const startedAtMs = toolOpts.historical ? messageTimestampMs : Date.now();
 
-
-  // Same pin-to-bottom the old appendBlock/openGroup path did - checked
-  // against `container` (the real scroll region: #stream/#historyBody), not
-  // `parent` (a group's .inner, which never scrolls on its own). Without
-  // this, every tool call after a group's first one grows the group with no
-  // re-pin, so a long in-flight Bash -> Read -> Edit run walks off the
-  // bottom of the transcript. (On a detached prependHistory fragment,
-  // isScrolledToBottom reads undefined dimensions and returns false, so this
-  // is a harmless no-op there, same as it already is for appendBlock.)
+  // Checked against `container` (the real scroll region), not `parent` (a
+  // group's .inner, which never scrolls on its own) - otherwise every call
+  // after a group's first grows it with no re-pin and the transcript walks
+  // off screen mid-run.
   const wasAtBottom = isScrolledToBottom(container);
 
   const wrap = document.createElement('div');
@@ -331,22 +259,11 @@ function appendToolCallRow(container, block, usageInfo, parent, turnPointIndex, 
   parent.append(wrap);
   if (wasAtBottom) container.scrollTop = container.scrollHeight;
 
-  // Resolve the *real* container at click time, not the one closed over at
-  // creation - prependHistory renders into a detached fragment first, then
-  // merges its records into the real container's map and discards the
-  // fragment's own entry (tool-call-store.js's mergeToolCallStore), so by
-  // the time this ever fires, `container` (the fragment) is stale and would
-  // resolve to nothing. The two ids below are this app's only two real
-  // renderMessage containers (live #stream, history modal's #historyBody) -
-  // `wrap` is a genuine DOM descendant of whichever one it ended up in by
-  // the time a user can click it, fragment or not.
-  // An Agent (Task) tool row opens the subagent's own transcript in the
-  // detail pane's dedicated Agent tab (detail-pane.js) instead of the
-  // normal Summary/Payload/Result/Timing tabs - those only ever have this
-  // call's initial prompt/eventual result, never the subagent's own tool
-  // calls as they happen. Falls back to the normal detail-pane click
-  // wherever onOpenAgentTab isn't wired up (e.g. this row rendering in a
-  // context with no live claudeSessionId to fetch the transcript from).
+  // Resolve the *real* container at click time - prependHistory discards
+  // its detached fragment once records are merged, so `container` here
+  // would be stale. An Agent (Task) row opens the subagent's own transcript
+  // in the detail pane's Agent tab instead of the normal tabs, which never
+  // have its live tool calls.
   if (block.name === 'Agent') wrap.classList.add('tool-row-agent');
   wrap.addEventListener('click', (e) => {
     e.stopPropagation(); // don't also toggle the enclosing group
@@ -412,12 +329,9 @@ function appendOrphanResultRow(container, block, parent) {
   return wrap;
 }
 
-// "$0.0X, N in, M out" - dim/small (index.html's .usage-meta), on the same
-// role row as the label. 4-decimal USD below a cent, mirrors stats-panel.js's
-// fmtUSD so a tiny per-call cost doesn't just round to "$0.00" and look
-// like it was free. Returns null (nothing rendered) when there's no figure
-// to show - an unpriced model, or a message this repo never attached one to
-// (system/user/result messages, or an assistant message with none).
+// "$0.0X, N in, M out". 4-decimal USD below a cent so a tiny per-call cost
+// doesn't round to "$0.00" and look free. Returns null when there's no
+// figure to show - an unpriced model, or a message with none attached.
 export function formatUsageInline(info) {
   if (!info) return null;
   const usd = info.costUsd > 0 && info.costUsd < 0.01 ? `$${info.costUsd.toFixed(4)}` : `$${info.costUsd.toFixed(2)}`;
@@ -435,12 +349,9 @@ function classifyTool(name) {
 }
 
 // Terminal-style expanded rendering per tool, instead of a raw JSON.stringify
-// dump of `input` - that was the single biggest verbosity gap against the
-// CLI, which shows Edit/MultiEdit as a diff and Bash as a plain command
-// rather than an escaped JSON blob. Returns a plain string, { lines, lang }
-// for diff-colored + syntax-highlighted output (Edit/MultiEdit), or
-// { header, code, lang } for a single syntax-highlighted block (Write/Bash) -
-// see renderBody.
+// dump: Edit/MultiEdit render as a diff, Bash/Write as a plain command/file.
+// Returns a plain string, { lines, lang } for diff output, or { header,
+// code, lang } for a single syntax-highlighted block - see renderBody.
 function formatToolInput(name, input) {
   if (!input || typeof input !== 'object') return JSON.stringify(input);
 
@@ -559,12 +470,10 @@ function renderUser(container, message, onRewindClick, hasFileCheckpointing, rew
     // prompt back) - turnIndex is minted synchronously at send time, so
     // the rewind button can attach immediately, no waiting on anything.
     closeGroup(container); // a real message from you ends whatever tool run preceded it
-    // A resumed session (terminal-started or a prior cockpit run) never has
-    // file snapshots for its earlier turns - enableFileCheckpointing can't
-    // apply retroactively (plan Decisions). Label the button honestly
-    // rather than offering a file revert that server-side just no-ops
-    // (registry.rewind() checks the same flag and skips rewindFiles).
-    // Grok has no Claude-style file rewind, so the caller passes
+    // A resumed session never has file snapshots for its earlier turns -
+    // enableFileCheckpointing can't apply retroactively - so the button is
+    // labeled honestly rather than offering a revert that server-side just
+    // no-ops. Grok has no Claude-style file rewind, so its caller passes
     // rewindLabel ("fork back to here") instead of this Claude default.
     const label = rewindLabel
       || (hasFileCheckpointing ? '⟲ rewind here' : '⟲ rewind here (conversation only)');
@@ -595,12 +504,10 @@ function renderUser(container, message, onRewindClick, hasFileCheckpointing, rew
         if (record) {
           updateToolCallRow(record);
         } else {
-          // No matching tool_use in this container - real limitation, not a
-          // bug: see appendOrphanResultRow's own comment. Retain the result
-          // text/error (not just render a placeholder) so that if "Load
-          // earlier history" later pulls in the missing tool_use, the merge
-          // step below can retroactively complete this record instead of
-          // leaving a permanently-pending orphan.
+          // No matching tool_use here (see appendOrphanResultRow). Retain
+          // the result text/error, not just a placeholder, so a later
+          // "Load earlier history" merge can retroactively complete this
+          // record instead of leaving a permanently-pending orphan.
           const parent = getOrOpenGroup(container).inner;
           const orphanRow = appendOrphanResultRow(container, block, parent);
           recordOrphanResult(container, block.tool_use_id, { resultText, isError, resultAtMs, rowEl: orphanRow });
@@ -645,14 +552,10 @@ function openGroup(container, firedAtMs = null) {
   if (autoCollapsePreviousGroup) {
     const existing = groupsByContainer.get(container) || [];
     const previous = existing[existing.length - 1];
-    // dataset.keepOpen (set/cleared by turn-chart.js's selectIndex/clearHighlights)
-    // means a chart-bar click just expanded this specific group to show the
-    // caller something - if it's also still the most recent group, a new
-    // tool call landing a beat later used to auto-fold it right back out
-    // from under the click (and, mid-race, could leave positionHighlights
-    // measuring a just-collapsed zero-height node - "the highlight didn't
-    // show"). Skip the auto-fold while the flag is set; it resumes the moment the
-    // selection moves elsewhere.
+    // dataset.keepOpen means a chart-bar click just expanded this group to
+    // show the caller something - skip the auto-fold while it's set, or a
+    // tool call landing a beat later would yank the group shut mid-click
+    // (and could leave positionHighlights measuring a zero-height node).
     if (previous && previous.expanded && !previous.wrap.dataset.keepOpen) setGroupExpanded(previous, false);
   }
 
@@ -666,12 +569,10 @@ function openGroup(container, firedAtMs = null) {
   const roleText = document.createElement('span');
   roleText.className = 'role-text';
   const usageMetaText = document.createElement('span');
-  // group-usage-meta (in addition to the plain .usage-meta every other row
-  // type uses) carries the margin-left: auto that pins this whole trailing
-  // cluster - cost/tokens then fired-at time, in that order - to the row's
-  // right edge as one unit; .group-time deliberately has no margin of its
-  // own so it just sits adjacent to usageMetaText instead of each fighting
-  // over the same auto-margin space.
+  // group-usage-meta carries the margin-left: auto that pins the trailing
+  // cost/tokens + fired-at cluster to the row's right edge as one unit;
+  // .group-time has no margin of its own so it just sits adjacent instead
+  // of both fighting over the same auto-margin space.
   usageMetaText.className = 'usage-meta group-usage-meta';
   const timeText = document.createElement('span');
   timeText.className = 'group-time';
@@ -682,14 +583,11 @@ function openGroup(container, firedAtMs = null) {
   container.append(wrap);
   if (wasAtBottom) container.scrollTop = container.scrollHeight;
 
-  // Sums every tool call's usage into one figure on the group's own row -
-  // visible whether the group is collapsed or expanded (unlike each tool
-  // call's own .usage-meta, which only shows once its block is expanded),
-  // so "what did this run cost" doesn't require opening anything. Deduped
-  // by object identity (countedUsageInfos), not tool count: one assistant
-  // message emitting several tool_use blocks in a row shares one usage
-  // figure (addToolCallToGroup below), and counting it once per block would
-  // inflate the sum by however many tool calls that single API call made.
+  // Sums every tool call's usage into one figure, visible collapsed or
+  // expanded, so "what did this run cost" needs no opening. Deduped by
+  // object identity (countedUsageInfos): one assistant message can emit
+  // several tool_use blocks sharing a single usage figure, and counting it
+  // per block would inflate the sum by however many calls it made.
   const group = {
     wrap, inner, roleText, usageMetaText, timeText, toolNames: [], expanded: true,
     usage: { costUsd: 0, inputTokens: 0, outputTokens: 0 },
@@ -710,12 +608,10 @@ function closeGroup(container) {
   openGroupByContainer.delete(container);
 }
 
-// Opens (or reuses) the container's current group, records the tool call
-// (and its originating message's usage, if any - see openGroup's comment)
-// in its summary, and returns the DOM node its one-line row (appendToolCallRow)
-// should render into (instead of the top-level container). firedAtMs only
-// takes effect the moment a *new* group is opened (openGroup's own default
-// param) - joining an already-open group never overwrites its start time.
+// Opens (or reuses) the container's current group and returns the DOM node
+// its row should render into instead of the top-level container. firedAtMs
+// only takes effect for a *new* group - joining an already-open one never
+// overwrites its start time.
 function addToolCallToGroup(container, name, usageInfo, firedAtMs) {
   const group = getOrOpenGroup(container, firedAtMs);
   group.toolNames.push(name);
@@ -749,15 +645,9 @@ function renderGroupSummary(group) {
   // "nothing counted yet".
   const hasUsage = group.usage.costUsd > 0 || group.usage.inputTokens > 0 || group.usage.outputTokens > 0;
   group.usageMetaText.textContent = hasUsage ? formatUsageInline(group.usage) : '';
-  // Its own span (index.html's .group-time), not appended into roleText -
-  // lets it sit dim/small/right-aligned regardless of roleText's own
-  // hover/expanded color changes, and regardless of how long the tool-name
-  // list runs. Replaces the old "click to expand"/"click to collapse" hint
-  // text (the row's still just as clickable, it just no longer says so) -
-  // when the group started is more useful at a glance than a reminder of an
-  // interaction most users find on their own. Always shown, expanded or
-  // not, unlike the old hint's collapsed-only dedup logic - there's nothing
-  // to dedup, every group has its own distinct start time.
+  // Its own span, not appended into roleText - sits dim/small/right-aligned
+  // regardless of roleText's own hover/expanded state or how long the
+  // tool-name list runs. Always shown, expanded or not.
   group.timeText.textContent = group.firedAtMs != null ? formatClock(group.firedAtMs) : '';
 }
 
@@ -768,20 +658,11 @@ function setGroupExpanded(group, expanded) {
   renderGroupSummary(group);
 }
 
-// Plain string -> textContent, same as before. { lines } (diff output from
-// formatToolInput) -> one colored div per line, reusing the diff-view.js
-// classes (diff-add/diff-del/diff-hunk/diff-meta/diff-ctx) so an expanded
-// Edit/MultiEdit reads like the terminal's own diff instead of raw JSON.
-// `hint`, when given, renders as a trailing .expand-hint span in the same flex row
-// as the content (index.html's `.body.with-hint`) - unused today (nothing
-// still renders a collapsed-with-hint block; the click-to-collapse
-// interaction that used this is gone), kept because renderBody is exported
-// and reused as a generic content renderer (detail-pane.js's Payload/Result
-// tabs) where a future caller passing a hint should still work correctly.
-// Above this many changed/context rows, a diff payload renders collapsed
-// behind a "show full diff" toggle instead of dumping the whole thing inline -
-// a single large rewrite (or a MultiEdit touching many spots) otherwise pushes
-// the rest of the transcript off screen every time its row is expanded.
+// { lines } (diff output) -> one colored div per line, reusing
+// diff-view.js's classes. `hint` is unused today but kept since renderBody
+// is also reused as a generic content renderer elsewhere. Above this many
+// changed rows a diff renders collapsed behind a toggle instead of pushing
+// the rest of the transcript off screen.
 const DIFF_COLLAPSE_THRESHOLD = 40;
 
 export function renderBody(body, content, hint = null, markdown = false) {
@@ -797,12 +678,9 @@ export function renderBody(body, content, hint = null, markdown = false) {
     renderCodeBlock(body, content.header, content.code, content.lang);
     return;
   }
-  // Markdown path - assistant reply text (renderAssistant) and delegated
-  // /ask replies (renderUser). Ignores `hint`: nothing calls this with both
-  // today (see renderBody's own module comment on `hint` being otherwise
-  // unreachable), and mixing the two would need the markdown fragment
-  // squeezed into .body-content's flex row instead of owning the whole body
-  // element.
+  // Markdown path ignores `hint` - nothing calls this with both today, and
+  // mixing the two would need the markdown fragment squeezed into
+  // .body-content's flex row instead of owning the whole body element.
   if (markdown && typeof content === 'string') {
     body.className = 'body markdown-body';
     body.textContent = '';
@@ -825,19 +703,10 @@ export function renderBody(body, content, hint = null, markdown = false) {
   body.textContent = content ?? '';
 }
 
-// Diff lines from diffLines/formatToolInput -> one row per line. Rows with a
-// `lineNo` (actual diff content) get a gutter + marker + text layout so CSS
-// can tint the whole row (terminal-`/diff`-style block highlight instead of
-// just colored glyphs); rows without one (file path header, `@@ edit N @@`,
-// the "Added X, removed Y" summary) render as plain full-width divs like
-// before. Past DIFF_COLLAPSE_THRESHOLD content rows, the diff itself renders
-// behind a click-to-expand toggle so a large rewrite doesn't dominate the pane.
-// `lang`, when Prism has a grammar loaded for it (public/vendor/prism/), gets
-// each row's text syntax-highlighted independently - old_string/new_string
-// are already fragments, not whole files, so tokenizing line-by-line (rather
-// than the fragment as a whole) can occasionally mis-highlight right at a
-// construct that spans the fragment's edge (e.g. a block comment); accepted
-// tradeoff, same one line-based diff highlighters generally make.
+// Rows with a `lineNo` get a gutter + marker + text layout so CSS can tint
+// the row; rows without one (header, `@@ edit N @@`, summary) render as
+// plain divs. `lang` highlights each row independently, which can
+// occasionally mis-highlight at a fragment's edge - an accepted tradeoff.
 function renderDiffLines(body, lines, lang) {
   const diffLineCount = lines.filter((l) => l.lineNo != null).length;
   if (diffLineCount <= DIFF_COLLAPSE_THRESHOLD) {
@@ -918,14 +787,10 @@ function renderCodeBlock(body, header, code, lang) {
   body.append(pre);
 }
 
-// `parent` is the DOM node the block is actually inserted into - defaults
-// to `container`, but a grouped tool call/result passes a group's inner
-// node instead. `container` always stays the scroll-position/registry
-// reference regardless of where the block physically lands, since `parent`
-// is always a descendant of it.
-//
-// joinStreamText lives in src/stream-join.js (served as /stream-join.js) -
-// Grok token join, also used by grok-messages.js.
+// `parent` is the DOM node the block is inserted into - defaults to
+// `container`, but a grouped tool call/result passes a group's inner node
+// instead. `container` always stays the scroll-position/registry reference
+// regardless of where the block physically lands.
 
 // If the last block in `container` is already the same kind of streamed
 // assistant/thinking card, append `text` onto it and return true. Used

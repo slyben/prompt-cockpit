@@ -1,12 +1,7 @@
-// Settings modal's git-commit-guard / delegation-handshake / permission-
-// rules sections. Same "poll-on-open, no pushed events" shape as mcp-panel.js
-// /plugin-panel.js (git-guard and permission rules are project-scoped
-// settings.local.json values another tab/session for this cwd may have
-// changed since this modal was last open; handshake trust is this tab's own
-// session token, re-checked fresh for the same reason). Unlike those two
-// panels this doesn't use list-panel.js - git-guard/handshake are single
-// controls, not lists, and permission-rules' list is simple enough not to
-// need the shared loading/error skeleton.
+// Poll-on-open, no pushed events: git-guard/permission-rules are project-
+// scoped settings.local.json values another tab/session may have changed
+// since this modal was last open, and handshake trust is this tab's own
+// session token, so both need a fresh check each time the modal opens.
 export function initSessionControlsPanel({
   gitGuardModeEl,
   gitGuardErrorEl,

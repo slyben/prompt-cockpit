@@ -1,32 +1,15 @@
 // Project-scoped "no Co-Authored-By trailers" guard - reads/writes the
-// `gitCommitGuard` key in a project's `.claude/settings.local.json`
-// (settings-file.js), same storage boundary as plugin-settings.js/
-// session-defaults.js: this follows the *project* around, not the browser,
-// and only takes effect for a session started/resumed after the change
-// (session.js reads it once at query() build time, same convention
-// plugin-settings.js's own comment documents for enabledPlugins).
-//
-// Enforcement itself lives in session.js as a PreToolUse hook, not in
-// canUseTool - canUseTool is skipped entirely by the SDK in
-// acceptEdits/bypassPermissions/dontAsk/auto modes (see permissions.js's
-// AUTO_ALLOW_MODES comment), so a check living there would silently stop
-// applying the moment someone cycles modes. Hooks run on every tool call
-// regardless of permission mode, which is the whole point of using one
-// here.
+// `gitCommitGuard` key in `.claude/settings.local.json`, taking effect
+// only for a session started after the change. Enforcement is a
+// PreToolUse hook, not canUseTool, since canUseTool is skipped in some
+// permission modes and would silently stop applying there.
 import { readSettingsFile, updateSettingsFile } from './settings-file.js';
 
-// 'commit': only deny when the command is a `git commit` invocation (or a
-//   `gh pr create`/`gh pr edit` invocation, since PR bodies get the same
-//   attribution trailer/line) whose text also contains one of the guarded
-//   phrases (the common case: don't block unrelated commands that merely
-//   mention the phrase, e.g. grepping for it or editing a CLAUDE.md that
-//   documents the convention).
-// 'all': deny any Bash command containing a guarded phrase at all,
-//   regardless of context - broader, catches variants 'commit' can't (e.g.
-//   `git commit -F file` where the phrase isn't in the command, is still
-//   invisible to us either way - this option is about being blunt on the
-//   command text itself, not about parsing intent).
-// 'off': no check.
+// 'commit': only deny a `git commit`/`gh pr create`/`gh pr edit` invocation
+//   whose text also contains a guarded phrase - avoids blocking unrelated
+//   commands that merely mention the phrase (grepping, editing a doc).
+// 'all': deny any Bash command containing a guarded phrase (catches
+//   variants 'commit' can't, e.g. `-F file` forms). 'off': no check.
 export const GIT_GUARD_MODES = ['commit', 'all', 'off'];
 const DEFAULT_MODE = 'all';
 

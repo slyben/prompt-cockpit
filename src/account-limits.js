@@ -1,37 +1,19 @@
 // Runs `claude -p "/usage" --output-format json` as a one-off headless
-// query and returns its plain-text result - the same table the CLI's own
-// interactive /usage command shows. Confirmed by hand: num_turns:0,
-// total_cost_usd:0 - the harness answers /usage from the account's own
-// subscription backend, not a billed model turn - and it returns in a few
-// seconds. Still a real subprocess spawn though, so this stays on-demand
-// (dashboard's own "Refresh limits" button), never polled.
-//
-// Deliberately shells out rather than reading local transcripts (unlike
-// global-stats.js, in the same directory): the two top lines ("Current
-// session"/"Current week ... used") reflect the account's actual plan
-// quota, tracked server-side by Anthropic across every device signed into
-// this account - exactly what local transcript-scanning can never see (see
-// global-stats.js's own module comment on that boundary). The rest of the
-// CLI's own output (top skills/subagents/MCP servers) is explicitly
-// local-machine-only per its own disclaimer text in the result, kept as-is
-// rather than re-derived here.
+// query for the CLI's own /usage table. Not a billed model turn but a
+// real subprocess spawn, so this stays on-demand (dashboard's "Refresh
+// limits" button) rather than polled. Shells out instead of reading
+// local transcripts: quota is tracked server-side across every device.
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { tmpdir } from 'node:os';
 
 const execFileAsync = promisify(execFile);
 const TIMEOUT_MS = 20_000;
-// /api/account-limits (server.js) has no session token to gate it - like
-// /api/browse/etc it relies on Origin/Host allowlisting only (an
-// operator-level token to close that gap is still an open idea). Unlike
-// those read-only routes, this one spawns a real subprocess on every GET
-// with no rate limit of its own - the worst route in the app to leave open
-// in that sense (2026-08-24 review). A short single-flight+TTL cache here
-// means N rapid/concurrent
-// requests (a buggy client retry loop, or literally anyone else on
-// 127.0.0.1) collapse into at most one `claude -p` spawn per window,
-// without changing the on-demand "own button, not polled" contract the
-// module comment above already describes.
+// /api/account-limits has no session token, only Origin/Host allowlisting -
+// and unlike other token-free routes it spawns a real subprocess per GET.
+// This single-flight+TTL cache collapses rapid/concurrent requests (a buggy
+// client retry, or any other caller on 127.0.0.1) into at most one
+// `claude -p` spawn per window.
 const CACHE_TTL_MS = 30_000;
 let cached = null; // { result, atMs }
 let inFlight = null; // Promise, shared by concurrent callers while one spawn is running
@@ -46,15 +28,10 @@ export function _resetCacheForTests() {
   inFlight = null;
 }
 
-// execFileImpl is injectable (same pattern as session.js's queryImpl/
-// session-registry.js's startSessionImpl) - tests stub it instead of
-// spawning a real subprocess, which sidesteps a real cross-platform mess:
-// a fake `claude` binary written as a chmod +x shell script works fine on
-// posix but can't be spawned by execFile without `shell: true` on Windows
-// (Node refuses bare .bat/.cmd files post-CVE-2024-27980, and a plain-text
-// file has no PE header to run directly either) - a fidelity gap not worth
-// chasing when the real thing being tested is the single-flight/TTL cache
-// logic above, not child_process's own OS-level spawn behavior.
+// execFileImpl is injectable so tests stub it instead of spawning a real
+// subprocess - a fake `claude` shell script can't be exec'd cross-platform
+// without `shell: true` (Windows blocks bare .bat/.cmd post-CVE-2024-27980),
+// and the thing under test is the cache logic above, not the OS spawn.
 export async function fetchAccountLimits(claudeBin = 'claude', execFileImpl = execFileAsync) {
   if (cached && Date.now() - cached.atMs < CACHE_TTL_MS) return cached.result;
   if (inFlight) return inFlight;

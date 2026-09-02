@@ -7,21 +7,10 @@ import { forkSession, getSessionMessages } from '@anthropic-ai/claude-agent-sdk'
 import { isRealUserTurn } from './session-history.js';
 
 /**
- * Resolve a client-visible `turnIndex` (1-based - see session.js's
- * `turnCounter`, seeded with `turnIndexOffset` on resume so it stays
- * aligned with this function's indexing into the *whole* persisted
- * transcript, not just this process's turns) to the uuid the CLI actually
- * assigned that user message. Neither the wire message nor its `result`
- * carries a usable uuid (see the comment in session.js's pushInput), so
- * this reads it back from `getSessionMessages` instead - lazily, only when
- * a rewind is actually requested, not spent on every turn.
- *
- * `isRealUserTurn` (session-history.js) is shared with turnCounter's
- * seeding on purpose - two different definitions of "what counts as a
- * turn" is exactly how this drifted off by one before (the priming
- * sentinel persists as a non-empty wrapper string, not truly empty, so a
- * naive length check let it through as turn #1).
- */
+ * Resolve a client-visible 1-based `turnIndex` to the uuid the CLI
+ * assigned (lazy `getSessionMessages` read, only when rewind is
+ * requested). Must match session.js's turnCounter seeding, or the
+ * count drifts off by one. */
 export async function resolveTurnUuid(claudeSessionId, cwd, turnIndex) {
   const messages = await getSessionMessages(claudeSessionId, { dir: cwd, limit: 5000 });
   const realUserTurns = messages.filter(isRealUserTurn);
@@ -40,12 +29,9 @@ export async function forkConversation(claudeSessionId, userMessageId) {
 }
 
 /**
- * Revert tracked files to their state at `userMessageId`. Requires the
- * session to have been started with `enableFileCheckpointing: true` -
- * callers must check `hasFileCheckpointing` on the row first and skip this
- * rather than let it fail (plan: "disable the file half for sessions
- * without checkpointing rather than letting it fail").
- */
+ * Revert tracked files to their state at `userMessageId`. Requires
+ * `enableFileCheckpointing: true` at session start - callers must
+ * check `hasFileCheckpointing` first and skip this rather than fail. */
 export async function rewindFiles(query, userMessageId, options) {
   return query.rewindFiles(userMessageId, options);
 }

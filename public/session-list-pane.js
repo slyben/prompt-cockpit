@@ -1,31 +1,8 @@
-// Server-wide session list: the header's sessionCountBtn shows how many
-// cockpit sessions are live across the whole process (every cwd, every
-// provider - GET /api/sessions is intentionally not scoped to this tab's own
-// session, see session-registry.js's toSummary), and clicking it drops
-// #sessionListPane in as a fixed right-docked overlay to show name/model/
-// effort per row - works the same on the pre-session launcher screen as
-// mid-session (see its markup comment in index.html for why it isn't a
-// normal in-flow sibling of #detailPane). The badge itself is kept fresh by
-// a 10s poll (below) so it reflects sessions opened/closed in *other* tabs
-// too, not just this one's own lifecycle events; the expanded list body is
-// still a read-only, one-time snapshot fetched only when the panel opens -
-// not worth a websocket fan-in just to keep an open list live too.
-// Cross-tab "switch to this session" - BroadcastChannel is same-origin-only
-// and every tab (launcher or live session) has this pane wired up, so it
-// doubles as both the sender (row click, any tab) and receiver (the one tab
-// whose own sessionId matches). No server round-trip needed: this never
-// leaves the browser.
-//
-// Confirmed live: calling window.focus() here does nothing - Chrome and
-// Firefox both gate a background tab actually coming to the front on that
-// tab having its own recent user activation, which a BroadcastChannel
-// message never carries (the activation belongs to whichever tab the click
-// happened in). Tried it, watched it silently no-op, removed it rather than
-// leave dead "best-effort" code sitting here implying it sometimes works.
-// The only honest signal available is onFocusRequested, which app.js wires
-// to tab-chrome.js's existing needs-attention treatment (❗ title prefix +
-// red favicon dot, already used for "a turn finished while unfocused") so
-// the right tab is at least visibly flagged for the human to click.
+// GET /api/sessions is server-wide, not scoped to this tab. The count badge
+// polls every 10s to reflect other tabs' opens/closes; the expanded list is
+// a one-time snapshot fetched on open. Cross-tab "switch to this session"
+// uses BroadcastChannel, since window.focus() can't bring a background tab
+// forward without its own user activation - onFocusRequested just flags it.
 import { initResizablePanel } from '/resizable-panel.js';
 
 const FOCUS_CHANNEL_NAME = 'cockpit:session-focus';
@@ -51,13 +28,9 @@ export function initSessionListPane({ panel, body, closeBtn, countBtn, headerEl,
     return `${count} session${count === 1 ? '' : 's'}`;
   }
 
-  // Drag-to-resize (resizable-panel.js, shared with detail-pane.js - same
-  // .detail-pane-resize-handle CSS). This panel is a `position: fixed`
-  // overlay, not an in-flow flex sibling, so unlike detail-pane.js there's no
-  // --detail-pane-offset var to keep in sync, just the inline width itself.
-  // Bug report this exists for: model/effort/handshake text was getting
-  // ellipsis-truncated at the fixed 380px .detail-pane default with no way
-  // to see the full row before picking a session to switch to.
+  // This panel is a `position: fixed` overlay, not an in-flow flex sibling
+  // like detail-pane.js, so there's no --detail-pane-offset var to sync -
+  // just the inline width itself.
   initResizablePanel({
     panel,
     handle: resizeHandle,
@@ -67,12 +40,9 @@ export function initSessionListPane({ panel, body, closeBtn, countBtn, headerEl,
     isNarrowLayout: () => window.matchMedia('(max-width: 900px)').matches,
   });
 
-  // The per-process delegation handshake secret -
-  // shown copyable here so a human can paste it into a sibling session's
-  // own row (per-row "fix" button below) to mark that session trusted for
-  // delegation, or eventually into a remote/SSH'd cockpit once that exists.
-  // Fetched fresh every time the pane opens, same one-time-snapshot
-  // reasoning as the session list itself (see module comment above).
+  // Per-process delegation secret, shown copyable so it can be pasted into
+  // a sibling session to mark it trusted for delegation. Fetched fresh each
+  // time the pane opens, same one-time-snapshot reasoning as the list.
   async function refreshHandshake() {
     if (!handshakeRow) return;
     try {
@@ -208,13 +178,9 @@ export function initSessionListPane({ panel, body, closeBtn, countBtn, headerEl,
 
   refreshCount();
 
-  // Poll instead of a live push channel - other tabs' session opens/closes
-  // don't reach this tab any other way (its own lifecycle events call
-  // refreshCount() directly elsewhere in app.js, but that only covers this
-  // tab's own session). 10s keeps the badge close enough to live without
-  // adding a connection-less websocket channel just for a number that's
-  // rarely stared at - see the module comment for the one-time-snapshot
-  // reasoning this is layered on top of.
+  // Poll instead of a push channel - other tabs' session opens/closes don't
+  // reach this tab any other way (app.js's own lifecycle events only cover
+  // this tab's session).
   setInterval(refreshCount, 10_000);
 
   return { refreshCount, closePane, isOpen: () => open };

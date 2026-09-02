@@ -1,10 +1,8 @@
 // Shared load/render/error skeleton for a settings-modal panel that lists
-// items fetched from the server (MCP servers, plugins) - mcp-panel.js and
-// plugin-panel.js used to hand-roll this exact dance separately (loading
-// placeholder -> fetch -> render rows, or replace the list with one error
-// row on failure). Each caller still owns its own per-item rendering and any
-// row-level actions (toggle, reconnect, ...) - this only factors out the
-// list-level plumbing around them.
+// items fetched from the server (MCP servers, plugins): loading
+// placeholder -> fetch -> render rows, or one error row on failure.
+// Callers still own per-item rendering and any row-level actions
+// (toggle, reconnect, ...); this only factors out list-level plumbing.
 export function initListPanel({ listEl, fetchItems, renderItem, emptyMessage, loadingMessage, errorPrefix }) {
   async function refresh() {
     listEl.innerHTML = '';

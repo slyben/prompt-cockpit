@@ -1,12 +1,8 @@
-// HTTP + ws, bound to 127.0.0.1. Origin validation and a per-session token
-// are both required from the first commit (see plan Decisions: a websocket
-// does not enforce same-origin, so 127.0.0.1 binding alone is not auth).
-//
-// Route handlers live in src/routes/* (registered on the router below);
-// this file keeps only what genuinely has to sit at the top level: the raw
-// http server, the Origin/Host spoof check every request goes through
-// first, static file fallback, and the websocket upgrade/message wiring
-// (tightly coupled to the http server itself, not worth its own module).
+// HTTP + ws, bound to 127.0.0.1. Origin validation and a per-session
+// token are both required - a websocket doesn't enforce same-origin, so
+// 127.0.0.1 binding alone isn't auth. Route handlers live in
+// src/routes/*; this file keeps only the raw http server, the spoof
+// check every request goes through first, static fallback, and ws wiring.
 import { createServer } from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -47,17 +43,11 @@ const server = createServer((req, res) => {
   });
 });
 
-// Only the websocket upgrade checked Origin before this - every plain HTTP
-// /api/* route was reachable by any page's cross-origin fetch (a browser
-// does not block the request server-side; that's this server's job) with
-// nothing but the target session's UUID to guess. Host is checked too and
-// required (every HTTP request carries one): Origin alone doesn't survive
-// DNS rebinding, where the attacker's own domain is what resolves to
-// 127.0.0.1, so the request's Origin is the *page's* origin, not ours -
-// but Host would then also read as the attacker's domain, not
-// 127.0.0.1:PORT/localhost:PORT, and that's what actually catches it.
-// Origin itself is allowed to be absent (curl, direct API use from this
-// machine); Host is not.
+// Every plain HTTP /api/* route is reachable by any page's cross-origin
+// fetch, so Host is checked alongside Origin: DNS rebinding makes the
+// attacker's domain resolve to 127.0.0.1, so Origin alone would read as
+// the page's real origin, but Host would still read as the attacker's
+// domain - which is what catches it. Origin may be absent; Host may not.
 function isSpoofedRequest(req) {
   if (!ALLOWED_HOSTS.has(req.headers.host)) return true;
   const origin = req.headers.origin;
@@ -65,12 +55,10 @@ function isSpoofedRequest(req) {
   return false;
 }
 
-// Applied to every response regardless of route/outcome. This app has no
-// inline scripts/styles and loads nothing cross-origin (index.html's own
-// comment confirms it), so the CSP can be strict rather than a placeholder.
-// None of this replaces the Origin/Host check above - a compliant browser
-// honors these; isSpoofedRequest is what stops a request from ever reaching
-// a handler in the first place.
+// This app has no inline scripts/styles and loads nothing cross-origin, so
+// the CSP can be strict. Doesn't replace the Origin/Host check above - a
+// compliant browser honors these; isSpoofedRequest is what actually stops
+// a request from reaching a handler.
 function applySecurityHeaders(res) {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'DENY');
@@ -166,14 +154,11 @@ server.on('upgrade', (req, socket, head) => {
 wss.on('connection', (ws, req, id, since) => {
   registry.attachClient(id, ws, since);
 
-  // Node's EventEmitter throws an 'error' event as an uncaught exception
-  // when nothing is listening for it - true of ws's Receiver too, which
-  // emits exactly that when a frame exceeds maxPayload (set above). Adding
-  // the cap without this listener trades a graceful close for a process-
-  // level crash on the very oversized-message case it was meant to guard
-  // against (2026-09-02 review, caught by the maxPayload regression test
-  // itself). The socket is already gone by the time this fires - nothing
-  // to send a reply on - so this only needs to stop it from being fatal.
+  // ws's Receiver emits 'error' when a frame exceeds maxPayload; an
+  // EventEmitter throws an unhandled 'error' as an uncaught exception if
+  // nothing listens for it, which would crash the process on the very
+  // oversized-message case maxPayload is meant to guard against. The
+  // socket is already gone by the time this fires, so just swallow it.
   ws.on('error', (err) => {
     console.error(`ws error for ${id}:`, err.message || err);
   });
@@ -209,12 +194,9 @@ wss.on('connection', (ws, req, id, since) => {
         console.error(`sendNow failed for ${id}:`, err);
       });
     }
-    // Cross-session delegation - `/ask <Name>: <text>`
-    // parsed client-side (app.js's onSend) into this payload shape. Errors
-    // (unknown name, self-delegation, cross-cwd) are synchronous throws
-    // from delegateTask - sent straight back on THIS socket (the origin's
-    // own), not broadcast, since only the tab that typed the bad command
-    // needs to see it.
+    // Cross-session delegation (`/ask <Name>: <text>`). Errors (unknown
+    // name, self-delegation, cross-cwd) are synchronous throws from
+    // delegateTask, sent back on this socket only, not broadcast.
     if (payload.type === 'delegate' && typeof payload.targetName === 'string' && typeof payload.text === 'string' && payload.text.length > 0) {
       try {
         registry.delegateTask(id, payload.targetName, payload.text);

@@ -1,13 +1,8 @@
-// `/model` picker: the CLI intercepts this one locally instead of sending
-// it through as a normal slash command - it needs an actual picker, not a
-// message turn (Query.supportedModels() lists what's switchable,
-// Query.setModel() does the switch, both public SDK methods). Triggers on
-// its own input match rather than going through command-picker.js's list:
-// supportedCommands()'s own doc calls its contents "skills", and /model is
-// a built-in, not a skill - relying on it showing up there would mean this
-// silently never triggers if a given SDK build doesn't list it. Reuses
-// #commandSuggestions' CSS (.cmd-name/.cmd-desc) under its own
-// #modelSuggestions id rather than duplicating it - see index.html.
+// `/model` picker: intercepted locally (Query.supportedModels()/
+// setModel() are public SDK methods) rather than sent as a slash command,
+// since it needs an actual picker, not a message turn. Matches its own
+// input pattern rather than going through command-picker.js's list,
+// since /model is a built-in that may not show up in supportedCommands().
 export function initModelPicker({ textarea, dropdown, fetchModels, getCurrentModel, onSelect }) {
   let activeIndex = -1;
   let items = [];

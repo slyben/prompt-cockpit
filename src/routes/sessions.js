@@ -9,22 +9,11 @@ import { readSessionDefaults } from '../session-defaults.js';
 import { respondJson, readJsonBody, extractToken } from '../http-utils.js';
 import { parseProvider } from '../provider-registry.js';
 
-// Applies this cwd's persisted thinking-budget/auto-continue defaults
-// (session-defaults.js) to a freshly created row - both the plain "new
-// session" path below and the fork path in session-actions.js's rewind
-// route go through this, so a forked session inherits the same defaults a
-// brand-new session in the same cwd would, instead of the fork route
-// hand-carrying the origin session's live values (the B6 workaround this
-// replaces). Routes through the same registry setters a user's own toggle
-// would, so it broadcasts and re-persists identically - redundant but
-// harmless when the value being applied is already what's on disk.
-// `defaults`, when passed, overrides the cwd-level persisted lookup - the
-// rewind/fork route passes the origin row's own live values here instead,
-// since two sessions sharing a cwd means the persisted session-defaults.js
-// store reflects whichever of them wrote most recently, not necessarily the
-// one actually being forked. Reading that shared store for a fork used to
-// silently apply session B's thinking budget/auto-continue to a fork of
-// session A whenever B was the last writer for their shared cwd.
+// Applies this cwd's persisted thinking-budget/auto-continue defaults to
+// a freshly created row - both the "new session" and fork paths go
+// through this. `defaults`, when passed, overrides the cwd lookup - the
+// fork route passes the origin row's own live values, since the
+// persisted store reflects whichever same-cwd session wrote last.
 export async function seedSessionDefaults(row, defaults) {
   const d = defaults || (await readSessionDefaults(row.cwd).catch(() => null));
   if (!d) return;
@@ -50,12 +39,10 @@ export function registerSessionRoutes(router) {
     } catch (err) {
       return respondJson(res, 500, { error: String(err.message || err) });
     }
-    // Joins in any durable title (session-titles.js) a past session was
-    // given from the resume list or a prior tab - one settings.local.json
-    // read per distinct cwd (capped at listResumableSessions' own 30-session
-    // limit, so at most a handful), not one per session. Best-effort: a
-    // failed read for one cwd just leaves that cwd's sessions untitled
-    // rather than 500ing the whole list.
+    // Joins in any durable title a past session was given, one settings
+    // read per distinct cwd rather than per session. Best-effort: a failed
+    // read for one cwd just leaves that cwd's sessions untitled instead of
+    // 500ing the whole list.
     const distinctCwds = [...new Set(sessions.map((s) => s.cwd).filter(Boolean))];
     const titlesByCwd = new Map();
     await Promise.all(distinctCwds.map(async (cwd) => {
@@ -97,16 +84,11 @@ export function registerSessionRoutes(router) {
     // when given (currently no client path sends it, but the field exists
     // on createSession - see session-registry.js).
     const name = body.name || (body.resume ? await getSessionTitle(cwd, body.resume).catch(() => null) : null);
-    // Cross-session delegation addresses sessions by name
-    // within a cwd, so names must be unique there. This is a fast-fail only
-    // - it avoids wasting the effort validation/history fetch on a request
-    // that's doomed anyway - NOT the authoritative check: two concurrent
-    // requests for the same name could both pass this one (it runs before
-    // createSession, with nothing stopping a second request's own check
-    // from also running before either has created a row). createSession
-    // itself is what actually prevents the collision (session-registry.js -
-    // no `await` between its own check and the row being added), caught
-    // below via err.code.
+    // Cross-session delegation addresses sessions by name within a cwd, so
+    // names must be unique there. This is a fast-fail only - two
+    // concurrent requests could both pass it before either creates a row.
+    // createSession itself prevents the collision (no await between its
+    // own check and the row being added), caught below via err.code.
     if (name && registry.findByName(cwd, name)) {
       return respondJson(res, 409, { error: `a session named "${name}" already exists in this project` });
     }
@@ -118,15 +100,11 @@ export function registerSessionRoutes(router) {
       }
       effort = body.effort;
     } else {
-      // 2026-08-24 review fix: effort must be a createSession param (unlike
-      // thinking/auto-continue, there's no post-creation setter for a
-      // brand-new session to seed from below) - so unlike those, it has to
-      // be resolved from the persisted default HERE, before createSession,
-      // not via seedSessionDefaults() after. Applied the same regardless of
-      // resume, matching seedSessionDefaults' own unconditional behavior
-      // below - a genuine fork instead carries row.effort forward directly
-      // (session-actions.js's rewind route), bypassing this branch entirely
-      // since it never goes through this create-a-new-row route at all.
+      // Unlike thinking/auto-continue, effort has no post-creation setter,
+      // so it must be resolved from the persisted default here, before
+      // createSession, rather than via seedSessionDefaults() after. A
+      // genuine fork instead carries row.effort forward directly
+      // (session-actions.js's rewind route), bypassing this branch.
       const persisted = await readSessionDefaults(cwd).catch(() => null);
       // `provider` is the resolved provider object here (parseProvider's
       // return, see the branch above), not a string - matches line 115's

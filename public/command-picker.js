@@ -1,12 +1,8 @@
 // `/` slash-command autocomplete in the compose box, backed by the SDK's
-// own supportedCommands() (plan Spike C: public Query method, no
-// adapter/fallback needed like file_suggestions/get_workspace_diff - and
-// "the command is resolved before the model turn, the cockpit just sends
-// the text", so selecting one just inserts plain text, nothing special).
-// Unlike file-picker.js this filters a client-cached list (app.js fetches
-// once on connect and refreshes it on a commands_changed push) rather than
-// hitting the server per keystroke - the full list is small and static
-// almost all the time.
+// supportedCommands(). Commands resolve before the model turn - the
+// cockpit just sends plain text. Filters a client-cached list (app.js
+// fetches once on connect, refreshes on commands_changed) rather than
+// hitting the server per keystroke, since the list is small and static.
 
 // Pure filter+sort, split out so it's unit-testable without a DOM (see
 // tests/command-picker.test.mjs) - matches anywhere in the name/alias, not

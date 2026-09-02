@@ -1,24 +1,8 @@
-// Ambient "is at least one subagent still actually working" tracker.
-//
-// Why this exists: an Agent (Task) tool call's own tool_use/tool_result
-// lifecycle in the parent transcript is *not* a reliable "the subagent is
-// done" signal - the parent gets its result back once the subagent is
-// launched, well before the subagent's real work finishes (a T021-style
-// implementation task can run for minutes after the parent's Agent row
-// already shows a ✓ and a sub-second duration). detail-pane.js's Agent tab
-// works around this by polling the subagent's own transcript file
-// (src/agent-transcript.js) and inferring liveness from whether it's still
-// growing - but that poll only starts once a user clicks into the tab.
-//
-// This is the same poll-and-infer-from-mtimeMs approach, running
-// unconditionally for every Agent tool call the moment it starts (app.js's
-// onToolCallStarted), so the top-bar state icon can show "idle, but a
-// subagent is still cooking" even if nobody ever opens the Agent tab.
-// Deliberately a second, independent poller rather than a shared one with
-// detail-pane.js: this one only cares about a yes/no liveness signal (no
-// rendering, no message content kept around), and needs to track possibly
-// several concurrent subagents at once, which the tab-scoped poller isn't
-// built for.
+// Ambient "is at least one subagent still working" tracker. An Agent
+// tool call's tool_use/tool_result lifecycle isn't a reliable "done"
+// signal - the parent gets its result back well before the subagent's
+// real work finishes. Polls the transcript's mtime from tool-call start,
+// tracking several concurrent subagents with no rendering.
 const POLL_MS = 2000;
 const STALL_POLLS_BEFORE_DONE = 4; // matches detail-pane.js's AGENT_STALL_POLLS_BEFORE_STOP - same "no growth in ~8s" heuristic, so the two views can't disagree about the same subagent
 

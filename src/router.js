@@ -1,9 +1,6 @@
-// Minimal path router for server.js - replaces the hand-rolled sequence of
-// `if (url.pathname.match(...) && req.method === ...)` checks that used to
-// live directly in handleRequest. Routes are tried in registration order,
-// same as those `if` checks were: the first matching {method, pattern} wins.
-// No wildcards, no regex patterns in route strings - just literal segments
-// and ':name' params, which is all this app's routes ever needed.
+// Minimal path router: routes are tried in registration order, first match
+// wins. No wildcards or regex in route strings - just literal segments and
+// ':name' params.
 export function createRouter() {
   const routes = [];
 

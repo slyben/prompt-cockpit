@@ -1,11 +1,8 @@
-// Settings modal's MCP servers section. Poll-on-open only (fetchStatus is
-// called from refresh(), which the settings modal calls when it opens and
-// the panel's own refresh button calls too) - mcpServerStatus() is pull-only,
-// there's no server-pushed event for a dropped connection or a needs-auth
-// server finishing auth externally, so a timer would just be busywork
-// between opens. List load/render/error skeleton lives in list-panel.js
-// (shared with plugin-panel.js); this module only owns per-server rendering
-// and the toggle/reconnect actions.
+// Settings modal's MCP servers section. Poll-on-open only: fetchStatus
+// runs when the modal opens or refresh is clicked, since mcpServerStatus()
+// is pull-only - no push exists for a dropped connection or auth
+// finishing externally, so a timer would just be busywork. Shared list
+// skeleton lives in list-panel.js; this module owns per-server rendering.
 import { initListPanel } from '/list-panel.js';
 import { isSafeHref } from '/markdown.js';
 
@@ -75,17 +72,11 @@ export function initMcpPanel({ listEl, refreshButton, fetchStatus, toggleServer,
       ? isSafeHref(server.authUrl)
       : null;
     if (safeAuthUrl) {
-      // Only appears once session.js's onElicitation has actually caught a
-      // URL-mode auth request for this server (see session-registry.js's
-      // getMcpServerStatus) - a plain 'needs-auth' status with no link yet
-      // means the server hasn't asked, typically because nothing has tried
-      // to use it this session. Opens in a new tab since the flow finishes
-      // in the browser, not the cockpit - reconnect/refresh afterward (or
-      // just wait for the push in the module comment above) to see the
-      // badge clear once the SDK reports the server connected.
-      // authUrl comes from the MCP server (via SDK elicitation), not this
-      // app, so it gets the same javascript:/data: scheme check as reply
-      // links before ever becoming a real href.
+      // Only appears once onElicitation has caught a URL-mode auth request -
+      // a plain 'needs-auth' with no link means nothing has tried it yet.
+      // Opens in a new tab since the flow finishes there; reconnect/refresh
+      // afterward to see the badge clear. authUrl is server-supplied, so it
+      // gets the same javascript:/data: scheme check as reply links.
       const authLink = document.createElement('a');
       authLink.className = 'mcp-auth-link';
       authLink.href = safeAuthUrl;

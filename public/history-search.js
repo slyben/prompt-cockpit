@@ -1,9 +1,8 @@
-// Ctrl+R fuzzy search over prompt-history.js's persisted list -
-// shell reverse-search convention. Same dropdown shape as model-picker.js
-// (capture-phase keydown so it runs before compose.js's own Enter handler,
-// mousedown+preventDefault on each row so a click doesn't blur the textarea
-// first), reusing #commandSuggestions/#modelSuggestions' CSS under its own
-// #historySuggestions id.
+// Ctrl+R fuzzy search over prompt-history.js's persisted list - shell
+// reverse-search convention. Same dropdown shape as model-picker.js
+// (capture-phase keydown, mousedown+preventDefault per row so a click
+// doesn't blur first), reusing #commandSuggestions/#modelSuggestions'
+// CSS under its own #historySuggestions id.
 const MAX_RESULTS = 20;
 
 export function initHistorySearch({ textarea, dropdown, getEntries, fuzzyScore, isPickerOpen }) {

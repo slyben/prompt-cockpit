@@ -1,19 +1,14 @@
-// Docked detail pane for the Trajectory-style tool-call rows (stream-view.js).
-// Shows Summary/Payload/Result/Timing for whichever tool call is selected -
-// defaults to "follow the most recent tool call live", switches to a pinned
-// historical row on click. Also hosts two independent tabs that have nothing
-// to do with tool-call selection: Tasks (the live TaskCreate/TaskUpdate list)
-// and Agent (a subagent's own transcript, tailed live) - both used to be a
-// separate docked panel / window.open'd page respectively, folded in here so
-// there's one right-hand pane instead of three competing UI surfaces. Mirrors
-// turn-chart.js's shape: init*(...) closing over its DOM refs and returning a
-// small method bag, no global event bus.
+// Docked detail pane for the Trajectory-style tool-call rows. Shows
+// Summary/Payload/Result/Timing for the selected tool call, defaulting to
+// "follow the most recent call live" until a historical row is pinned.
+// Also hosts two independent tabs unrelated to tool-call selection (Tasks,
+// Agent), folded in here so there's one right-hand pane, not three.
 import { renderBody, formatUsageInline, renderMessage, resetStreamView, langFromPath } from '/stream-view.js';
 import { getToolCallRecord, getMostRecentToolCallRecord } from '/tool-call-store.js';
 import { initResizablePanel } from '/resizable-panel.js';
 
-// v1 has no Schema tab (Decision 4) - no client-side tool schema registry
-// exists to source it from. Nothing to render, nothing to wire.
+// No Schema tab: there's no client-side tool schema registry to source
+// it from, so there's nothing to render or wire.
 
 // Matches index.html's .detail-pane min-width - kept as one number here
 // rather than read back from computed style, same reasoning as compose.js's
@@ -59,8 +54,7 @@ export function initDetailPane({ panel, headerLabel, followLiveBtn, tabButtons, 
   // completely separate file this pane just tails, see agentPoll() below).
   let agent = null; // { claudeSessionId, toolUseId, label, renderedCount, lastMtimeMs, stallCount, stopped, timer, pollId }
   let agentPollCounter = 0; // bumped on every showAgent() call so a stale in-flight fetch from a previous agent can't paint over a newer one
-  // Set by showText() (a delegated reply's "full trace" button, see
-  // stream-view.js) - a plain-text view that bypasses the tool-call tabs
+  // Set by showText() - a plain-text view that bypasses the tool-call tabs
   // entirely. Reuses `pinnedId` for the same "something specific is pinned,
   // don't auto-follow live tool calls" gating tool rows already get; cleared
   // by anything that goes back to tool-call mode (selectToolCall, followLive,
@@ -71,51 +65,37 @@ export function initDetailPane({ panel, headerLabel, followLiveBtn, tabButtons, 
     currentContainer = container;
   }
 
-  // Drag-to-resize (same pattern as compose.js's #composeResizeHandle,
-  // mirrored horizontally: the pane is right-docked, so dragging the handle
-  // left grows it - inverted delta from a normal left-edge resize). Below
-  // the app's one responsive breakpoint (index.html's @media max-width:900px,
-  // which stacks the pane full-width below #stream instead of docking it
-  // beside it) this is a no-op: setting an inline width there would win over
-  // that breakpoint's `width: 100%` rule (inline style beats any class/id
-  // selector), silently breaking the narrow-viewport layout for a pane
-  // that's still holding a wide desktop width from before the window shrank.
+  // Drag-to-resize, mirrored horizontally from compose.js's handle: the pane
+  // is right-docked, so dragging left grows it (inverted delta). Below the
+  // app's 900px responsive breakpoint (which stacks the pane full-width
+  // instead of docking it) this must stay a no-op - an inline width would
+  // otherwise beat that breakpoint's `width: 100%` rule and break the layout.
   const isNarrowLayout = () => window.matchMedia('(max-width: 900px)').matches;
 
   // Keeps --detail-pane-offset (style.css) equal to the pane's real
   // on-screen width so #approvalBanner/#compose stop at #stream's right
-  // edge instead of running full viewport width underneath the docked
-  // pane. 0 whenever the pane isn't actually taking up horizontal space:
-  // disabled, or the narrow-viewport breakpoint stacked it below #stream
-  // (index.html's @media max-width:900px) instead of docking it beside it.
+  // edge instead of running full width underneath the docked pane. 0
+  // whenever the pane isn't taking up horizontal space: disabled, or the
+  // narrow-viewport breakpoint stacked it below #stream instead.
   function syncOffset() {
     const offset = enabled && !isNarrowLayout() ? panel.getBoundingClientRect().width : 0;
     document.documentElement.style.setProperty('--detail-pane-offset', `${offset}px`);
   }
 
   // Sets the persisted width (if any) synchronously, before the first
-  // syncOffset() call below measures the panel - resizable-panel.js only
-  // ever touches panel.style.width itself, it doesn't know about
-  // --detail-pane-offset. During a later drag, the ResizeObserver just below
-  // catches every width change and re-syncs it - ordering only matters for
-  // this first call, which needs to see the real initial width, not the
-  // pre-resize CSS default it would otherwise briefly report.
+  // syncOffset() call measures the panel - resizable-panel.js only touches
+  // panel.style.width, not --detail-pane-offset. Later drags are caught by
+  // the ResizeObserver below; ordering only matters for this first call, so
+  // it sees the real initial width, not the pre-resize CSS default.
   initResizablePanel({ panel, handle: resizeHandle, minWidthPx: MIN_WIDTH_PX, initialWidth, onWidthChange, isNarrowLayout });
 
   syncOffset();
   window.addEventListener('resize', syncOffset);
-  // The explicit syncOffset() calls above and scattered through setEnabled()/
-  // app.js's pre-banner re-measure are each correct individually, but they
-  // only cover the timing gaps we've actually caught in the wild - a resumed
-  // session where a pending approval banner can arrive before some other
-  // width-affecting change (class toggle, style write, breakpoint switch)
-  // has been re-measured slips through all of them. A ResizeObserver on the
-  // pane itself needs no call-site to remember it: it fires on the pane's
-  // real on-screen size the instant it changes, for any reason (including a
-  // resizable-panel.js drag), so #approvalBanner's offset can never go
-  // stale. Kept alongside (not instead of) the explicit calls since those
-  // are cheap and some (the isNarrowLayout() 0-when-stacked case) encode
-  // logic a bare resize observation can't.
+  // The explicit syncOffset() calls above only cover timing gaps caught in
+  // the wild - anything slipping through them would leave the offset stale.
+  // A ResizeObserver needs no call site: it fires on any real size change.
+  // Kept alongside the explicit calls, since those also encode the
+  // isNarrowLayout() 0-when-stacked case a bare resize can't.
   if (typeof ResizeObserver !== 'undefined') {
     new ResizeObserver(syncOffset).observe(panel);
   }
@@ -274,11 +254,10 @@ export function initDetailPane({ panel, headerLabel, followLiveBtn, tabButtons, 
     }
 
     // Inline preview: only worth it when both payload and result are short
-    // enough to read at a glance without turning the Summary tab into a
-    // scroll-fest that duplicates the Payload/Result tabs. Below the
-    // threshold, show both in full (reusing renderBody for diff coloring);
-    // above it, or while the result hasn't arrived yet, say nothing here -
-    // the dedicated tabs are one click away.
+    // enough to read at a glance without duplicating the Payload/Result tabs.
+    // Below the threshold, show both in full (reusing renderBody for diff
+    // coloring); above it, or while the result hasn't arrived yet, say nothing
+    // here - the dedicated tabs are one click away.
     if (record.resultText == null) return; // pending - nothing to preview yet
     const payloadText = payloadToPlainText(record.payload);
     const resultText = record.resultText;
@@ -340,13 +319,11 @@ export function initDetailPane({ panel, headerLabel, followLiveBtn, tabButtons, 
     body.append(wrap);
   }
 
-  // Read/Edit/Write/NotebookRead results are the file's own content (or a
-  // confirmation echoing its path) - same Prism.js highlighting the payload
-  // side already gets via formatToolInput's {code, lang} shape (stream-view.js),
-  // keyed off the tool's own file_path input rather than sniffing the result
-  // text itself. Anything without a recognizable file_path/extension (Bash
-  // stdout, Grep matches, WebFetch bodies, ...) stays plain text - passed
-  // straight through as a string, same as before this existed.
+  // Read/Edit/Write/NotebookRead results are the file's own content - same
+  // Prism.js highlighting the payload side gets, keyed off the tool's own
+  // file_path input rather than sniffing the result text. Anything without
+  // a recognizable file_path/extension (Bash stdout, Grep matches, WebFetch
+  // bodies, ...) just stays plain text.
   function resultBody(record) {
     const lang = langFromPath(record.input && record.input.file_path);
     if (!lang) return record.resultText;
@@ -432,13 +409,11 @@ export function initDetailPane({ panel, headerLabel, followLiveBtn, tabButtons, 
   // Tasks tab is the one currently showing.
   function setTasks(next) {
     tasks = next || [];
-    // "Hidden until proven relevant, never re-hidden" - same treatment
-    // agentsBtn's own roster button gets for an empty command list. Doesn't
-    // force-hide again once a task list empties back out (e.g. every task
-    // got deleted) - a session that's used the feature once keeps the entry
-    // point. Auto-switches into the Tasks tab only on the 0 -> >0 transition
-    // (first reveal) - later updates just re-render in place without
-    // stealing the pane away from a tool call the user is mid-inspection of.
+    // "Hidden until proven relevant, never re-hidden" - doesn't force-hide
+    // again once a task list empties back out; a session that's used the
+    // feature once keeps the entry point. Auto-switches into the Tasks tab
+    // only on the 0 -> >0 transition (first reveal); later updates just
+    // re-render in place without stealing focus mid-inspection.
     if (tasks.length > 0 && tasksTabButton && tasksTabButton.hidden) {
       tasksTabButton.hidden = false;
       if (tasksToggleBtn) tasksToggleBtn.hidden = false;
@@ -456,12 +431,10 @@ export function initDetailPane({ panel, headerLabel, followLiveBtn, tabButtons, 
     setActiveTab('tasks');
   }
 
-  // --- Agent tab (folded in from the old agent-view.js "open in new tab"
-  // reader) - polls the subagent's own transcript file
-  // (src/agent-transcript.js, via GET /api/history/:id/agent/:toolUseId)
-  // since that file is written by a completely separate SDK-managed
-  // process/session this pane has no live connection to; a plain re-read on
-  // an interval is the only way to see it grow. ---
+  // --- Agent tab: polls the subagent's own transcript file (GET
+  // /api/history/:id/agent/:toolUseId) since it's written by a completely
+  // separate SDK-managed process/session this pane has no live connection
+  // to - a plain re-read on an interval is the only way to see it grow. ---
 
   function renderAgentTab() {
     headerLabel.textContent = (agent && agent.label) || 'Agent';
@@ -641,14 +614,11 @@ export function initDetailPane({ panel, headerLabel, followLiveBtn, tabButtons, 
     showTasks,
     showAgent,
     isEnabled: () => enabled,
-    // Exposed for app.js: setEnabled()'s own syncOffset() call at session
-    // start fires before #streamWrap is flipped back to display:flex (it's
-    // still hidden from the pre-session/previous-session state at that
-    // point), so it measures a zero-width panel and leaves
-    // --detail-pane-offset stuck at 0 - the approval banner/#compose then
-    // run full viewport width under the docked pane for the rest of the
-    // session. app.js calls this again right after streamWrapEl becomes
-    // visible to get a real measurement.
+    // Exposed for app.js: setEnabled()'s own syncOffset() fires before
+    // #streamWrap is flipped back to display:flex, so it measures a
+    // zero-width panel and leaves --detail-pane-offset stuck at 0 - the
+    // approval banner/#compose then run full viewport width under the docked
+    // pane. app.js calls this again once streamWrapEl is actually visible.
     syncOffset,
   };
 }

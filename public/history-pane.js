@@ -1,13 +1,8 @@
-// Read-only transcript viewer for any session, live or past.
-// Reuses stream-view.js's renderMessage rather than a second renderer -
-// same reasoning as the plan's "reuse claude-realtime-usage's renderer,
-// don't reinvent it", just applied to this project's own renderer instead.
-// Trajectory-style tool-call rows (see stream-view.js's module comment) come
-// along for free via that same renderMessage call - the only extra wiring
-// this file needs is its own docked detail pane so clicking one of those
-// rows here has somewhere to land, same as the live #stream/#detailPane pair
-// in app.js. tool-call-store.js's WeakMap-per-container keying keeps this
-// modal's records isolated from whatever's showing live in #stream.
+// Read-only transcript viewer for any session, live or past. Reuses
+// stream-view.js's renderMessage so tool-call rows come free, but needs
+// its own docked detail pane for clicks to land in (like the live
+// #stream/#detailPane pair in app.js). tool-call-store.js's WeakMap
+// keying keeps this modal isolated from whatever's showing in #stream.
 import { renderMessage, resetStreamView } from '/stream-view.js';
 import { appendOperatorQuery } from '/operator-auth.js';
 import { initDetailPane } from '/detail-pane.js';
@@ -48,20 +43,11 @@ export function initHistoryPane({ modal, body, closeButton, titleEl, exportButto
       const { messages } = await res.json();
       body.innerHTML = '';
       resetStreamView(body);
-      // detailPane.reset(body) already ran at the top of open() - no need to
-      // repeat it here now that the fetch succeeded.
-      // No onRewindClick, no file checkpointing, turn numbering not
-      // reliable here (this isn't a live registry row) - all three flags
-      // just suppress the rewind button, which renderUser also only shows
-      // for locally-echoed messages (message.turnIndex) that a fetched
-      // transcript never has anyway. Belt and suspenders.
-      //
-      // onToolCallStarted is deliberately omitted (unlike the live
-      // renderMessage call site in app.js) - this whole transcript is
-      // history rendered in one pass, wiring it would just leave the pane
-      // "following" whichever tool call happens to be last in the array,
-      // not something worth calling live. onSelectToolCall (click to pin)
-      // is the only interaction that makes sense here.
+      // No onRewindClick, no file checkpointing, turn numbering not reliable
+      // here (not a live registry row) - these just suppress the rewind
+      // button, which only shows for locally-echoed messages anyway.
+      // onToolCallStarted is omitted too: this is one full history render,
+      // not a live stream, so nothing should be "following" the last tool call.
       for (const message of messages) {
         renderMessage(body, message, {
           onRewindClick: null,

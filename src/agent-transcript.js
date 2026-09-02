@@ -1,19 +1,8 @@
 // Read-only reader for a subagent's own transcript, written by the Claude
 // Agent SDK's Agent (Task) tool under
-// <projectDir>/<parentClaudeSessionId>/subagents/agent-<agentId>.jsonl,
-// alongside a matching agent-<agentId>.meta.json ({ agentType, description,
-// toolUseId, spawnDepth, model }). Powers the "open in new tab" viewer for
-// an Agent tool row (public/agent-view.html) - lets you watch a background
-// subagent's own transcript grow, read-only, from a session that's still
-// live in another tab.
-//
-// Reads the file directly rather than going through the SDK's
-// getSessionMessages (session-history.js's usual route) - that call is a
-// documented undocumented-internal (see
-// .claude/memory/sdk-streaming-input-gotchas.md) with no evidence it
-// resolves nested subagent transcript paths at all, so this avoids
-// depending on unverified SDK behavior for a read-only feature that only
-// needs a plain JSONL parse anyway.
+// <projectDir>/<parentClaudeSessionId>/subagents/agent-<agentId>.jsonl.
+// Reads the file directly instead of the SDK's getSessionMessages, an
+// undocumented internal with no evidence it resolves nested paths.
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { homedir } from 'node:os';
@@ -52,10 +41,8 @@ async function findProjectDir(claudeSessionId) {
 
 // Finds the subagent transcript spawned by a given Agent tool_use, matching
 // toolUseId against every agent-*.meta.json under the parent session's
-// subagents/ dir. Returns null if the parent transcript, its subagents dir,
-// or a meta file matching this toolUseId can't be found (a tool call that
-// isn't actually an Agent call, or one from before this harness version
-// wrote meta files).
+// subagents/ dir. Returns null if nothing matches (not an Agent call, or
+// predates this harness version writing meta files).
 export async function findSubagentTranscript(claudeSessionId, toolUseId) {
   // Guard against a crafted id (e.g. `../../../etc/passwd`, or a
   // URL-decoded `..%2F..%2F..`) reaching the path.join below - see

@@ -1,20 +1,8 @@
-// Pure transform between the SDK's raw getContextUsage() response
-// (session-registry.js's refreshContextUsage) and the { autoCompact }
-// shape the client actually renders (app.js's compact-urgent toggle,
-// stats-panel.js's contextBar coloring).
-//
-// The SDK types isAutoCompactEnabled/autoCompactThreshold (sdk.d.ts), but
-// autoCompactThreshold's units relative to `percentage`'s confirmed 0-100
-// scale are undocumented and unconfirmed anywhere in this codebase or its
-// tests. Rather than gate the feature
-// behind that missing confirmation, or risk silently trusting a
-// wrong-scale value, this module tries the plausible encodings (fraction,
-// percent, absolute token count) and rejects anything that lands outside a
-// plausible auto-compact trigger band. A rejected/absent threshold falls
-// back to the cockpit's own long-standing 80% assumption, so behavior
-// never regresses - it only gets more precise once the real units are
-// confirmed live (the one-time warn() below is how that confirmation
-// actually happens in practice).
+// Pure transform between the SDK's raw getContextUsage() response and the
+// { autoCompact } shape the client renders. autoCompactThreshold's units
+// relative to `percentage`'s 0-100 scale are undocumented, so this tries
+// plausible encodings (fraction, percent, absolute tokens) and falls back
+// to the cockpit's long-standing 80% assumption when none fit.
 
 export const DEFAULT_COMPACT_WARN_PERCENT = 80;
 

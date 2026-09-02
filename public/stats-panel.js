@@ -1,9 +1,6 @@
-// Live stats strip: cost, tokens, cache hit rate, context percentage.
-// Fed by the server's `cockpit:usage` message (session-registry.js), sent on
+// Live stats strip. Fed by the server's `cockpit:usage` message, sent on
 // every assistant message (cost/tokens) and after every finished turn
-// (context percentage, which is its own round trip to the CLI). Formatters
-// mirror claude-realtime-usage/live_watcher_template.html's fmtUSD/fmtTok so
-// the two tools read the same at a glance.
+// (context percentage, its own round trip to the CLI).
 import { escapeHtml } from '/escape-html.js';
 
 export function initStatsPanel({ el }) {
@@ -53,20 +50,13 @@ export function initStatsPanel({ el }) {
     if (usage.unpriced && usage.unpriced.length) {
       parts.push(`<span class="stat-warn" title="No pricing entry for: ${usage.unpriced.join(', ')} - cost shown may be understated">⚠ unpriced model</span>`);
     }
-    // Best-effort plan quota, off the SDK's experimental usage API
-    // (session-registry.js's refreshRateLimits) - absent entirely on API
-    // key/Bedrock/Vertex sessions, and permanently absent for this process
-    // if that API ever breaks, in which case `rateLimits` is just always
-    // null and this chip never appears. Cost/token/context chips above
-    // don't depend on it either way.
+    // Best-effort plan quota, off the SDK's experimental usage API - absent
+    // on API key/Bedrock/Vertex sessions, and `rateLimits` just stays null
+    // (chip never appears) if that API ever breaks. Other chips don't
+    // depend on it.
     const fiveHour = rateLimits && rateLimits.five_hour;
     if (fiveHour && fiveHour.utilization != null) {
-      // resets_at is the SDK's own ISO timestamp for when this window
-      // clears - was already on the wire (rate_limits.five_hour.resets_at)
-      // but never read here, so the chip showed utilization with no way to
-      // tell when it's actually finishing. toLocaleTimeString to match the
-      // rate-limit-hit banner's own clock format (app.js's applySession,
-      // the `when` local in the rate-limit-hit renderer).
+      // toLocaleTimeString matches the rate-limit-hit banner's clock format.
       const resetLabel = fiveHour.resets_at
         ? ` (resets ${new Date(fiveHour.resets_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })})`
         : '';
@@ -76,19 +66,14 @@ export function initStatsPanel({ el }) {
     el.hidden = false;
   }
 
-  // Same shape as ~/.claude/statusline-command.py's context segment: a
   // 10-cell `[####------] 38K/200K` bar, colored relative to
-  // context.autoCompact.warnPercent (src/context-usage.js - the SDK's real
-  // auto-compact threshold when confirmed plausible, else the same 80%
-  // this used to hardcode as `remaining < 20`). Yellow starts 30 points
-  // before red, preserving the original 50/80 relationship when warn===80.
+  // context.autoCompact.warnPercent (the SDK's real auto-compact threshold
+  // when known, else 80%). Yellow starts 30 points before red.
 
-  // Turn cost is only reported per assistant message by the API - there's
-  // no per-tool-call usage - so usage.perTool (usage.js's accumulator)
-  // splits each turn's cost evenly across the tool_use blocks it contains.
-  // Shown as a tooltip (matches this panel's existing chips - no popover
-  // CSS in this codebase) rather than a click-to-expand row, since it's
-  // supplementary detail, not something read at a glance like cost/tokens.
+  // Turn cost is only reported per assistant message by the API (no
+  // per-tool-call usage), so usage.perTool splits each turn's cost evenly
+  // across its tool_use blocks - shown as a tooltip since it's supplementary
+  // detail, not something read at a glance like cost/tokens.
   function perToolChip(perTool) {
     const lines = perTool
       .slice(0, 8)

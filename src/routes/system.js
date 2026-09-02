@@ -12,12 +12,9 @@ import { fetchAccountLimits } from '../account-limits.js';
 
 export function registerSystemRoutes(router) {
   // Liveness only - deliberately outside /api/* so server.js's operator-token
-  // check (handleRequest, gated on url.pathname.startsWith('/api/')) never
-  // applies here: a health check has to work before anyone's obtained a
-  // token. Origin/Host spoof checking still applies to every request
-  // (isSpoofedRequest runs first, unconditionally), so this stays
-  // localhost-only same as everything else - it's just not session- or
-  // process-credential-gated.
+  // check never applies here: a health check has to work before anyone's
+  // obtained a token. Origin/Host spoof checking still applies, so this
+  // stays localhost-only, just not credential-gated.
   router.get('/healthz', async (req, res) => {
     return respondJson(res, 200, { status: 'ok', pid: process.pid, uptime: process.uptime() });
   });
@@ -70,10 +67,9 @@ export function registerSystemRoutes(router) {
     }
   });
 
-  // All-projects usage stats (Settings > Stats tab) - see global-stats.js's
-  // module comment for why this re-scans transcripts itself rather than
-  // reading the CLI's own `~/.claude/stats-cache.json`. Read-only, no
-  // session concept, same Origin/Host-only gating as /api/browse above.
+  // All-projects usage stats (Settings > Stats tab) - re-scans transcripts
+  // itself rather than reading the CLI's own stats-cache.json. Read-only,
+  // same Origin/Host-only gating as /api/browse above.
   router.get('/api/stats', async (req, res, url) => {
     try {
       const range = url.searchParams.get('range') || 'all';
@@ -83,13 +79,10 @@ export function registerSystemRoutes(router) {
     }
   });
 
-  // Account-level plan quota (Settings > Stats tab's "Account limits"
-  // section) - shells out to `claude -p "/usage"` rather than reading
-  // anything local, since this is the one figure that's actually tracked
-  // server-side across every device on the account (see
-  // account-limits.js's module comment). On-demand only (its own button),
-  // not part of computeGlobalStats' load - a real subprocess spawn, not a
-  // free local read.
+  // Account-level plan quota - shells out to `claude -p "/usage"` rather
+  // than reading anything local, since this is tracked server-side across
+  // every device on the account. On-demand only (its own button), not part
+  // of computeGlobalStats' load - a real subprocess spawn, not a free read.
   router.get('/api/account-limits', async (req, res) => {
     try {
       return respondJson(res, 200, await fetchAccountLimits());

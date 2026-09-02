@@ -1,14 +1,8 @@
-// Pure transcript -> markdown formatter, shared by the export route
-// (server.js, for both a live session and a past one opened from the
-// resume list) and nothing else - it deliberately does not share code with
-// public/stream-view.js, which renders the same SDK message shapes into
-// DOM. That code is DOM-bound (appendBlock, WeakMaps keyed by container
-// element) and untestable outside a browser; this module exists so export
-// can be a plain node-testable function instead of reverse-engineering a
-// collapsed/grouped DOM back into text. The rendering *decisions* below
-// (what counts as "the reply", how a tool call is labeled, thinking
-// tucked away by default) intentionally mirror stream-view.js's, they're
-// just not the same code.
+// Pure transcript -> markdown formatter for the export route. Deliberately
+// does not share code with public/stream-view.js (DOM-bound, untestable
+// outside a browser) - this exists so export can be a plain node-testable
+// function instead of reverse-engineering a collapsed DOM back into text.
+// Rendering decisions here intentionally mirror stream-view.js's.
 import { coalesceAssistantMessages } from './grok-messages.js';
 
 const MAX_BLOCK_CHARS = 2000;

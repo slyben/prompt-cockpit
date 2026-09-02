@@ -1,20 +1,8 @@
-// Settings modal opened by the header's cog button. Two things live here:
-// - persisted preferences (localStorage, survives reload - same pattern as
-//   app.js's ACTIVE_SESSION_KEY), currently autoCollapsePreviousGroup and
-//   customFolders
-//
-// Settings-store boundary (see session-registry.js's own comment for the
-// full picture): localStorage is for per-browser UI preferences that have
-// no meaning outside this one browser profile - they don't sync across
-// tabs on a different machine, don't survive "open this cwd from another
-// computer", and the server never sees them. Anything that should follow a
-// *project* around (regardless of which browser opens it) belongs instead
-// in session-defaults.js/plugin-settings.js's shared
-// `.claude/settings.local.json`, not here.
-// - Close session, moved off the header's row of always-visible buttons and
-//   in here instead: it permanently ends the live process (see its own
-//   confirm() text), which doesn't belong one accidental click away from
-//   Send.
+// localStorage here is for per-browser UI preferences the server never
+// sees. Anything that should follow a *project* around instead belongs in
+// session-defaults.js/plugin-settings.js's shared settings.local.json.
+// Close session lives in this modal, not the header's always-visible row,
+// since it permanently ends the live process.
 const STORAGE_KEY = 'cockpit:settings';
 // customFolders: [{ id, label, path }, ...] - the "@" picker's virtual
 // folders beyond "Local folder" (file-picker.js). Used to be a single
@@ -49,14 +37,11 @@ function makeFolderId() {
   return `folder-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-// Exported (rather than only used internally, like before) so app.js can
-// read turnChartMetric/turnChartExcludeCacheMisses before turn-chart.js's
-// own initTurnChart() runs - that call both builds metricSelect's <option>s
-// (clobbering any value set on it beforehand) and captures
-// excludeCacheMissCheckbox.checked into a closured variable at call time,
-// so the persisted value has to be in place before or applied via a
-// synthetic change event after, not just read afterward. See app.js's
-// turnChart setup.
+// Exported so app.js can read turnChartMetric/turnChartExcludeCacheMisses
+// before initTurnChart() runs: that call rebuilds metricSelect's <option>s
+// (clobbering any preset value) and captures the checkbox's .checked into a
+// closured variable at call time, so the persisted value must be applied
+// before that call or via a synthetic change event after - not just read.
 export function loadSettings() {
   let settings;
   try {
@@ -88,10 +73,9 @@ function saveSettings(settings) {
 }
 
 // Standalone read-modify-write for a caller that only wants to persist one
-// or two keys and isn't otherwise holding the `settings` object initSettings()
-// closes over - turn-chart.js's metric/exclude-cache-miss picks (via app.js)
-// are the first use, so they don't need their own bespoke localStorage
-// wiring alongside this module's.
+// or two keys and isn't otherwise holding the `settings` object
+// initSettings() closes over - turn-chart.js's metric/exclude-cache-miss
+// picks (via app.js) are the first use.
 export function patchSettings(patch) {
   const settings = loadSettings();
   Object.assign(settings, patch);
@@ -124,16 +108,10 @@ export function initSettings({
 }) {
   const settings = loadSettings();
 
-  // Every write below used to call saveSettings(settings) directly, writing
-  // this whole closured snapshot back to localStorage - including whatever
-  // keys it captured at the moment initSettings() ran. If patchSettings()
-  // (app.js's turn-chart metric/exclude-cache-miss picks) wrote a key after
-  // that snapshot was taken, the next checkbox toggle in this modal would
-  // silently revert it: this save had the *pre-patch* value for that key.
-  // persist() instead reloads fresh from localStorage right before writing
-  // patch merges on top of whatever's actually there, and folds the result
-  // back into `settings` so this closure's own reads (renderCustomFolders,
-  // getCustomFolders, etc.) stay in sync too.
+  // Reloads fresh from localStorage before writing, rather than saving this
+  // closure's own snapshot directly - otherwise a key written elsewhere via
+  // patchSettings() (e.g. app.js's turn-chart picks) after this closure was
+  // created would get silently reverted by the next checkbox toggle here.
   function persist(patch) {
     Object.assign(settings, patchSettings(patch));
   }
@@ -150,13 +128,9 @@ export function initSettings({
   onPendingTurnsBadgeEnabledChange(settings.pendingTurnsBadgeEnabled);
   renderCustomFolders();
 
-  // "searchable in @" implies this already works out of the box, so a user
-  // who's never opened Settings still needs a working default - seed the
-  // list with the OS-detected Screenshots folder exactly once
-  // (screenshotsSeeded latches so a user who deliberately removes it later
-  // never gets it silently re-added). Fires even if customFolders already
-  // has entries (e.g. from the screenshotDir migration above) - it only
-  // decides whether to add, never touches what's already there.
+  // Seeds the OS-detected Screenshots folder exactly once, even for a user
+  // who never opens Settings; screenshotsSeeded latches so deliberately
+  // removing it later doesn't cause it to silently reappear.
   if (!settings.screenshotsSeeded) {
     fetch('/api/os-defaults')
       .then((r) => r.json())
@@ -221,12 +195,8 @@ export function initSettings({
   modal.addEventListener('click', (e) => { if (e.target === modal) close(); });
   enableModalDrag(modal);
 
-  // Tabs (Display / Project / MCP / Plugins / Stats) - each tab button's
-  // data-settings-tab matches a panel's data-settings-tab-panel; switching
-  // just flips which panel is visible and which button carries .active.
-  // Doesn't reset to "display" on close/reopen - staying on the tab you
-  // were just looking at (e.g. MCP) across opens is more useful than
-  // snapping back.
+  // Doesn't reset to "display" tab on close/reopen - staying on the tab you
+  // were last looking at is more useful than snapping back.
   const tabButtons = [...modal.querySelectorAll('[data-settings-tab]')];
   const tabPanels = [...modal.querySelectorAll('[data-settings-tab-panel]')];
   for (const btn of tabButtons) {
@@ -298,12 +268,9 @@ export function initSettings({
   };
 }
 
-// Lets the settings modal be repositioned by dragging its header - it's
-// tall enough (min(760px, 85vh)) to cover most of the window, which gets in
-// the way when you want to glance at the app behind it while it's open.
-// Purely visual/session-lived: position isn't persisted, so the modal
-// re-centers (its default flex placement) the next time it's opened fresh
-// after a reload.
+// Lets the modal be repositioned by dragging its header - at min(760px,
+// 85vh) tall it covers most of the window. Position isn't persisted, so it
+// re-centers on the next fresh open after a reload.
 function enableModalDrag(modal) {
   const box = modal.querySelector('.modal-box');
   const header = modal.querySelector('header');

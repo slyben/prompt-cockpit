@@ -1,12 +1,8 @@
-// Settings modal's Plugins section. Unlike mcp-panel.js, there's no live
-// enable/disable call on Query - only a read-only list (reloadPlugins()) and
-// a settings.local.json flag that takes effect on next session start/resume,
-// not immediately. The toggle here writes that flag; it does not touch the
-// running session, and the list isn't re-fetched after flipping it (the
-// SDK's live plugin list can't have changed). List load/render/error
-// skeleton lives in list-panel.js (shared with mcp-panel.js); this module
-// only owns per-plugin rendering, the toggle, and the reload button (whose
-// own error goes to warningEl, not the list, so it stays a separate flow).
+// Settings modal's Plugins section. Unlike mcp-panel.js there's no live
+// enable/disable on Query - only a read-only list (reloadPlugins()) and a
+// settings.local.json flag that takes effect next session start, not
+// immediately. The toggle writes that flag without touching the running
+// session; reload button's own errors go to warningEl, not the list.
 import { initListPanel } from '/list-panel.js';
 
 export function initPluginPanel({ listEl, reloadButton, warningEl, fetchPlugins, reloadPlugins, setPluginEnabled }) {
@@ -72,11 +68,10 @@ export function initPluginPanel({ listEl, reloadButton, warningEl, fetchPlugins,
       const pluginKey = `${plugin.name}@${plugin.source}`;
       const toggle = document.createElement('input');
       toggle.type = 'checkbox';
-      // Reflects what's actually saved to settings.local.json (server merges
-      // this in - see server.js's reload-plugins route), not just "it's
-      // loaded right now" - a plugin can be loaded in the live session (SDK
-      // read it at startup) while showing disabled here because it was
-      // toggled off since, and won't reload on the next session start (B3).
+      // Reflects what's saved to settings.local.json, not "loaded right now" -
+      // a plugin can be loaded in the live session (SDK read it at startup)
+      // while showing disabled here because it was toggled off since, and
+      // won't reload until the next session start.
       toggle.checked = plugin.enabled !== false;
       toggle.title = 'Enable/disable this plugin (takes effect next session start)';
       toggle.addEventListener('change', async () => {

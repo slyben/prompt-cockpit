@@ -1,9 +1,8 @@
 // `/ask <Name>: <text>` target-name autocomplete. Cockpit owns `/ask`
 // client-side (app.js's onSend); this picker fills the name (and the
 // required colon) so a typo does not fall through as a fake CLI command.
-//
-// Pure helpers are exported for tests. The dropdown opens *above* the
-// compose box (same `bottom:` positioning as command-picker.js).
+// The dropdown opens *above* the compose box (same `bottom:` positioning
+// as command-picker.js).
 
 export function parseAskDraft(text, caret) {
   if (typeof text !== 'string') return null;

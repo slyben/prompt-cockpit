@@ -6,11 +6,10 @@
 export const MAX_DIFF_CELLS = 200_000; // guard the O(n*m) LCS below against pathological input sizes
 
 // Minimal line-level diff (LCS backtrack) between two strings, rendered
-// terminal-`/diff`-style: cls 'diff-del'/'diff-add'/'diff-ctx' picks the row's
-// background tint (renderBody), `lineNo` is the single-gutter-column line
-// number CLI diffs show - old-file position for a removed line, new-file
-// position for an added or context line (they agree up to the first edit,
-// so this reads naturally as "the line's position in whichever file has it").
+// terminal-`/diff`-style. `lineNo` is the single-gutter-column line number:
+// old-file position for a removed line, new-file position for an added or
+// context line - they agree up to the first edit, so this reads naturally
+// as "the line's position in whichever file has it".
 export function diffLines(oldText, newText) {
   const a = (oldText ?? '').split('\n');
   const b = (newText ?? '').split('\n');

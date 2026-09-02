@@ -1,10 +1,8 @@
-// Wrapper for the two internal-only control requests (`file_suggestions`,
-// `get_workspace_diff` - plan Spike B: protocol-only, not on the public
-// Query interface). Both are implemented as fallback-only: there
-// is no public method to reach the real internal handler from outside the
-// CLI's own request loop, so this *is* the adapter's fallback path, not a
-// degraded mode of it. If a public surface appears later, swap the
-// implementation here without touching callers.
+// Fallback implementations for `file_suggestions`/`get_workspace_diff`:
+// these are protocol-only requests with no public method on the Query
+// interface, so this *is* the adapter's path, not a degraded mode of it.
+// If a public surface appears later, swap the implementation here without
+// touching callers.
 import { readdir, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
@@ -16,12 +14,10 @@ const IGNORED_DIRS = new Set(['.git', 'node_modules', 'dist', 'build', '.next', 
 const MAX_RESULTS = 50;
 const MAX_ENTRIES_SCANNED = 20000;
 
-// Extra folders (Screenshots by default, plus whatever a user adds in
-// Settings - see settings.js's customFolders) rarely live under the project
-// tree, so the cwd walk below never finds them - a separate walk per folder
-// is the only way "@" can offer one. Capped much smaller than the cwd
-// budget per folder: each is one flat folder, not a codebase, and shouldn't
-// be able to crowd out real project files if it happens to be huge.
+// Extra folders (e.g. Screenshots, plus user-added ones) rarely live under
+// the project tree, so the cwd walk below never finds them - each needs its
+// own walk. Capped smaller than the cwd budget: each is one flat folder,
+// not a codebase, and shouldn't crowd out real project files if huge.
 const EXTRA_FOLDER_MAX_RESULTS = 12;
 const EXTRA_FOLDER_MAX_ENTRIES_SCANNED = 2000;
 // Hard ceiling on how many extra folders get walked per request, independent
@@ -30,18 +26,10 @@ const EXTRA_FOLDER_MAX_ENTRIES_SCANNED = 2000;
 const MAX_EXTRA_FOLDERS = 20;
 
 /**
- * @param cwd - project root to search under
- * @param queryText - partial path/filename typed after `@`
- * @param extraFolders - optional array of { id, path } folders to search
- *   outside cwd (results come back relative to cwd via `..` segments - see
- *   module doc), e.g. Screenshots plus whatever else Settings has added.
- * @returns { path, source } objects, cwd-glob fallback - `source` is 'cwd'
- *   or the matching extraFolders entry's `id`, so the client can group/color
- *   each origin instead of showing one flat list where an extra folder's
- *   entries (often `..\..\Screenshots\...` or, cross-drive on Windows, a
- *   bare absolute path - see the relToCwd comment below) are indistinguishable
- *   from real project files.
- */
+ * @param cwd, queryText, extraFolders - search root, partial filename
+ *   typed after `@`, optional `{id,path}` folders outside cwd
+ * @returns `{path,source}` - source is 'cwd' or the folder's id, for
+ *   grouping/coloring results by origin */
 export async function fileSuggestions(cwd, queryText, extraFolders) {
   const needle = (queryText || '').toLowerCase();
 
@@ -67,13 +55,9 @@ export async function fileSuggestions(cwd, queryText, extraFolders) {
     }
   }
 
-  // Extra folders are "one flat folder, not a codebase" (see doc comment
-  // above): walked one level only, so a nested archive dir (e.g. an "old\"
-  // subfolder someone dumped years of past screenshots into) can't crowd out
-  // the folder's own files. Sorted newest-first by mtime rather than
-  // readdir's filesystem order, since the whole point of offering these
-  // folders is picking something *recent* (a screenshot just taken, say) -
-  // alphabetical order buries that at the bottom for date-stamped filenames.
+  // Walked one level only, so a nested archive dir can't crowd out the
+  // folder's own files. Sorted newest-first by mtime (not readdir order)
+  // since the point of offering these folders is picking something recent.
   async function listFlatFolderNewestFirst(dir, root, maxResults, maxScanned, source) {
     let entries;
     try {
@@ -106,15 +90,11 @@ export async function fileSuggestions(cwd, queryText, extraFolders) {
   const folders = (Array.isArray(extraFolders) ? extraFolders : []).slice(0, MAX_EXTRA_FOLDERS);
   for (const folder of folders) {
     if (!folder || !folder.path || !folder.id) continue;
-    // Skip if already inside (or equal to) cwd - the walk above already
-    // covers that case and a second pass would just duplicate it. But the
-    // cwd walk prunes dot-dirs and IGNORED_DIRS entirely (see walk() above),
-    // so a folder nested under one of those - e.g. `<cwd>/build/artifacts`
-    // or `<cwd>/.screenshots` - was never actually visited despite being
-    // "inside cwd" by plain path containment. Walk relToCwd's own segments
-    // (not folder.path's leaf name) so a folder that merely lives *next to*
-    // an ignored name, e.g. `<cwd>/src/dist-notes`, isn't wrongly treated as
-    // pruned just because "dist" is a substring.
+    // Skip if already inside cwd, unless it's nested under a dir the cwd
+    // walk prunes (dot-dirs, IGNORED_DIRS) - e.g. `<cwd>/build/artifacts` -
+    // since that was never actually visited despite being "inside cwd".
+    // Check relToCwd's own path segments, not folder.path's leaf name, so
+    // e.g. `<cwd>/src/dist-notes` isn't wrongly pruned as a substring match.
     const relToCwd = path.relative(cwd, folder.path);
     const insideCwd = relToCwd === '' || (!relToCwd.startsWith('..') && !path.isAbsolute(relToCwd));
     const prunedByCwdWalk = insideCwd && relToCwd

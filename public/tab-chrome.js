@@ -14,12 +14,9 @@ const STATE_TO_DOT = {
   error: 'attention',
 };
 
-// An 8-point starburst/asterisk glyph - closer to Claude's own radial mark
-// (an abstract approximation, not a traced copy of it) than a plain dot,
-// same state-color coding as before (DOT above). Alternating outer/inner
-// radius vertices around the center, generated once by hand (not computed
-// at runtime - it's a fixed shape, no reason to redo the trig on every
-// render).
+// An 8-point starburst glyph, alternating outer/inner radius vertices,
+// generated once by hand rather than computed at runtime - it's a fixed
+// shape, no reason to redo the trig on every render.
 function faviconDataUrl(color) {
   const path = 'M8,0.7 L8.99,5.6 L13.16,2.84 L10.4,7.01 L15.3,8 L10.4,8.99 L13.16,13.16 L8.99,10.4 L8,15.3 L7.01,10.4 L2.84,13.16 L5.6,8.99 L0.7,8 L5.6,7.01 L2.84,2.84 L7.01,5.6 Z';
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path d="${path}" fill="${color}"/></svg>`;

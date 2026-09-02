@@ -1,10 +1,8 @@
-// Persisted prompt history - localStorage-backed, keyed per
-// cwd since a prompt typed in one project is rarely useful in a different
-// one. Single source of truth for both compose.js's Up/Down recall (already
-// existed, in-memory only until now, lost on every reload) and
-// history-search.js's Ctrl+R fuzzy search - one store, two ways to read it,
-// so a prompt recorded by send() shows up in both immediately rather than
-// each module keeping its own copy that can drift.
+// Persisted prompt history - localStorage-backed, keyed per cwd since a
+// prompt typed in one project is rarely useful in another. Single source
+// of truth for both compose.js's Up/Down recall and history-search.js's
+// Ctrl+R fuzzy search - one store, two readers, so a prompt recorded by
+// send() shows up in both immediately instead of each module drifting.
 const STORAGE_PREFIX = 'cockpit:history:';
 const MAX_ENTRIES = 300;
 

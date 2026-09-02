@@ -1,9 +1,8 @@
-// Which providers actually exist on this machine, checked once at server
-// launch (not per-request - see registerSystemRoutes' /api/providers). The
-// frontend hides a provider's UI entirely when it's not in this list (e.g.
-// no Grok dropdown if the `grok` CLI isn't installed). Add a future LLM by
-// giving it a descriptor in provider-registry.js; Claude is the host CLI
-// this app is built into, so it is always available.
+// Which providers exist on this machine, checked once at server launch
+// (not per-request). The frontend hides a provider's UI entirely when
+// it's not in this list (e.g. no Grok dropdown if the `grok` CLI isn't
+// installed). Add a future LLM by giving it a descriptor in
+// provider-registry.js; Claude is always available (the host CLI).
 import { listAvailableProviders } from './provider-registry.js';
 
 let cachedPromise = null;

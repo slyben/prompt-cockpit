@@ -1,18 +1,8 @@
 // `@` autocomplete in the compose box, backed by GET
-// /api/sessions/:id/file-suggestions (src/sdk-adapter.js's cwd-glob
-// fallback - see plan Spike B on why there's no "real" path to fall back
-// from here). Results come back tagged { path, source: 'cwd' | <folder id> }.
-//
-// Two-pane picker: the left pane always lists "Local folder" plus whatever
-// extra folders are configured in Settings (settings.js's customFolders,
-// added/removed there with the +/- controls), the right pane shows
-// whichever one is currently highlighted, live - no typing a prefix
-// required. Both panes share one fetch per keystroke (the server already
-// returns every source merged); switching the highlighted folder just
-// re-filters the results already in hand, no extra round trip. Selecting a
-// file always replaces the *entire* @-token (from the `@` through the
-// caret) with `@<real path> ` - the virtual folder is a display grouping
-// only, never part of the inserted text.
+// /api/sessions/:id/file-suggestions, tagged { path, source: 'cwd' |
+// <folder id> }. The left pane's virtual folders are a display grouping
+// only - selecting a file always inserts `@<real path> `, never the
+// folder name; both panes share one fetch per keystroke.
 
 const DEBOUNCE_MS = 120;
 const LOCAL_FOLDER = { label: 'Local folder', icon: '📁', source: 'cwd' };
@@ -123,11 +113,10 @@ export function initFilePicker({ textarea, dropdown, getSessionId, getSessionTok
     files.forEach((item, i) => {
       const li = document.createElement('li');
       // An extra folder's own left-pane entry already names it ("Screenshots"),
-      // so its files' insertion path - always `..\..\..\<folder>\<name>` per
-      // sdk-adapter's cwd-relative walk, and always exactly one level deep
-      // since extra folders aren't walked recursively - is just noise here.
-      // Only the local-folder pane (real, possibly nested, project paths)
-      // needs the full relative path shown.
+      // so its files' insertion path - always `..\..\..\<folder>\<name>`, and
+      // always exactly one level deep since extra folders aren't walked
+      // recursively - is just noise here. Only the local-folder pane needs the
+      // full relative path shown.
       li.textContent = item.source === 'cwd' ? item.path : basename(item.path);
       li.title = item.path; // full insertion path on hover, for anyone who wants to double-check
       li.setAttribute('role', 'option');

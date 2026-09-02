@@ -1,13 +1,8 @@
-// Visible input queue - docked above compose, same spot/
-// pattern as task-panel.js. Unlike task-panel.js there's no toggle: the
-// queue is either empty (session idle or nothing typed ahead) or it isn't,
-// and an empty queue has nothing worth a permanent chrome element for - the
-// panel just shows itself the moment session-registry.js's cockpit:queue
-// push has at least one entry, and hides itself the moment it doesn't.
-//
-// Backend contract (session.js/session-registry.js): each entry is
-// `{id, text}`, in the order it will actually run. Reorder/drop/send-now
-// all key off `id` - never position, which shifts under a fast typer.
+// Visible input queue, docked above compose. Unlike task-panel.js there's
+// no toggle: it shows itself the moment cockpit:queue has an entry and
+// hides itself when empty - an empty queue isn't worth permanent chrome.
+// Backend contract: each entry is `{id, text}`; reorder/drop/send-now all
+// key off `id`, never position, since position shifts under a fast typer.
 export function initQueuePanel({ panel, listEl, onReorder, onRemove, onSendNow }) {
   let queue = [];
 

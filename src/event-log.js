@@ -1,15 +1,8 @@
-// Append-only, sequence-numbered, byte-capped per-session event log - built
-// so reconnect is designed rather than assumed. Only the durable
-// `sdk:message` stream goes through this - `cockpit:state`/
-// `cockpit:approval-request` are current-snapshot broadcasts (registry.js
-// resends the live snapshot on every attach) and would be meaningless to
-// replay historically.
-//
-// The client tracks the highest `seq` it has rendered and sends it back as
-// `since` on (re)connect. `replay()` returns everything after that seq, or
-// `gap: true` if the log has already evicted past it - the caller then
-// falls back to a full resend (registry.js's attachClient) rather than
-// handing back a replay with a hole in it.
+// Append-only, sequence-numbered, byte-capped event log, so reconnect is
+// designed rather than assumed. Only the durable `sdk:message` stream
+// goes through this; state/approval broadcasts are snapshot-only. The
+// client sends the highest `seq` it rendered as `since`; `replay()`
+// returns everything after it, or `gap: true` if evicted past it.
 
 const DEFAULT_MAX_BYTES = 2 * 1024 * 1024; // prunable, not persisted across process restarts
 

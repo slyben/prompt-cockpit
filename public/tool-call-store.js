@@ -1,19 +1,8 @@
 // Retained per-tool-call records, decoupled from stream-view.js's own
-// rendering-only WeakMaps (groupsByContainer/openGroupByContainer - all
-// DOM-refs-plus-expand-flags, only stream-view.js itself reads them). This
-// module holds *content* - full payload, result text, usage, client-observed
-// timing - that a second, independent module
-// (detail-pane.js) also needs to read without reaching into stream-view.js's
-// internals. Splitting it out avoids a circular import (stream-view.js ->
-// detail-pane.js -> stream-view.js) and keeps detail-pane.js talking to a
-// small explicit API instead of renderer guts, the same way turn-chart.js
-// only ever receives data via addPoint()/nextPointIndex().
-//
-// Keyed by the Anthropic tool_use.id field (present on every tool_use
-// block) - tool_result blocks carry the matching tool_use_id, so this is a
-// real, stable join key already used server-side for the same purpose
-// (src/session-registry.js's TaskCreate/TaskUpdate/TaskList tracking), not a
-// synthetic id scheme invented for this feature.
+// rendering-only WeakMaps, so detail-pane.js can read payload/result/usage/
+// timing without reaching into stream-view.js's internals or creating a
+// circular import. Keyed by the Anthropic tool_use.id field, the same join
+// key used server-side for TaskCreate/TaskUpdate/TaskList tracking.
 
 const recordsByContainer = new WeakMap(); // container -> Map<tool_use id, record>
 const orderByContainer = new WeakMap();   // container -> id[] insertion order, for "most recent"
@@ -47,12 +36,8 @@ export function popOrphanResult(container, id) {
 }
 
 // startedAtMs is supplied by the caller, not defaulted to Date.now() here -
-// stream-view.js's appendToolCallRow computes it: a real Date.now() for a
-// tool_use rendered live, or the assistant message's own (coarser, possibly
-// absent) timestamp for a historical/replayed batch, where Date.now() would
-// only measure "when this synchronous render loop happened to run," not
-// anything about the tool call itself. Can be null (unknown - no timestamp
-// available either way); callers display that as "-", not a fabricated 0ms.
+// a historical/replayed batch has no real per-call timing, so callers pass
+// null and display "-" rather than a fabricated 0ms.
 export function createToolCallRecord(container, { id, name, kind, input, payload, usage, rowEl, startedAtMs }) {
   if (!recordsByContainer.has(container)) resetToolCallStore(container);
   const record = {
@@ -69,12 +54,10 @@ export function createToolCallRecord(container, { id, name, kind, input, payload
   return record;
 }
 
-// Returns null (not a throw) when no matching tool_use was ever recorded in
-// this container - a real case, not a bug: a history slice can start
-// mid-run, landing a tool_result whose tool_use lived in an earlier,
-// unfetched page. Callers render an honest orphan row for that case rather
-// than silently dropping the result (see stream-view.js). resultAtMs: same
-// live-vs-historical/nullable reasoning as createToolCallRecord's startedAtMs.
+// Returns null (not a throw) when no matching tool_use was ever recorded -
+// a real case, not a bug: a history slice can start mid-run, landing a
+// tool_result whose tool_use lived on an earlier, unfetched page. Callers
+// render an honest orphan row for that rather than dropping the result.
 export function completeToolCallRecord(container, id, { resultText, isError, resultAtMs }) {
   const record = recordsByContainer.get(container)?.get(id);
   if (!record) return null;
@@ -94,21 +77,11 @@ export function getMostRecentToolCallRecord(container) {
   return id ? getToolCallRecord(container, id) : null;
 }
 
-// Paired with stream-view.js's prependHistory, which renders a "Load earlier
-// history" batch into a detached fragment first (so it can insert everything
-// above the live tail in one DOM operation), then merges the fragment's
-// collapsible-block/group lists into the real container's. Tool-call records
-// built during that fragment render are keyed under the fragment; after
-// container.prepend(fragment), call this to fold them into the container's
-// own map so a click on a historical row (rendered via the fragment) still
-// resolves. Order: fragment's ids go first (they're the older, earlier
-// history), container's existing ids follow - no seq-offset juggling needed
-// here since, unlike collapsible-block hints, there's no "most recently
-// collapsed" concept for tool-call records to get backwards.
-// Returns the ids that were just merged in (oldest-first, i.e. fragOrder) so
-// the caller can check each one against popOrphanResult - a tool_use that
-// just arrived via this merge might be the match an earlier orphan result
-// (rendered before this history page ever loaded) has been waiting for.
+// Paired with prependHistory, which renders a history batch into a
+// detached fragment first, then calls this after container.prepend(fragment)
+// to fold the fragment's records into the container's own map so a click on
+// a historical row still resolves. Returns the merged ids (oldest-first) so
+// the caller can check each against popOrphanResult for a waiting result.
 export function mergeToolCallStore(fragment, container) {
   const fragRecords = recordsByContainer.get(fragment);
   const fragOrder = orderByContainer.get(fragment) || [];

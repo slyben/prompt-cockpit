@@ -53,12 +53,11 @@ const resumeListEl = document.getElementById('resumeList');
 const modeBtn = document.getElementById('modeBtn');
 const stopBtn = document.getElementById('stopBtn');
 const pendingTurnsBadge = document.getElementById('pendingTurnsBadge');
-// Declared up here rather than down by forceIdleSession/disarmForceIdle
-// below (where this state conceptually belongs) because initSettings()'s
-// onPendingTurnsBadgeEnabledChange callback reads lastPendingTurnsCount and
-// forceIdleArmed synchronously during setup, and that setup runs well
-// before this file reaches its forceIdle section - a `let` down there would
-// still be in its temporal dead zone at that point.
+// Declared here (not down by forceIdleSession/disarmForceIdle, where this
+// conceptually belongs) because initSettings()'s
+// onPendingTurnsBadgeEnabledChange callback reads these synchronously
+// during setup, well before this file reaches its forceIdle section - a
+// `let` down there would still be in its temporal dead zone at that point.
 const FORCE_IDLE_CONFIRM_WINDOW_MS = 2000;
 let forceIdleArmed = false;
 let forceIdleArmTimer = null;
@@ -103,15 +102,11 @@ const detailPaneToggleBtn = document.getElementById('detailPaneToggleBtn');
 const copyToast = document.getElementById('copyToast');
 const statsPanel = initStatsPanel({ el: document.getElementById('statsPanel') });
 
-// Metric/exclude-cache-miss picks persist across reloads, same as the
-// panel's own on/off state (settings.js's turnChartEnabled) - read before
-// initTurnChart() runs since that call both rebuilds metricSelect's
-// <option>s (always selecting 'cost') and captures
-// excludeCacheMissCheckbox's checked state into a closured variable at call
-// time, so the checkbox needs its persisted value in place first and the
-// select needs its persisted value re-applied (plus a synthetic change
-// event, since initTurnChart's own change listener - not this code - is
-// what actually re-renders) after.
+// Metric/exclude-cache-miss picks persist across reloads - read before
+// initTurnChart() runs since that call rebuilds metricSelect's <option>s
+// (always selecting 'cost') and captures excludeCacheMissCheckbox's checked
+// state into a closured variable at call time, so the checkbox needs its
+// persisted value in place first, and the select needs it re-applied after.
 const persistedTurnChartPrefs = loadSettings();
 const turnChartMetricSelect = document.getElementById('turnChartMetric');
 const turnChartExcludeCacheMissCheckbox = document.getElementById('turnChartExcludeCacheMissBtn');
@@ -201,8 +196,9 @@ function selectDelegatedTrace(container, queueId, label, text) {
 // (detail-pane.js), which only ever otherwise has this call's initial
 // prompt/final result, never the subagent's own tool calls as they happen.
 function openAgentTab(block) {
-  // Subagent transcripts only exist on disk under ~/.claude/projects/**/subagents
-  // (agent-transcript.js) - a Claude-only artifact, so waiting never helps
+  // Subagent transcripts only exist on disk under
+  // ~/.claude/projects/**/subagents (agent-transcript.js) - a Claude-only
+  // artifact, so waiting never helps
   // for a Grok/Codex session; that's a different condition from Claude just
   // not having reported its session id yet.
   if (currentProvider !== 'claude') {
@@ -236,11 +232,9 @@ const turnChart = initTurnChart({
 });
 
 // Settings > Display's "Cost graph y-axis labels" select - same persist-only
-// wiring as turnChartMetricSelect above (no dedicated setter on settings.js,
-// just patchSettings), except there's no rebuild-on-init to race: unlike
-// metricSelect's <option>s, this select's options are static markup, so the
-// persisted value can just be applied directly with no synthetic change
-// event needed.
+// wiring as turnChartMetricSelect above, except there's no rebuild-on-init
+// to race: this select's options are static markup, so the persisted value
+// can just be applied directly with no synthetic change event needed.
 const turnChartAxisPositionSelect = document.getElementById('turnChartAxisPositionBtn');
 if (turnChartAxisPositionSelect) {
   turnChartAxisPositionSelect.value = persistedTurnChartPrefs.turnChartAxisPosition || 'left';
@@ -294,9 +288,7 @@ let availableAgents = []; // Query.supportedAgents(), fetched once on connect - 
 // Sticky "default agent" set by clicking a roster entry (renderAgentsList) -
 // null means no forced delegation. Applied client-side only (see onSend
 // below): there's no SDK hook to force a subagent, so this just prefixes an
-// instruction onto the outgoing text. Not synced across tabs/reconnects -
-// purely local UI state, cleared on session switch (the `if (!reconnect)`
-// reset block below).
+// instruction onto the outgoing text. Not synced across tabs/reconnects.
 let selectedAgentName = null;
 let currentModel = null; // set from cockpit:hello/state - see applySession
 let currentProvider = 'claude';
@@ -411,18 +403,11 @@ function clearActiveSession() {
   }
 }
 
-// Bug: window.open(url, '_blank') from newSessionTabBtn's handler below
-// looked like it should land on a fresh launcher (sessionStorage is
-// per-tab, per the comment on saveActiveSession) - but the HTML spec says
-// a same-origin tab opened by a script (as opposed to by the user
-// typing/bookmarking a URL) gets a *copy* of the opener's sessionStorage,
-// not an empty one. So the new tab inherited cockpit:activeSession and
-// rejoinActiveSession() below silently reattached it to the SAME session
-// instead of showing the launcher. `?newTab=1` is a one-shot marker: the
-// button appends it, and on load - before rejoinActiveSession runs - it
-// clears the inherited copy and strips itself from the URL so a later
-// reload of *this* tab (once it has its own real session) behaves
-// normally again.
+// A same-origin tab opened by script gets a *copy* of the opener's
+// sessionStorage, not an empty one - so a new tab would otherwise inherit
+// cockpit:activeSession and silently reattach to the SAME session instead
+// of showing the launcher. `?newTab=1` is a one-shot marker: on load,
+// before rejoinActiveSession runs, it clears the inherited copy.
 (function discardInheritedSessionOnNewTab() {
   const url = new URL(window.location.href);
   if (!url.searchParams.has('newTab')) return;
@@ -487,7 +472,7 @@ function authHeaders() {
   return { authorization: `Bearer ${sessionToken}` };
 }
 
-// All suggestion pickers use the .show class (see .dropdown-panel in style.css).
+// All suggestion pickers use the .show class (.dropdown-panel in style.css).
 function isSuggestionPickerOpen() {
   return Boolean(document.querySelector('.dropdown-panel.show'));
 }
@@ -532,24 +517,16 @@ const compose = initCompose({
     // A malformed /ask (missing the colon, or nothing after it) must not
     // fall through to the plain-input path below - that would ship the
     // literal text "/ask ..." to this session's own model, which has no way
-    // to know it's a misfired cockpit command and tries to resolve it as one
-    // of ITS OWN slash commands instead (confirmed in review: shows "Unknown
-    // command: /ask. Did you mean /fast?", which is actively misleading -
-    // this was never headed for the model at all). Caught here, before it
-    // ever reaches the websocket, with the actual fix spelled out.
+    // to know it's a misfired cockpit command and tries (and fails) to
+    // resolve it as one of ITS OWN slash commands instead.
     if (/^\/ask\b/i.test(trimmed)) {
       alert('To send to a session, use: /ask <Name>: <text>\n(e.g. "/ask Grok: send to session Grok this text")');
       return;
     }
     // Sticky agent prefix (see selectedAgentName above) - a plain
-    // instruction, not an SDK-enforced setting, so it's visible in the
-    // transcript like anything else you'd type by hand. Never applied to a
-    // slash command: those resolve server-side before any model turn (see
-    // command-picker.js's module comment), so wrapping one in a Task-tool
-    // instruction would just make Claude ponder the literal command text
-    // instead of running it. Agent name is JSON-stringified rather than
-    // hand-quoted, so a name containing a quote/backslash can't break out of
-    // the instruction string.
+    // instruction, visible in the transcript like anything typed by hand.
+    // Never applied to a slash command: those resolve server-side before
+    // any model turn. Agent name is JSON-stringified to avoid breakout.
     const outgoing = selectedAgentName && !text.startsWith('/')
       ? `Use the Task tool with subagent_type: ${JSON.stringify(selectedAgentName)} to handle this request: ${text}`
       : text;
@@ -672,13 +649,9 @@ const mcpPanel = initMcpPanel({
 });
 
 // Plugins panel (settings modal) - loadOrReloadPlugins reuses reloadPlugins()
-// too: there's no separate read-only "list plugins" route (Query has no
-// plain listPlugins(), only the reload-and-return-list one), so opening the
-// panel for the first time pays the same reload cost a manual "Reload
-// plugins" click would. Named for what it actually does (a prior version was
-// called fetchPlugins, which read as read-only and wasn't) - see
-// pluginsLoadedForSession below (B2) for why this doesn't run on *every*
-// open.
+// too: Query has no plain listPlugins(), only reload-and-return-list, so
+// opening the panel first pays the same reload cost a manual "Reload
+// plugins" click would. See pluginsLoadedForSession for why not every open.
 async function loadOrReloadPlugins() {
   const result = await reloadPluginsApi();
   return result.plugins || [];
@@ -687,10 +660,9 @@ async function loadOrReloadPlugins() {
 async function reloadPluginsApi() {
   const result = await sessionFetch('/reload-plugins', { method: 'POST' });
   // reload-plugins reloads commands/agents/MCP servers too as an SDK-side
-  // effect (session-registry.js's reloadPlugins comment), but that doesn't
-  // go through the normal message loop that pushes a commands_changed event
-  // (public/command-picker.js) - so without this, the "/" picker and agents
-  // roster silently go stale the moment plugins are reloaded (B2).
+  // effect, but that doesn't go through the normal message loop that pushes
+  // a commands_changed event - so without this, the "/" picker and agents
+  // roster silently go stale the moment plugins are reloaded.
   refreshCommandsAndAgents();
   return result;
 }
@@ -747,12 +719,11 @@ const pluginPanel = initPluginPanel({
   setPluginEnabled: setPluginEnabledApi,
 });
 
-// Stats tab (settings modal) - all-projects usage stats, src/global-stats.js.
-// No sessionId dependency (unlike mcpPanel/pluginPanel above): it reads
-// ~/.claude/projects directly, not this session's own SDK connection, so it
-// works even pre-session. Lazy-loaded on the tab's own first click below
-// (a real transcript scan, not a cheap status GET like MCP/plugins) rather
-// than on every modal open.
+// Stats tab (settings modal) - all-projects usage stats. No sessionId
+// dependency (unlike mcpPanel/pluginPanel above): it reads ~/.claude/projects
+// directly, so it works even pre-session. Lazy-loaded on the tab's own first
+// click (a real transcript scan, not a cheap status GET) rather than on
+// every modal open.
 const globalStatsPanel = initGlobalStatsPanel({
   bodyEl: document.getElementById('statsBody'),
   rangeSelect: document.getElementById('statsRangeBtn'),
@@ -863,12 +834,10 @@ async function setAutoContinue(enabled) {
   }
 }
 
-// The one caller closeSession() previously had none of (see
-// session-registry.js's closeSession comment) - without this, every
-// rewind leaves its origin session's live query() (a real CLI subprocess)
-// running for the cockpit process's entire remaining lifetime, with no way
-// back to it and no way to end it. Doesn't touch the on-disk transcript -
-// only ends this cockpit's live process for it, same as closing a terminal.
+// Without this, a session's live query() (a real CLI subprocess) runs for
+// the cockpit process's entire remaining lifetime with no way to end it.
+// Doesn't touch the on-disk transcript - only ends this cockpit's live
+// process for it, same as closing a terminal.
 async function closeSession() {
   if (!sessionId) return;
   if (!confirm('Close this session? Its transcript stays on disk (resumable later), but this live process ends now.')) return;
@@ -881,9 +850,7 @@ async function closeSession() {
 // Same idea as closeSession() above, but instead of dropping back to the
 // launcher it immediately re-starts one at the same cwd/model/provider with
 // the same live thinking budget / effort - a "start over" button for a
-// session that's gotten stuck or wandered off-topic, without losing the
-// folder/model picks or re-typing them in the launcher. The ended session's
-// transcript is untouched on disk, same as closeSession.
+// stuck or off-topic session, without re-typing the launcher picks.
 async function resetSession() {
   if (!sessionId) return;
   if (!confirm('Reset this session? Ends the current live process and starts a new one in the same folder with the same settings. The old transcript stays on disk (resumable later).')) return;
@@ -965,13 +932,10 @@ const settings = initSettings({
 });
 
 // Git-commit-guard select, delegation-handshake trust status/paste-in, and
-// always-allow permission-rules list - all settings-modal sections scoped to
-// THIS session/cwd (src/git-commit-guard.js, src/permission-rules.js via
-// settings.local.json) or this tab's own session token (handshake, distinct
-// from the read-only server-wide copy in session-list-pane.js - see that
-// file's own comment for why the paste action has to live here instead).
-// Rendering/wiring lives in session-controls-panel.js; this just supplies
-// the sessionId-bound fetchers, same injection shape as mcpPanel above.
+// always-allow permission-rules list - scoped to THIS session/cwd or this
+// tab's own session token (handshake, distinct from the read-only
+// server-wide copy in session-list-pane.js). Rendering lives in
+// session-controls-panel.js; this supplies the sessionId-bound fetchers.
 const sessionControlsPanel = initSessionControlsPanel({
   gitGuardModeEl: document.getElementById('gitGuardModeBtn'),
   gitGuardErrorEl: document.getElementById('gitGuardError'),
@@ -1057,27 +1021,18 @@ sessionLabelEl.addEventListener('click', () => {
   });
 });
 
-// Purely informational - a glance at what's active, not a control. Used to
-// open Settings on click, but that surprised more than it helped (nothing
-// about the badge signals "this is a button"), so it's inert now: no click
-// handler, no pointer cursor (style.css), no "click to change" tooltip
-// (index.html). Change model/effort/thinking from the Settings modal
-// (settingsBtn) or the General tab directly.
+// Purely informational - a glance at what's active, not a control (no click
+// handler, no pointer cursor, no tooltip). Change model/effort/thinking
+// from the Settings modal instead.
 
 // One SDK-reported model id (currentModel) + whichever reasoning knob this
-// provider actually has - Claude's thinking-token budget or Grok's named
-// effort tier, never both (session-registry.js's capabilities.thinkingBudget
-// / .effort are already mutually exclusive per provider). currentModel can
-// still be null right after a "Default model" launch, before the first
-// assistant reply resolves it (session-registry.js's applyAssistantUsage) -
-// the badge just stays hidden until then rather than showing a misleading
-// blank chip.
-// Looks up a provider's server-advertised effort-option label (see
-// provider-registry.js's CLAUDE_EFFORT_OPTIONS/GROK_EFFORT_OPTIONS, sent
-// down via /api/providers' launch.effortOptions) - falls back to the raw
-// value itself if the catalog hasn't loaded yet or doesn't know this value,
-// same as the old GROK_EFFORT_LABELS[x] || x / CLAUDE_EFFORT_LABELS[x] || x
-// pattern this replaces.
+// provider has - Claude's thinking-token budget or Grok's named effort
+// tier, never both. currentModel can still be null right after a "Default
+// model" launch, before the first assistant reply resolves it.
+
+// Looks up a provider's server-advertised effort-option label
+// (/api/providers' launch.effortOptions), falling back to the raw value if
+// the catalog hasn't loaded yet or doesn't know it.
 function effortLabel(provider, value) {
   const options = providerCatalog.get(provider)?.launch?.effortOptions;
   const found = Array.isArray(options) ? options.find((o) => o.value === value) : null;
@@ -1093,23 +1048,11 @@ function applyModelBadge(session) {
     // part when session.effort happens to be falsy.
     parts.push(`${session.effort ? effortLabel('grok', session.effort) : 'default'} effort`);
   } else if (currentProvider === 'claude') {
-    // Three distinct states, not two - 0 is a real explicit "Off" (falsy,
-    // so it can't share a branch with "unset"; see THINKING_BUDGET_PRESETS'
-    // comment for why 0 vs null actually differ on the SDK side). null/
-    // undefined is "Default" - what actually happens then is model-
-    // dependent (adaptive thinking on for Opus5/Sonnet5/Fable5, off on
-    // older models), so the badge says "default" rather than guessing.
-    // Claude has both dials now (session-registry.js line ~483: "both
-    // providers support reasoning effort now") - the badge only ever showed
-    // thinking-budget here, so effort silently never appeared for Claude
-    // sessions even though it's a real, independently-set field. Always
-    // shown now (not gated on session.effort being truthy), same reasoning
-    // as the Grok branch above - an unset effort is still worth surfacing
-    // as "default effort", not omitted.
-    // Unset effort isn't "no effort" - the SDK still picks a real tier
-    // ('high', per provider-registry.js's CLAUDE_EFFORT_OPTIONS own sourced
-    // comment), so show that real value (already carrying its own '*'
-    // default marker) instead of the vague "default effort".
+    // Three distinct thinking states, not two - 0 is a real explicit "Off"
+    // (falsy, can't share a branch with "unset"); null/undefined is
+    // "Default", resolving model-dependently (adaptive on for Opus5/
+    // Sonnet5/Fable5, off on older models). Unset effort isn't "no effort"
+    // either - the SDK still picks a real tier ('high'), shown instead.
     parts.push(`${effortLabel('claude', session.effort || 'high')} effort`);
     parts.push(
       session.maxThinkingTokens === 0
@@ -1216,36 +1159,16 @@ for (const mode of PERMISSION_MODES) {
 }
 modeBtn.addEventListener('change', () => { applyModeColor(modeBtn.value); setMode(modeBtn.value); });
 
-// Thinking budget: preset tiers only (deliberately no free-entry number
-// field - see backlog). Values chosen as sensible round tiers, not anything
-// the SDK prescribes. Lives in the Settings modal (thinkingControlsGroup)
-// and the launcher's shared startEffortSelect slot (fillStartEffort below).
-//
-// '' (Default) vs '0' (Off) are deliberately two distinct options, not one -
-// confirmed against the installed @anthropic-ai/claude-agent-sdk's own
-// sdk.d.ts (0.3.231) plus a live probe against claude-opus-5
-// (tests/thinking-default-probe.manual.mjs, 2026-08-20; see
-// .claude/memory/sdk-streaming-input-gotchas.md item 3 for the full trail):
-//   - Query.setMaxThinkingTokens (the only mid-session thinking control the
-//     SDK exposes - there is no setThinking method) is deprecated, and its
-//     own doc says "0 = disabled, any other value = adaptive" - so 0 is the
-//     one value that genuinely turns thinking off.
-//   - null/undefined (this UI's '') "clears the limit" - the probe confirmed
-//     this actually resolves to ADAPTIVE THINKING ON for claude-opus-5 (and,
-//     per the same class of model, sonnet-5/fable-5), not off. Before this
-//     comment, '' was mislabeled "Off" here, which meant the launcher/
-//     Settings "Off" button never actually disabled thinking on Opus 5.
-// The 4k/10k/32k tiers still work as literal token budgets on pre-4.6
-// models; on Opus 4.6+ they're indistinguishable from each other (any
-// nonzero value just means "on") per the same doc comment - harmless to
-// keep since they're not wrong, just no longer literally sized on new
-// models.
+// Thinking budget: preset tiers only, no free-entry field. '' (Default) vs
+// '0' (Off) are deliberately distinct: the SDK treats 0 as the only value
+// that truly disables thinking, while null/undefined resolves to ADAPTIVE
+// THINKING ON for Opus5/Sonnet5/Fable5 - not off. On Opus 4.6+, 4k/10k/32k
+// are no longer literally sized (any nonzero value means "on") but stay valid.
 const THINKING_BUDGET_PRESETS = [
-  // Marked default (see CLAUDE.md-style marker request): this is genuinely
-  // what happens with nothing set, on every Claude model - it just resolves
-  // differently per model (adaptive-on for Opus5/Sonnet5/Fable5, off for
-  // older/unsupported models), so the marked *option* never moves even
-  // though its *meaning* is model-dependent.
+  // "Default *": what happens with nothing set, on every Claude model - it
+  // just resolves differently per model (adaptive-on for Opus5/Sonnet5/
+  // Fable5, off for older models), so the option never moves even though
+  // its meaning is model-dependent.
   { value: '', label: 'Default *' },
   { value: '0', label: 'Off' },
   { value: '4000', label: '4k' },
@@ -1278,12 +1201,10 @@ thinkingBudgetBtn.addEventListener('change', () => selectThinking());
 thinkingDisplayBtn.addEventListener('change', () => selectThinking());
 
 // Effort option labels/tooltips (Grok's low/medium/high/xhigh, Claude's
-// wider low..max ladder with its blank "Default" entry) used to be
-// hardcoded here as GROK_EFFORT_OPTIONS/CLAUDE_EFFORT_OPTIONS - both are now
-// static launch-time catalog data owned by provider-registry.js and served
-// on launch.effortOptions (see /api/providers), read back here via
-// launchConfig(). effortLabel() above reads the same field for the header
-// badge.
+// wider low..max ladder with its blank "Default" entry) are static
+// launch-time catalog data served on launch.effortOptions (/api/providers),
+// read back here via launchConfig(). effortLabel() above reads the same
+// field for the header badge.
 
 // Settings modal's Effort select is provider-aware (unlike the launcher's
 // startEffortSelect, which only ever needs to reflect the provider picker
@@ -1367,7 +1288,7 @@ async function selectThinking() {
       const err = await res.json().catch(() => ({}));
       showThinkingError(`could not set thinking budget: ${err.error || res.statusText}`);
     }
-    // On success, the server pushes the confirmed values back via cockpit:state.
+    // On success, the server pushes confirmed values back via cockpit:state.
   } catch (err) {
     showThinkingError(`could not set thinking budget: ${err.message || err}`);
   }
@@ -1395,16 +1316,10 @@ document.addEventListener('keydown', (event) => {
 });
 
 // Terminal-style select-and-release-to-copy: most terminal emulators copy
-// the mouse selection the instant you let go of the button, no Ctrl+C
-// needed. Scoped to the transcript pane only (not the compose textarea,
-// which already has normal text-field selection/copy behavior) - mouseup
-// fires after the selection is finalized, so `getSelection()` here sees the
-// same range the user just drew. A collapsed selection (a plain click, no
-// drag) has an empty string and is silently ignored.
-// Shared "copy succeeded" feedback - a cursor/button-anchored toast that
-// fades in and back out. Originally inline in the mouseup handler below;
-// pulled out so #copyLastBtn's click-to-copy can show the identical toast
-// instead of inventing a second copy-feedback UI.
+// the mouse selection the instant you let go of the button. Scoped to the
+// transcript pane only, not the compose textarea's normal selection/copy.
+// showCopyToast below is the shared "copy succeeded" feedback, also used
+// by #copyLastBtn's click-to-copy.
 function showCopyToast(x, y) {
   copyToast.style.left = `${x + 8}px`;
   copyToast.style.top = `${y - 8}px`;
@@ -1442,12 +1357,9 @@ function assistantBodySource(el) {
 }
 
 // Copy the most recent assistant reply's text - reads the DOM (not a
-// client-side message array; stream-view.js doesn't keep one, see its
-// module comment) since the DOM is the one place already correct across
-// every ingestion path (live sdk:message, prependHistory, and the
-// cockpit:gap full resend). Assistant text blocks are never collapsible
-// (stream-view.js's renderAssistant), so .body always holds the full text,
-// nothing truncated to worry about.
+// client-side message array; stream-view.js keeps none) since the DOM is
+// the one place already correct across every ingestion path. Assistant
+// text blocks are never collapsible, so .body always holds the full text.
 copyLastBtn.addEventListener('click', () => {
   const replies = streamEl.querySelectorAll('.msg.assistant:not(.delegated-reply) .body');
   const last = replies[replies.length - 1];
@@ -1545,12 +1457,9 @@ pendingTurnsBadge.addEventListener('click', () => {
 });
 
 // Arm-then-confirm (Stop used to sit exactly where Send does, too easy to
-// fat-finger right after hitting Enter). First click arms a
-// short confirm window instead of interrupting outright; a second click
-// inside that window is what actually stops the turn. Escape deliberately
-// bypasses all of this and interrupts immediately (see the keydown handler
-// below) - that's the "I meant it, right now" path, arming it too would
-// defeat the point of a keyboard shortcut.
+// fat-finger right after hitting Enter). First click arms a short confirm
+// window; a second click inside it actually stops the turn. Escape bypasses
+// this entirely and interrupts immediately (see the keydown handler below).
 const STOP_CONFIRM_WINDOW_MS = 2000;
 let stopArmed = false;
 let stopArmTimer = null;
@@ -1581,12 +1490,10 @@ stopBtn.addEventListener('click', () => {
 });
 
 // Surfaces the CLI's own /compact as a button next to the context bar -
-// there's no separate SDK method for it, so this sends the
-// literal slash-command text through the same input path as anything typed
-// by hand (compose.js's onSend). `prompt()` for the optional "keep this"
-// note rather than a persistent field in the compose box or stats strip:
-// stats-panel.js's innerHTML is rebuilt on every usage push (every assistant
-// message), which would silently wipe a live input's value/focus mid-type.
+// no separate SDK method for it, so this sends the literal slash-command
+// text through the same input path as anything typed by hand. `prompt()`
+// for the note rather than a persistent field: stats-panel.js's innerHTML
+// rebuilds on every usage push, which would wipe a live input mid-type.
 function runCompact() {
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
   const note = prompt('Optional - what should Claude keep in mind after compacting? (blank to skip)');
@@ -1597,16 +1504,11 @@ function runCompact() {
 
 compactBtn.addEventListener('click', runCompact);
 
-// Diagnostic snapshot for "spinner spins, nothing running" reports
-// (backlog) - client-side state (what the browser thinks is happening) plus
-// a fresh server-side pull (src/routes/session-actions.js's 'debug' action,
-// registry.getDebugInfo) of what session.js/grok-session.js's internal
-// pendingTurns/promptInFlight counters actually say - the two can disagree
-// (a dropped state broadcast vs. a real turn-accounting bug look identical
-// from the UI alone), which is the whole reason this exists instead of just
-// screenshotting the spinner. Copies as one JSON blob rather than showing a
-// modal - nothing here is meant to be read in the app, only pasted
-// elsewhere.
+// Diagnostic snapshot for "spinner spins, nothing running" reports: client
+// state (what the browser thinks is happening) plus a fresh server-side
+// pull of the session's own pendingTurns/promptInFlight counters - a
+// dropped state broadcast vs. a real turn-accounting bug look identical
+// from the UI alone. Copies as one JSON blob, meant to be pasted elsewhere.
 async function reportStuckState() {
   const clientState = {
     uiState: stateLabelEl.title,
@@ -1656,9 +1558,7 @@ async function setMode(next) {
   // Guards against the rapid-selection race: without this, N picks before
   // the first response lands all read the same stale `currentMode` and fire
   // N requests instead of settling on the last one. The dropdown already
-  // shows `next` the instant the user picks it (native <select> behavior,
-  // ahead of any of our code) - if this guard skips the request, revert the
-  // visible value rather than leaving a selection that never actually took.
+  // shows `next` natively - if this guard skips the request, revert it.
   if (modeChangeInFlight) {
     modeBtn.value = currentMode; applyModeColor(currentMode);
     return;
@@ -1698,12 +1598,10 @@ async function loadEarlierHistory() {
   try {
     const { messages } = await sessionFetch('/earlier-history');
     // Deliberately no onToolCallStarted/onToolResultArrived here (unlike the
-    // live renderMessage call site above) - this batch is all *history*,
-    // rendered into a detached fragment in one shot (see prependHistory's own
-    // comment). Wiring those would hijack the live "follow most recent tool
-    // call" view to whatever the oldest loaded historical call happens to be.
-    // Clicking a loaded row still works via onSelectToolCall (an explicit
-    // pin, which is exactly what a click should do here too).
+    // live renderMessage call site above) - wiring those would hijack the
+    // live "follow most recent tool call" view to whatever the oldest
+    // loaded historical call happens to be. Clicking a loaded row still
+    // works via onSelectToolCall, an explicit pin.
     prependHistory(streamEl, messages, {
       onRewindClick: canForkConversation ? onRewindClick : null,
       hasFileCheckpointing, turnIndexUnreliable, rewindLabel: rewindButtonLabel(),
@@ -1726,11 +1624,7 @@ async function onRewindClick(turnIndex) {
   // The conversation fork is non-destructive (opens as a brand new session,
   // this one is untouched) - but there is only one folder on disk, shared
   // by both, so a file revert has nowhere else to happen. It reverts files
-  // in THIS session's own working folder right now, not "in" the new fork -
-  // worded explicitly here after a review found the old copy ("Also reverts
-  // files to this point", right after "opens a new session") read as if the
-  // revert applied to the new fork instead of the session still open right
-  // now (2026-09-02 review, finding #5).
+  // in THIS session's own working folder right now, not "in" the new fork.
   const fileNote = hasFileCheckpointing
     ? 'This reverts files on disk right now, in this session\'s own folder - not just in the new forked session.'
     : 'Files on disk are left as-is. This session stays open.';
@@ -1810,9 +1704,10 @@ async function loadResumable() {
     cwd.className = 'cwd';
     cwd.textContent = s.cwd || s.projectDirName;
     info.append(title, cwd);
-    // s.mtimeMs is the transcript file's own last-write time (session-launcher.js),
-    // i.e. when its last message landed - the closest thing to "when this
-    // session stopped" without actually parsing the last entry's timestamp.
+    // s.mtimeMs is the transcript file's own last-write time
+    // (session-launcher.js), i.e. when its last message landed - the
+    // closest thing to "when this session stopped" without parsing the
+    // last entry's timestamp.
     if (s.mtimeMs) {
       const time = document.createElement('div');
       time.className = 'resume-time';
@@ -1838,7 +1733,7 @@ async function loadResumable() {
         });
         loadResumable();
       } catch {
-        // offline/blocked - the list just keeps showing the old title, not fatal
+        // offline/blocked - list just keeps showing the old title, not fatal
       }
     });
     const viewBtn = document.createElement('button');
@@ -1892,21 +1787,16 @@ function fillStartModels() {
 }
 
 // Launcher's effort/thinking-budget picker - same slot, repopulated per
-// provider (mirrors fillStartModels above) rather than two separate selects
-// the user has to know to pick between. Options and value semantics match
-// the mid-session Settings versions exactly (fillSettingsEffortSelect above/
-// THINKING_BUDGET_PRESETS, defined further down but already evaluated by
-// the time this runs - both are called from provider-select listeners, well
-// after module load finishes) so "effort" means the same thing whether it's
-// picked before or during a session.
+// provider rather than two separate selects the user has to pick between.
+// Options and value semantics match the mid-session Settings versions
+// exactly (fillSettingsEffortSelect/THINKING_BUDGET_PRESETS) so "effort"
+// means the same thing whether picked before or during a session.
 function fillStartEffort() {
   const provider = selectedProvider();
-  // thinkingBudget capability (Claude-only today) is what actually
-  // distinguishes the three launcher shapes here, not the provider id - see
-  // fillSettingsEffortSelect's matching comment. Grok also ships a static
-  // effortOptions catalog but no separate thinking-budget dial, so it falls
-  // to the second branch; a provider with neither gets the generic
-  // value-list rendering built from launch.efforts.
+  // thinkingBudget capability (Claude-only today) is what distinguishes the
+  // three launcher shapes here, not the provider id. Grok ships a static
+  // effortOptions catalog but no thinking-budget dial (second branch); a
+  // provider with neither gets the generic value-list from launch.efforts.
   const thinkingBudget = providerCatalog.get(provider)?.capabilities?.thinkingBudget;
   const options = launchConfig(provider).effortOptions;
   const grok = !thinkingBudget && Array.isArray(options);
@@ -1922,14 +1812,11 @@ function fillStartEffort() {
     ? `${providerCatalog.label(provider)} reasoning effort for this session.`
     : "Claude's thinking budget for this session - tokens it can spend reasoning before answering. Default lets the model decide (adaptive thinking on Opus 5/Sonnet 5/Fable 5); Off explicitly disables it.";
   startEffortSelect.innerHTML = '';
-  // Grok's effortOptions has no '' entry (Grok's spawn-time effort flag is
-  // always a concrete value, unlike Claude's optional one), so this override
-  // only ever fires for Claude. THINKING_BUDGET_PRESETS' '' label ("Default
-  // *") reads fine in the Settings modal, which has an adjacent "Thinking
-  // budget" span to disambiguate it - but this launcher row has no such
-  // label, and sits right next to startClaudeEffortSelect's own bare
-  // "Default" option, so a plain "Default" here read as ambiguous between
-  // the two dials. Spelled out here only, not in the shared preset list.
+  // Grok's effortOptions has no '' entry, so this override only ever fires
+  // for Claude. THINKING_BUDGET_PRESETS' '' label ("Default *") is fine in
+  // the Settings modal (adjacent "Thinking budget" label), but this launcher
+  // row sits right next to startClaudeEffortSelect's own bare "Default",
+  // so a plain "Default" here would read as ambiguous between the two dials.
   for (const item of list) {
     const opt = document.createElement('option');
     opt.value = item.value;
@@ -1992,12 +1879,10 @@ async function applyAvailableProviders() {
     fillStartEffort();
     loadResumable();
     // A session can already be attached (resumed from localStorage) by the
-    // time this resolves - applySession's own providerCatalog.add() only
-    // ever creates a thin {id, label} descriptor with no `launch.efforts`,
-    // so the Settings modal's effort dropdown can render empty until this
-    // refresh replaces it with the real catalog entry. Re-fill it now
-    // rather than waiting for the next cockpit:state broadcast, which may
-    // not come on an idle session.
+    // time this resolves - applySession's providerCatalog.add() only ever
+    // creates a thin {id, label} descriptor with no launch.efforts, so the
+    // effort dropdown can render empty until this replaces it with the
+    // real catalog entry. Re-filled now, not on the next idle-session state.
     if (currentProvider) fillSettingsEffortSelect(currentProvider);
   } catch {
     return; // launch-time hiccup - leave the dropdown as-is, Claude still works
@@ -2074,13 +1959,10 @@ async function startSession({ cwd, resume, model, provider, name, effort, thinki
   if (cwd) rememberRecentFolder(cwd);
   if (thinkingBudget) {
     // Best-effort: if this fails the session still starts fine at the SDK's
-    // own default (model-dependent - adaptive thinking on for Opus 5/
-    // Sonnet 5/Fable 5, off on older models; see THINKING_BUDGET_PRESETS'
-    // comment) - not worth blocking connect() over, the Settings modal's
-    // own thinking control is right there as a fallback. thinkingBudget
-    // here is always a non-empty string when truthy - '0' (Off) included,
-    // since JS string '0' is truthy even though numeric 0 isn't; only the
-    // real "Default" value ('') is falsy and skips this block entirely.
+    // own model-dependent default, not worth blocking connect() over.
+    // thinkingBudget is always a non-empty string when truthy - '0' (Off)
+    // included, since JS string '0' is truthy even though numeric 0 isn't;
+    // only the real "Default" value ('') is falsy and skips this block.
     await fetch(`/api/sessions/${id}/thinking`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
@@ -2093,17 +1975,14 @@ async function startSession({ cwd, resume, model, provider, name, effort, thinki
 // `reconnect: true` means this is the *same* session picking its websocket
 // back up - the DOM, compose state and command list all stay put, and
 // `since: lastSeq` asks the server for only what happened while the socket
-// was down (event-log.js). Everything else (a fresh start, a resume, a
-// rewind fork, or the very first connect after a page reload) is a new
-// session as far as the client's view goes - full reset, full replay.
+// was down. Everything else is a new session as far as the client's view
+// goes - full reset, full replay.
 function connect(id, token, { reconnect = false } = {}) {
   if (ws) {
     // Plain assignment (not addEventListener), so this fully detaches the
     // old socket's handlers before closing it - otherwise its 'close'
     // handler fires asynchronously *after* the new socket below has
-    // already opened, and disables compose out from under the live
-    // session. Only rewind reconnects mid-session (server.js's newSession
-    // flow), which is what actually hit this.
+    // already opened, and disables compose out from under the live session.
     ws.onopen = ws.onclose = ws.onerror = ws.onmessage = null;
     ws.close();
   }
@@ -2147,9 +2026,9 @@ function connect(id, token, { reconnect = false } = {}) {
     previousState = null;
     agentLiveness.reset(); // new session - any toolUseIds a previous session's tracker was still polling are meaningless here
     statsPanel.reset(); // corrected by the first cockpit:usage push (sent on every attach, see session-registry.js)
-    // Restores the panel's visibility to match the persisted setting (B9) -
-    // returnToLauncher() force-hides it regardless of the setting while
-    // there's no session to chart.
+    // Restores the panel's visibility to match the persisted setting -
+    // returnToLauncher() force-hides it regardless while there's no
+    // session to chart.
     turnChart.setEnabled(settings.isTurnChartEnabled());
     turnChart.reset();
     detailPane.setEnabled(settings.isDetailPaneEnabled());
@@ -2161,12 +2040,10 @@ function connect(id, token, { reconnect = false } = {}) {
   }
 
   document.body.dataset.screen = 'session';
-  // detailPane.setEnabled() above (in the branch that sets up a fresh
-  // session) ran its own offset measurement while streamWrap was still
-  // hidden, so it measured a zero-width pane - re-measure now that
-  // the pane is actually laid out, or #approvalBanner stays full
-  // viewport width under the docked pane for the whole session (see
-  // detail-pane.js's syncOffset comment).
+  // detailPane.setEnabled() above ran its offset measurement while
+  // streamWrap was still hidden, measuring a zero-width pane - re-measure
+  // now that it's actually laid out, or #approvalBanner stays full
+  // viewport width under the docked pane for the whole session.
   detailPane.syncOffset();
 
   const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -2184,12 +2061,10 @@ function connect(id, token, { reconnect = false } = {}) {
       setState('closed');
       return;
     }
-    // Not a deliberate close (compose.js's page is still up on this
-    // session) - the session itself runs independently of the browser
-    // (plan Decisions), so a dropped socket is never a session event by
-    // itself. Retry with backoff rather than dumping the user back to the
-    // launcher; `since: lastSeq` on the next connect() picks up exactly
-    // where this one left off.
+    // Not a deliberate close - the session runs independently of the
+    // browser, so a dropped socket alone is never a session event. Retry
+    // with backoff rather than dumping the user to the launcher;
+    // `since: lastSeq` on the next connect() picks up where this left off.
     setState('reconnecting');
     const delay = Math.min(1000 * 2 ** reconnectAttempt, 10000);
     reconnectAttempt += 1;
@@ -2206,7 +2081,7 @@ function connect(id, token, { reconnect = false } = {}) {
       if (typeof payload.seq === 'number') lastSeq = Math.max(lastSeq, payload.seq);
       if (payload.message.type === 'system' && payload.message.subtype === 'commands_changed') {
         // Fire-and-forget push after a mid-session change (e.g. skills
-        // discovered in a subdirectory) - replace, don't merge (Spike C).
+        // discovered in a subdirectory) - replace, don't merge.
         availableCommands = payload.message.commands;
         return;
       }
@@ -2277,22 +2152,16 @@ function connect(id, token, { reconnect = false } = {}) {
           : 'Run /compact now to free up context (auto-compact is off for this session)';
       }
     } else if (payload.type === 'cockpit:mcp-auth') {
-      // MCP "needs-auth" badge - session-registry.js pushes
-      // this whenever session.js's onElicitation catches a URL-mode auth
-      // request or its completion notice, so a settings modal left open
-      // through the flow doesn't sit on a stale badge until the next
-      // manual open/refresh. Server already re-fetched the merged list
-      // (payload.servers), but mcpPanel has no setServers() of its own -
-      // just re-running the same GET refresh() does on open is simpler
-      // than adding a second render path for one push message.
+      // MCP "needs-auth" badge - pushed whenever an elicitation catches a
+      // URL-mode auth request or completion, so a settings modal left open
+      // doesn't sit on a stale badge. mcpPanel has no setServers() of its
+      // own, so this just re-runs the same GET refresh() open does.
       if (document.getElementById('settingsModal').open) mcpPanel.refresh();
     } else if (payload.type === 'cockpit:delegate-error') {
-      // Cross-session delegation - server.js sends this
-      // straight back on the origin's own socket when delegateTask throws
-      // (unknown name, self-delegation, cross-cwd). No durable eventLog
-      // entry for this one (unlike the success marker) - it's a synchronous
-      // rejection of something that never actually got sent anywhere, so
-      // there's nothing for a reconnecting tab to replay.
+      // Cross-session delegation - sent straight back on the origin's own
+      // socket when delegateTask throws. No durable eventLog entry for
+      // this one (unlike the success marker): it's a synchronous rejection
+      // of something that never got sent anywhere, nothing to replay.
       alert(`Could not ask "${payload.targetName}": ${payload.error}`);
     } else if (payload.type === 'cockpit:queue') {
       // Always the full current queue (session-registry.js's broadcastQueue
@@ -2300,15 +2169,11 @@ function connect(id, token, { reconnect = false } = {}) {
       // change - queue-panel.js just replaces and re-renders.
       queuePanel.setQueue(payload.queue);
     } else if (payload.type === 'cockpit:tasks') {
-      // Always the full current list (session-registry.js never sends a
-      // delta), sent once on every attach/reconnect and again on every real
-      // change - detail-pane.js's Tasks tab just replaces and re-renders, no
-      // merging. It also owns the "reveal the Tasks entry points once
-      // there's something to show, never re-hide" logic, and auto-switches
-      // into the tab on that first reveal (see its own setTasks() comment) -
-      // same as selectToolCall/showText/showAgent above, force the pane on
-      // so that auto-switch is actually visible instead of switching tabs
-      // behind a collapsed panel.
+      // Always the full current list, sent on every attach/reconnect and
+      // every real change - detail-pane.js's Tasks tab just replaces and
+      // re-renders, no merging. It owns "reveal the entry point once
+      // there's something to show, never re-hide" and auto-switches into
+      // the tab on first reveal, so force the pane on here for that.
       if (payload.tasks && payload.tasks.length > 0 && !settings.isDetailPaneEnabled()) {
         settings.setDetailPaneEnabled(true);
       }
@@ -2324,11 +2189,9 @@ function connect(id, token, { reconnect = false } = {}) {
 // rename-tab tooltip (sessionLabelEl.title, set once above) still carries
 // the full path on hover for whoever needs the whole thing.
 function shortenCwd(cwd) {
-  // /[\\/]/ , not '/' - matches file-picker.js/settings.js's own path
-  // splitting. A Windows cwd (`D:\Dev\AI\prompt-cockpit`) has no `/` at all,
-  // so the old split() saw one giant "segment" and always fell into the
-  // parts.length <= 2 return-as-is branch below, silently never shortening
-  // on Windows (2026-09-02 review, finding #3).
+  // /[\\/]/ , not '/' - a Windows cwd (`D:\Dev\AI\prompt-cockpit`) has no
+  // `/` at all, so splitting on '/' alone sees one giant "segment" and
+  // never shortens on Windows.
   const parts = cwd.split(/[\\/]/).filter(Boolean);
   if (parts.length <= 2) return cwd; // already short - nothing to trim
   return `.../${parts.slice(-2).join('/')}`;
@@ -2349,12 +2212,10 @@ function applySession(session) {
   compose.setDefaultPlaceholder(composePlaceholder());
   copyLastBtn.title = `Copy ${sessionAddressName()}'s most recent reply`;
   const providerLabel = sessionProviderLabel();
-  // A durable title (session.name, set via the rename prompt below or
-  // carried forward from a resumed transcript - session-titles.js) leads the
-  // line, but the starting folder still rides along after it instead of
-  // getting replaced outright - a renamed session shouldn't lose "where is
-  // this actually running" at a glance. No name yet: fall back to the usual
-  // cwd/provider/tab-count summary.
+  // A durable title (session.name) leads the line, but the starting folder
+  // still rides along after it instead of getting replaced outright - a
+  // renamed session shouldn't lose "where is this running" at a glance.
+  // No name yet: fall back to the usual cwd/provider/tab-count summary.
   sessionLabelEl.textContent = currentSessionName
     ? `${currentSessionName}  ·  ${shortenCwd(session.cwd)}`
     : `${shortenCwd(session.cwd)}  ·  ${providerLabel}${session.tabCount > 1 ? `  ·  ${session.tabCount} tabs` : ''}`;
@@ -2364,14 +2225,10 @@ function applySession(session) {
   // last segment.
   if (!tabChrome.isUserNamed()) tabChrome.setAutoName(currentSessionName || session.cwd.split(/[\\/]/).filter(Boolean).pop() || session.cwd);
   setState(session.state);
-  // Turns-in-flight badge (session-registry.js's pendingTurnsCount) - debug
-  // option, off by default (settings.isPendingTurnsBadgeEnabled(), toggled
-  // via the settings modal's "Debug: show the turns-in-flight counter"
-  // checkbox); when on, only shown once there's something to explain/unstick
-  // - a healthy idle session stays at 0 and the badge never appears. Skips
-  // the update while a click is armed so a summary landing mid-confirm-window
-  // doesn't blow away the "Nothing running?" label out from under the second
-  // click.
+  // Turns-in-flight badge - debug option, off by default; when on, only
+  // shown once there's something to explain/unstick. Skips the update
+  // while a click is armed so a summary landing mid-confirm-window doesn't
+  // blow away the "Nothing running?" label out from under the second click.
   lastPendingTurnsCount = session.pendingTurnsCount || 0;
   if (!forceIdleArmed) {
     pendingTurnsBadge.textContent = String(lastPendingTurnsCount);
@@ -2384,9 +2241,7 @@ function applySession(session) {
   canForkConversation = caps.conversationFork !== false;
   // Grok's and Codex's own approval responses have no project-level scope
   // (only turn/session) - offering "always in this project" for either
-  // would promise a persistence that server-side (routes/session-actions.js's
-  // approval-decision route) never happens; the option is only ever real
-  // for a provider whose capabilities say so.
+  // would promise a persistence that server-side never happens.
   const projectApprovalOption = alwaysAllowScope.querySelector('option[value="project"]');
   if (projectApprovalOption) {
     projectApprovalOption.hidden = caps.projectPersistentApprovals !== true;
@@ -2421,11 +2276,10 @@ function applySession(session) {
   // loadEarlierHistory has nothing left) - reflects it on every summary,
   // safe to repeat since it's idempotent either way.
   loadHistoryBar.hidden = !session.hasEarlierHistory;
-  // Auto-continue checkbox + banner: server is the source of truth here too
-  // (session-registry.js's setAutoContinue/handleMessage), same idempotent-
-  // repeat-on-every-summary pattern as the history bar above - a checkbox
-  // toggled from another tab, or a timer firing server-side, shows up here
-  // without this tab having done anything itself.
+  // Auto-continue checkbox + banner: server is the source of truth here
+  // too, same idempotent-repeat-on-every-summary pattern as the history
+  // bar above - a checkbox toggled from another tab, or a timer firing
+  // server-side, shows up here without this tab having done anything.
   autoContinueBtn.checked = Boolean(session.autoContinue);
   if (session.rateLimitHit) {
     const resetsAt = session.rateLimitHit.resetsAt;
@@ -2444,23 +2298,18 @@ function applySession(session) {
   if (session.state === 'error' || session.state === 'closed') {
     compose.setEnabled(false);
     // This session just ended on the server without going through
-    // closeSession() (crashed CLI process, closed from another tab/the
-    // API, etc.) - that path already calls refreshCount() itself, but this
-    // one doesn't otherwise touch sessionListPane, so the header's count
-    // would keep showing a session that's actually gone until something
-    // else happened to refresh it.
+    // closeSession() (crashed CLI, closed elsewhere) - that path already
+    // calls refreshCount() itself, but this one doesn't otherwise touch
+    // sessionListPane, so the header's count would stay stale otherwise.
     sessionListPane.refreshCount();
   }
 }
 
 // Drives the state icon: a static dot when idle, a classic ASCII spinner
-// (cycling | / - \) while running/reconnecting - actual motion rather than
-// a color or opacity toggle, so "busy" reads clearly even to someone who
-// can't tell the state colors apart. Driven by setInterval rather than a
-// CSS `animation: ... infinite` tied to the element holding the same class
-// - stepping the frame ourselves every SPIN_INTERVAL_MS can't drift or get
-// silently deprioritized the way a CSS keyframe animation can in a
-// background tab.
+// while running/reconnecting - actual motion rather than a color/opacity
+// toggle, so "busy" reads clearly even to someone who can't tell the state
+// colors apart. Driven by setInterval, not a CSS animation, so it can't
+// get silently deprioritized in a background tab.
 const SPIN_INTERVAL_MS = 120;
 const SPINNER_FRAMES = ['|', '/', '-', '\\'];
 // Distinct glyph set for "a subagent (Task/Agent tool) is in flight" - same
@@ -2472,11 +2321,9 @@ const IDLE_ICON = '•'; // •
 let spinTimer = null;
 let spinFrame = 0;
 // Tool-call ids for currently in-flight Agent (subagent/Task) tool calls -
-// populated/drained by the onToolCallStarted/onToolResultArrived hooks above.
-// Non-empty while the main turn is running and its own Agent tool call
-// hasn't returned yet - drives the alt-glyph spinner during that window,
-// but says nothing about the subagent itself, which usually keeps working
-// well past that (see agentLiveness below).
+// drives the alt-glyph spinner while the main turn's own Agent call hasn't
+// returned yet, but says nothing about the subagent itself, which usually
+// keeps working well past that (see agentLiveness below).
 const runningAgentToolIds = new Set();
 let currentState = 'idle'; // mirrors the last value passed to setState() - renderStateIcon()/the agentLiveness callback below both need it, and the latter fires on its own timer, independent of setState
 let agentLiveCount = 0; // count from agentLiveness's onChange - >0 means some subagent is still believed alive, regardless of what the main turn is doing
@@ -2513,11 +2360,8 @@ function renderStateIcon() {
 function startSpinner() {
   if (spinTimer) return; // already running - renderStateIcon can be called repeatedly for the same state
   // Deliberately ignores prefers-reduced-motion: this one small icon is the
-  // cockpit's only "something is happening" signal, and its owner has
-  // decided the spinner beats a steady color even with reduced-motion on
-  // system-wide (their OS/browser-wide setting is left untouched - this is
-  // a single-purpose, single-user override, not a statement that motion
-  // preferences don't matter generally).
+  // cockpit's only "something is happening" signal, and the spinner beats
+  // a steady color even with reduced-motion on system-wide.
   spinTimer = setInterval(() => {
     spinFrame = (spinFrame + 1) % SPINNER_FRAMES.length;
     // Re-derived every tick (not fixed at start time) so a mode change
@@ -2569,13 +2413,10 @@ function setState(state) {
 }
 
 // Heuristic source for the prompt-suggestion ghost text: the last assistant
-// reply's first open checklist item (`- [ ] ...`), if it wrote one - mirrors
-// how the DeepSeek/Claude Code screenshot this was modeled on showed a
-// "Your move:" list and suggested its first item. Reads the DOM, same as
-// copyLastBtn above and for the same reason (stream-view.js keeps no
-// separate client-side message array - the DOM is the one place already
-// correct across every ingestion path). No open checkbox in the reply ->
-// null -> compose.js just falls back to its default placeholder text.
+// reply's first open checklist item (`- [ ] ...`), if it wrote one. Reads
+// the DOM, same as copyLastBtn above and for the same reason (stream-view.js
+// keeps no separate client-side message array). No open checkbox in the
+// reply -> null -> compose.js falls back to its default placeholder text.
 function computePromptSuggestion() {
   const replies = streamEl.querySelectorAll('.msg.assistant:not(.delegated-reply) .body');
   const last = replies[replies.length - 1];

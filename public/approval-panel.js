@@ -1,9 +1,7 @@
 // Approval banner (plain tool-call allow/deny, ExitPlanMode's plan review,
 // and AskUserQuestion's pill-form) - the one gate every tool call routes
-// through (session.js's canUseTool). Owns the queue/pending-request state
-// that used to be scattered module-level `let`s in app.js; nothing outside
-// this module reads them (confirmed - see the 2026-08-26 review's app.js
-// finding on this chunk having outgrown "wiring").
+// through (session.js's canUseTool). Owns all queue/pending-request state;
+// nothing outside this module should read it directly.
 export function initApprovalPanel({
   approvalBanner,
   approvalPlain,
@@ -49,14 +47,9 @@ export function initApprovalPanel({
   function renderBanner(request) {
     pendingApprovalRequestId = request.requestId;
 
-    // Belt-and-suspenders re-measure right before the banner actually needs
-    // the offset to be right, instead of only trusting whatever earlier
-    // lifecycle event (session connect, resize, drag) last computed it. The
-    // connect()-time call this used to rely on exclusively measures
-    // #detailPane while #streamWrap may still be display:none mid-setup
-    // (see detail-pane.js's syncOffset comment) - that's now patched at the
-    // one call site we found, but a banner is worth getting right every time
-    // it appears, not just when every upstream timing assumption holds.
+    // Re-measure right before the banner needs the offset, rather than
+    // trusting an earlier lifecycle event (connect/resize/drag): #streamWrap
+    // may still be display:none when those fire, so its offset can be stale.
     detailPane.syncOffset();
 
     if (request.toolName === 'AskUserQuestion' && Array.isArray(request.input?.questions)) {
@@ -101,13 +94,11 @@ export function initApprovalPanel({
     updateApprovalQueueCount();
   }
 
-  // Builds the AskUserQuestion form: one block per question (pill-style
-  // options, single-select or multi-select per `q.multiSelect`, plus a free-
-  // text "Other" fallback per the tool's own description - "Users will
-  // always be able to select 'Other' to provide custom text input"), and one
-  // Submit for the whole set. `answers` must be keyed by the *exact* question
-  // text (confirmed against the tool's own schema/checkPermissions handler -
-  // see the investigation that found this) - not an index, not the header.
+  // Builds the AskUserQuestion form: one block per question (pill options,
+  // single/multi-select per `q.multiSelect`, plus a free-text "Other"
+  // fallback), and one Submit for the whole set. `answers` must be keyed by
+  // the *exact* question text - not an index, not the header - since that's
+  // what the tool's schema expects back.
   function renderQuestionForm(request) {
     questionForm.innerHTML = '';
     const questions = request.input.questions || [];
@@ -201,17 +192,11 @@ export function initApprovalPanel({
     questionForm.append(actions);
   }
 
-  // One-off per action - the terminal's own "proceed? y/n", not a mode
-  // change. Every gated tool call routes here now (session.js's
-  // canUseTool), not just ExitPlanMode. `updatedInput` is what
-  // AskUserQuestion's answer actually rides back on (see
-  // renderQuestionForm) - every other caller omits it, same as before.
-  // `alwaysAllow` only ever comes from approveBtn's own click
-  // below - session.js strips it back off before handing the decision to the
-  // SDK, it's cockpit-only bookkeeping (remembers the tool name for the rest
-  // of this session, nothing persisted to disk). `message` is the plan
-  // review "request changes" reason below; server.js falls back to its own
-  // default when this is undefined, same as it always has for a plain deny.
+  // One-off per action, not a mode change. `updatedInput` carries
+  // AskUserQuestion's answers (see renderQuestionForm); other callers omit
+  // it. `alwaysAllow` is cockpit-only bookkeeping, stripped by session.js
+  // before the SDK sees it. `message` carries the plan review's "request
+  // changes" reason; server.js defaults it when omitted.
   async function sendDecision(decision, updatedInput, alwaysAllow, message) {
     if (!pendingApprovalRequestId) return;
     await postDecision({ requestId: pendingApprovalRequestId, decision, updatedInput, alwaysAllow, message });

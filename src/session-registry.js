@@ -1,21 +1,8 @@
-// Cockpit-id-keyed session table. Cockpit id is the primary key everywhere
-// (registry row, ws route, token); Claude's own session id is a mutable
-// attribute refreshed as messages arrive (see plan Decisions).
-//
-// Settings-store boundary (three stores exist; this is one of them): a registry row is
-// the live, in-memory mirror of one running session's SDK-reported state
-// (model, mode, thinking budget, auto-continue, usage, etc). Purely
-// ephemeral - nothing here ever touches disk, and the whole row is gone the
-// moment the session closes or the process restarts. That's deliberate: a
-// row's job is to reflect what the SDK connection is doing *right now*, not
-// to remember anything. The other two stores: public/settings.js
-// (localStorage) holds per-browser UI preferences that never leave the
-// client; session-defaults.js + plugin-settings.js (both under one cwd's
-// `.claude/settings.local.json`) hold per-project preferences that survive
-// a restart and are shared across every tab/browser pointed at that cwd.
-// server.js is what bridges this row to that persisted store (see
-// seedSessionDefaults() and the 'thinking'/'auto-continue' routes there) -
-// this module itself stays filesystem-free.
+// Cockpit-id-keyed session table (Claude's own session id is a mutable
+// attribute refreshed as messages arrive). A row is the live, in-memory
+// mirror of one session's SDK-reported state - purely ephemeral, gone the
+// moment the session closes, unlike localStorage or the per-project
+// settings.local.json stores server.js bridges it to. Stays filesystem-free.
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import path from 'node:path';
 import { countWithinTokenBudget, countRealUserTurns, INITIAL_HISTORY_TOKEN_BUDGET } from './session-history.js';
@@ -26,13 +13,11 @@ import { getProvider, parseProvider } from './provider-registry.js';
 import { createDelegation } from './delegation.js';
 const sessions = new Map();
 
-// Cross-session delegation (handshake trust + `/ask`) lives in delegation.js
-// now - see that module's own comment for why it takes these as constructor
-// params instead of importing this module back (would be a cycle).
-// pushTurn/broadcast/broadcastSummary/findByName are function DECLARATIONS
-// further down this file - fully hoisted before any top-level statement
-// (this one included) runs, so referencing them here is safe regardless of
-// textual order.
+// Cross-session delegation (handshake trust + `/ask`) lives in delegation.js,
+// which takes these as constructor params instead of importing this module
+// back (would be a cycle). pushTurn/broadcast/broadcastSummary/findByName
+// are hoisted function declarations, so referencing them here before their
+// textual definition is safe.
 const delegation = createDelegation({ sessions, pushTurn, broadcast, broadcastSummary, findByName });
 export const getHandshakeSecret = delegation.getHandshakeSecret;
 export const regenerateHandshakeSecret = delegation.regenerateHandshakeSecret;
@@ -41,14 +26,11 @@ export const isSessionTrusted = delegation.isSessionTrusted;
 export const delegateTask = delegation.delegateTask;
 
 export function createSession({ cwd, resume, name, model, permissionMode, history, provider, effort, startSessionImpl }) {
-  // Authoritative uniqueness check for delegation names - this function has no `await`
-  // before it and none until sessions.set() further down, so this closes
-  // the TOCTOU window server.js's own pre-check has on its own (that check
-  // runs after awaiting the resume-history fetch, so two concurrent
-  // POST /api/sessions for the same name can both pass it before either
-  // has actually created a row - confirmed in review). `err.code` lets
-  // server.js tell this apart from any other createSession failure and
-  // answer 409 instead of 500.
+  // Authoritative uniqueness check for delegation names - this function has
+  // no `await` before it and none until sessions.set() below, closing the
+  // TOCTOU window server.js's own pre-check has (that check runs after
+  // awaiting the resume-history fetch, so two concurrent creates for the
+  // same name could both pass it). `err.code` lets server.js answer 409.
   if (name && findByName(cwd, name)) {
     const err = new Error(`a session named "${name}" already exists in this project`);
     err.code = 'ERR_NAME_TAKEN';
@@ -77,31 +59,23 @@ export function createSession({ cwd, resume, name, model, permissionMode, histor
     state: 'starting', // starting | idle | running | error | closed
     mode: permissionMode || 'default',
     // Native conversation id reported by the active provider. toSummary()
-    // below derives the legacy claudeSessionId wire field from this plus
-    // row.provider instead of this row keeping a second copy in lockstep -
-    // a Grok/Codex row used to get a `claudeSessionId` too (just a copy of
-    // its own, non-Claude, id), which was actively misleading given the
-    // field's name.
+    // derives the legacy claudeSessionId wire field from this plus
+    // row.provider rather than keeping a second copy in lockstep, so a
+    // Grok/Codex row doesn't claim a misleadingly-named "claudeSessionId".
     providerSessionId: resume || null,
     // See delegation.js's own handshakeSecret comment - stamped with
     // the CURRENT canonical value at creation, so a locally-spawned row is
     // trusted for delegation from the moment it exists.
     handshakeSecret: delegation.getHandshakeSecret(),
-    // `enableFileCheckpointing` can't be turned on retroactively (plan
-    // Decisions), so it only actually covers this session's history if the
-    // cockpit started it fresh. Any resumed session - whether it was last
-    // run in a terminal or in a prior cockpit process - has no snapshots
-    // for its earlier turns, so file rewind must be off rather than
-    // attempted and failed (see rewind() below, which checks this flag).
+    // `enableFileCheckpointing` can't be turned on retroactively, so it
+    // only covers this session's history if the cockpit started it fresh.
+    // Any resumed session has no snapshots for earlier turns, so file
+    // rewind must be off rather than attempted and failed.
     hasFileCheckpointing: providerDescriptor.capabilities.fileRewind && !resume,
-    // `history` is null here in exactly two cases: no resume was requested
-    // (fine, turnIndexOffset is genuinely 0), or a resume WAS requested and
-    // fetchSessionHistory threw (server.js's `.catch(() => null)`) - the
-    // dangerous case, where offset silently defaults to 0 and every rewind
-    // on this session would target the wrong turn with no error surfaced.
-    // Distinguishing an actually-empty transcript (fetch succeeded, `[]`)
-    // from a failed fetch (`null`) is exactly what lets this only trip on
-    // the second case. rewind() below refuses to run rather than mistarget.
+    // `history` is null both for no resume (offset genuinely 0) and for a
+    // resume whose fetchSessionHistory threw - distinguishing that from an
+    // actually-empty transcript (`[]`) lets rewind() below refuse to run
+    // instead of targeting the wrong turn.
     turnIndexUnreliable: Boolean(resume) && !history,
     createdAt: Date.now(),
     clients: new Set(),
@@ -112,11 +86,9 @@ export function createSession({ cwd, resume, name, model, permissionMode, histor
     eventLog: createEventLog(),
     historyTotal: history ? history.length : 0,
     historyShownCount, // fixed at creation - distinct from the event log, which keeps growing with live traffic
-    // Unresolved approval requests in arrival order. Last-write-wins on a
-    // single field dropped the earlier banner (and stranded that tool call)
-    // whenever two gated tools waited at once - parallel tool_use in one
-    // turn, or Codex/Grok overlapping permission prompts. A reconnecting
-    // client is replayed the whole list, not only the latest.
+    // Unresolved approval requests in arrival order - a single field would
+    // drop the earlier banner (and strand that tool call) whenever two
+    // gated tools wait at once. A reconnecting client replays the whole list.
     pendingApprovals: [],
     // Live stats: cost/token totals accumulate from every assistant
     // message's `usage` (usage.js), no 1-turn lag. `contextUsage` is
@@ -139,57 +111,27 @@ export function createSession({ cwd, resume, name, model, permissionMode, histor
     // Purely reconstructed from watching the message stream - there's no SDK
     // query for "give me the current tasks" independent of a tool call.
     tasks: new Map(),
-    // tool_use id -> { kind: 'create'|'update'|'list', input } for a Task*
-    // call whose result hasn't arrived yet - applyTaskOp needs the ORIGINAL
-    // input (TaskUpdateOutput only reports which field names changed, not
-    // their new values) matched against the tool_result that confirms it
-    // actually succeeded. Entries are deleted as soon as their result lands;
-    // a call that never gets one (error mid-flight, session closes) just
-    // lingers harmlessly for the row's lifetime.
+    // tool_use id -> { kind, input } for a Task* call whose result hasn't
+    // arrived yet - applyTaskOp needs the ORIGINAL input (TaskUpdateOutput
+    // only reports which field names changed, not their new values) matched
+    // against the tool_result that confirms it succeeded. A call that never
+    // gets a result just lingers harmlessly for the row's lifetime.
     pendingTaskOps: new Map(),
-    // Visible input queue - full snapshot from session.js's
-    // onQueueChange, same shape session.js's listQueue() returns:
-    // [{id, text}], ordered. Empty on grok sessions (stubbed - see
-    // grok-session.js). Not persisted/resumed across a reconnect for the
-    // same reason `tasks`/`pendingTaskOps` above aren't seeded from
-    // `history` either - a queue only ever holds turns pushed THIS process
-    // lifetime, there is nothing about it in a resumed transcript.
+    // Visible input queue, kept live by session.js's onQueueChange: [{id,
+    // text}], ordered. Not seeded from `history` on resume, same as `tasks`
+    // above - a queue only ever holds turns pushed this process's lifetime.
     queue: [],
-    // Cross-session delegation state does NOT live on the row. Both the
-    // in-flight turn ORDER and the per-turn delegation `tag` are owned by
-    // the handle's result-epoch tracker (`row.handle.turns`, see
-    // result-epoch.js) - this module reads them off it and keeps no copy.
-    //
-    // That is deliberate and hard-won: this row used to carry its own
-    // ordered `pendingResultTags` array that every call site had to mirror
-    // by hand onto the provider's real queue, and every time the two copies
-    // drifted, a delegated reply got relayed to the wrong origin session.
-    // result-epoch.js's module comment lists the three production bugs that
-    // produced. `tag` itself is `null` for an ordinary human/auto-continue
-    // turn, or `{ fromId, fromName, task, buffer }` for a turn pushed by
-    // delegateTask() on behalf of another session; it is keyed by the
-    // `queueId` every provider's pushInput mints on success (Claude, Grok,
-    // Codex), never by position.
+    // Cross-session delegation state does NOT live on the row - turn order
+    // and per-turn `tag` are owned by the handle's result-epoch tracker
+    // (fixing a prior hand-mirrored copy that drifted and misrouted
+    // replies). `tag` is `null` or `{ fromId, fromName, task, buffer }`,
+    // keyed by queueId.
   };
-  // Resumed sessions never replay their history through handleMessage - the
-  // tail-append loop below just seeds the event log directly for display, no
-  // per-message processing - so without this, two things silently reset on
-  // every resume: row.tasks would stay empty (any TaskCreate/TaskUpdate/
-  // TaskList from before this attach invisible to the task panel, B10), and
-  // row.usageAcc/each message's _usageInfo would stay empty (the header's
-  // running cost total and every historical bar in turn-chart.js's cost
-  // graph missing until the first new live turn). Walks the FULL history,
-  // not just `tail`: a task or cost figure from outside the display budget
-  // should still count even though its originating message has scrolled out
-  // of view. Runs BEFORE the tail-append loop below, same order live
-  // messages get processed in (handleMessage stamps _usageInfo before its
-  // own appendEvent call) - `tail`'s messages are the same object references
-  // as `history`'s tail slice, so appendEvent's byte-size estimate below
-  // ends up counting the stamped _usageInfo like a live message's would,
-  // not silently under-counting it. Order also matters within this loop
-  // itself - deriveTaskUpdate matches a TaskUpdate's tool_result against the
-  // tool_use that came before it - so this must run over `history` in its
-  // original order, same as the live stream would have seen it.
+  // Resumed sessions never replay history through handleMessage - the
+  // tail-append loop below just seeds the event log - so without this,
+  // row.tasks/usageAcc stay empty until the first live turn. Walks the
+  // FULL history (an out-of-budget figure should still count) and in
+  // original order, since deriveTaskUpdate matches results against inputs.
   if (history) {
     for (const message of history) {
       applyAssistantUsage(row, message);
@@ -219,13 +161,10 @@ export function createSession({ cwd, resume, name, model, permissionMode, histor
       row.queue = queue;
       broadcastQueue(id);
     },
-    // MCP "needs-auth" badge - no row field to keep in sync,
-    // same as toggleMcpServer/reconnectMcpServer below: session.js's
-    // getMcpAuthPending() is the only source of truth, this just tells any
-    // open MCP panel to re-fetch it (mcp-panel.js is poll-on-open/refresh-
-    // button only otherwise - see its own module comment - so without this
-    // push a panel left open through an auth flow would sit on a stale
-    // "needs-auth" badge with no link until the user thought to hit refresh).
+    // MCP "needs-auth" badge - no row field to keep in sync; session.js's
+    // getMcpAuthPending() is the source of truth, this just tells any open
+    // MCP panel to re-fetch it (otherwise poll-on-open/refresh-button only,
+    // so a panel left open through an auth flow would show a stale badge).
     onMcpAuthRequest: () => broadcastMcpAuth(id),
     onMcpAuthResolved: () => broadcastMcpAuth(id),
   });
@@ -237,15 +176,10 @@ export function get(id) {
   return sessions.get(id);
 }
 
-// Cross-session delegation: name -> row lookup, scoped to one cwd
-// (fast, unambiguous path for the common single-project case; also what
-// session creation/rename use to enforce name uniqueness, so two unrelated
-// projects can each have their own "Claude" without colliding). Names are
-// case-insensitive. cwd is path-canonicalized (resolve + Windows
-// drive-letter case) so `D:\foo` vs `d:\foo` vs a trailing slash still
-// match - that was a silent miss, not a safety rail.
-// Empty/whitespace names never match anything, since an unnamed row's
-// `name` is `null`.
+// Cross-session delegation: name -> row lookup, scoped to one cwd so two
+// unrelated projects can each have their own "Claude". Case-insensitive;
+// cwd is path-canonicalized (resolve + Windows drive-letter case) so
+// `D:\foo` vs `d:\foo` still match. Empty names never match.
 function canonCwd(cwd) {
   if (typeof cwd !== 'string' || !cwd) return cwd;
   let resolved;
@@ -268,40 +202,26 @@ export function findByName(cwd, name) {
   return null;
 }
 
-// Cross-session delegation: the ONE place that pushes a turn into a
-// row's handle - every call site (sendInput, delegateTask, a relayed result
-// landing back on its origin, scheduleAutoContinue's synthetic 'Continue')
-// goes through this. `tag` is null for a non-delegated turn; a tagged turn
-// registers its tag against the queueId the handle's own turn tracker
-// already minted for it, so there is exactly one record of this turn's
-// identity (see result-epoch.js). Untagged turns register nothing at all -
-// the tracker's ordering already accounts for them, which is the whole
-// reason a plain human message interleaved with a delegation can no longer
-// desync the relay.
-// Turns still awaiting a `result` on this row. `?? 0` covers a handle
-// without a turn tracker at all (older test doubles, and any future row
-// type that isn't backed by a local CLI - see delegation.js's module
-// comment on MVP6) rather than throwing from a summary broadcast.
+// Cross-session delegation: the ONE place that pushes a turn into a row's
+// handle. `tag` is null for a non-delegated turn; a tagged turn registers
+// against the queueId the turn tracker mints for it (result-epoch.js), so
+// an interleaved human message can't desync the relay. `?? 0` covers a
+// handle without a turn tracker rather than throwing on a summary broadcast.
 function pendingTurnsCount(row) {
   return row.handle?.turns?.pendingCount ?? 0;
 }
 
 function pushTurn(row, text, tag = null) {
   const queueId = row.handle.pushInput(text);
-  // `null` means pushInput did NOT enqueue anything: the target queue was
-  // already closed, or (grok only) this exact prompt was already pending.
-  // No result will ever come for a turn that was never actually pushed, so
-  // registering a tag for it here would strand its origin forever waiting
-  // on a reply (the 2026-08-24 review's finding #2). Best-effort drop
-  // instead, same as relayDelegationResult already does when its own origin
-  // lookup misses.
+  // `null` means pushInput did NOT enqueue anything (queue already closed,
+  // or a grok duplicate-prompt guard). No result will ever come for a turn
+  // that wasn't pushed, so registering a tag here would strand its origin
+  // waiting forever - best-effort drop instead.
   if (queueId === null) return null;
   if (tag) row.handle.turns?.setTag(queueId, tag);
-  // Returned so relayDelegationResult can correlate this turn's own echoed
-  // 'user' message (which session.js stamps with this same queueId, see its
-  // pushInput comment) with a later, separate cockpit:delegate-full-trace
-  // marker - see that function for why the two can't just be sent as one
-  // message. Every other caller here ignores the return value, unaffected.
+  // Returned so relayDelegationResult can correlate this turn's echoed
+  // 'user' message (stamped with this queueId) with a later, separate
+  // cockpit:delegate-full-trace marker. Other callers ignore the return.
   return queueId;
 }
 
@@ -312,16 +232,11 @@ export function closeSession(id) {
   const row = sessions.get(id);
   if (!row) return false;
   clearAutoContinueTimer(row);
-  // For a delegated turn: session.js's close() only interrupts the current turn and closes
-  // the input queue - the interrupted turn's own `result` still arrives
-  // asynchronously later, per its own comment - but sessions.delete(id)
-  // below happens synchronously right now, so by the time that late
-  // `result` reaches handleMessage, `sessions.get(id)` finds nothing and
-  // bails before ever reaching the tag-claim/relay below. Without
-  // this, a session closed while it's the target of a delegation strands
-  // the origin(s) forever with no error (confirmed in review - unlike a
-  // crash, which handleError already covers). Fail them explicitly here,
-  // before the row disappears.
+  // session.js's close() only interrupts the current turn; its `result`
+  // still arrives asynchronously, but sessions.delete(id) below runs
+  // synchronously, so handleMessage would find nothing and skip the
+  // tag-claim/relay - stranding a delegation origin forever if not failed
+  // explicitly here first.
   delegation.failPendingDelegations(row, 'the target session was closed before it replied');
   row.handle.close();
   sessions.delete(id);
@@ -338,16 +253,10 @@ export function list() {
   return [...sessions.values()].map(toSummary);
 }
 
-// Debug capture (backlog: "spinner spins, nothing running" reports with no
-// live state to catch when it happens). Combines this row's own bookkeeping
-// with the handle's internal debugSnapshot() (session.js/grok-session.js) -
-// the latter is what actually explains a stuck spinner: row.state is just
-// the last value onStateChange reported, but pendingTurns is the counter
-// that value is computed FROM, so a report with pendingTurns > 0 and no
-// visible activity points at a real turn-accounting bug, while
-// pendingTurns === 0 with state still 'running' points at a dropped/
-// out-of-order state broadcast instead - two different bugs that look
-// identical from the browser alone.
+// Debug capture for "spinner spins, nothing running" reports: pendingTurns
+// > 0 with no activity points at a turn-accounting bug, while
+// pendingTurns === 0 with state still 'running' points at a dropped state
+// broadcast instead - two bugs indistinguishable from the browser alone.
 export function getDebugInfo(id) {
   const row = sessions.get(id);
   if (!row) return null;
@@ -368,13 +277,11 @@ export function getDebugInfo(id) {
   };
 }
 
-// Visibility-only introspection for GET /api/system/memory (see
-// routes/system.js) - reports what each row's unbounded-looking collections
-// actually hold right now. Nothing here enforces a cap; eventLog is the one
-// collection that already is byte-capped (event-log.js), included so its
-// current usage against that cap is visible next to everything else instead
-// of only being knowable by reading the source. Read-only: never mutates a
-// row, so it's safe to poll from the dashboard on an interval.
+// Visibility-only introspection for GET /api/system/memory - reports what
+// each row's unbounded-looking collections actually hold. Nothing here
+// enforces a cap; eventLog is the one collection that's already byte-capped
+// (event-log.js), included so its usage against that cap is visible.
+// Read-only, so safe to poll from the dashboard on an interval.
 export function memorySnapshot() {
   const rows = [...sessions.values()].map((row) => ({
     id: row.id,
@@ -407,12 +314,10 @@ export function toSummary(row) {
     mode: row.mode,
     provider: row.provider,
     providerSessionId: row.providerSessionId,
-    // Backward-compatible response field for existing browser tabs (still
-    // read by public/detail-pane.js and agent-liveness.js, which fetch a
-    // subagent transcript from ~/.claude/projects - a genuinely Claude-only
-    // path). Derived here rather than stored on the row, and only for an
-    // actual Claude session, so a Grok/Codex row no longer claims a
-    // "claudeSessionId" that's really its own provider's id.
+    // Backward-compatible field for detail-pane.js/agent-liveness.js, which
+    // fetch a subagent transcript from ~/.claude/projects - Claude-only.
+    // Derived here, only for an actual Claude session, so a Grok/Codex row
+    // doesn't claim a "claudeSessionId" that's really its own provider's id.
     claudeSessionId: row.provider === 'claude' ? row.providerSessionId : null,
     hasFileCheckpointing: row.hasFileCheckpointing,
     turnIndexUnreliable: row.turnIndexUnreliable,
@@ -425,19 +330,14 @@ export function toSummary(row) {
     effort: row.effort || null,
     autoContinue: row.autoContinue,
     rateLimitHit: row.rateLimitHit,
-    // See handshakeSecret's module-level comment - whether this row is
-    // currently allowed to send/receive a delegated task. The raw secret
-    // value itself is NOT included here (only the server's own canonical
-    // copy is meant to be copied around, via the /api/handshake route).
+    // Whether this row is currently allowed to send/receive a delegated
+    // task. The raw secret value itself is NOT included (only the server's
+    // canonical copy is meant to be copied around, via /api/handshake).
     handshakeTrusted: delegation.isSessionTrusted(row),
-    // Turns cockpit still considers "in flight" for this row - read straight
-    // off the handle's turn tracker (result-epoch.js), which is also what
-    // session.js/grok-session.js/codex-session.js's own pendingTurns
-    // counters move in step with. Surfaced here so app.js can show it next
-    // to the spinner without polling the debug endpoint. A number here that
-    // never comes back to 0 despite nothing actually running is exactly the
-    // drift getDebugInfo's own comment describes - see forceIdle below for
-    // the manual recovery.
+    // Turns cockpit still considers "in flight", read off the handle's
+    // turn tracker (result-epoch.js). Surfaced so app.js can show it next
+    // to the spinner without polling the debug endpoint - see forceIdle
+    // below for manual recovery if this drifts and never returns to 0.
     pendingTurnsCount: pendingTurnsCount(row),
     capabilities: {
       ...provider.capabilities,
@@ -461,13 +361,11 @@ export function checkToken(id, token) {
   return timingSafeEqual(expected, actual);
 }
 
-// `sinceSeq` comes from the client's last-seen event seq (server.js reads
-// it off the ws upgrade URL's `since` param). Omitted/0 on a first-ever
-// attach - full replay, same as before reconnect support existed. A
-// returning client that still holds its rendered DOM sends its real last
-// seq and gets only the delta;
-// one that has evicted past what the log still holds gets `gap: true` and
-// a full resend instead of a replay with a hole in it (event-log.js).
+// `sinceSeq` comes from the client's last-seen event seq. Omitted/0 on a
+// first-ever attach means a full replay. A returning client that still
+// holds its rendered DOM gets only the delta; one that has evicted past
+// what the log still holds gets `gap: true` and a full resend instead of a
+// replay with a hole in it (event-log.js).
 export function attachClient(id, ws, sinceSeq = 0) {
   const row = sessions.get(id);
   if (!row) return false;
@@ -502,14 +400,10 @@ export async function sendInput(id, text) {
 }
 
 // Shared shape behind every route below that calls straight through to the
-// live SDK handle: look up the row (or throw the same "unknown session"
-// every other registry function throws), run `action` against it, merge
-// `patch` onto the row to keep it in sync (omit it for the read-only
-// passthroughs - toggleMcpServer/reconnectMcpServer have no row field to
-// keep in sync), then broadcast so every connected tab sees the change.
-// Used to be copy-pasted per route (setPermissionMode/setModel/
-// setMaxThinkingTokens each hand-rolled this), which meant
-// a 4th/5th route repeating it by hand instead of just calling this.
+// live SDK handle: look up the row, run `action`, merge `patch` onto the
+// row to keep it in sync (omit it for read-only passthroughs like
+// toggleMcpServer, which have no row field to sync), then broadcast so
+// every connected tab sees the change.
 async function queryPassthrough(id, action, patch) {
   const row = sessions.get(id);
   if (!row) throw new Error(`unknown session: ${id}`);
@@ -522,21 +416,11 @@ export async function setPermissionMode(id, mode) {
   return queryPassthrough(id, (row) => row.handle.setMode(mode), { mode });
 }
 
-// Cancels whatever turn(s) are currently running, same session/no row-field
-// shape as setPermissionMode above minus the patch - session.js's interrupt()
-// doesn't change any row-visible state itself; the idle/running flip rides
-// in on the interrupted turn's own `result` message the same way a normal
-// completion does, broadcast separately by the row's existing message
-// handling, not by this call.
-//
-// session.js's interrupt() (the client's Stop button) also drains its own
-// local input queue now, not just the in-flight turn - "stop" means stop
-// everything. It does that synchronously, before this call even returns, and
-// drops those turns from the turn tracker's ordering as it goes. What it
-// can't do is notify a delegation origin that its task was cancelled (the
-// provider layer knows nothing about delegation), so snapshot which ids are
-// about to be dropped first and fail their tags right alongside - same
-// treatment removeQueued() above gives a single manual removal.
+// Cancels whatever turn(s) are running; no row-field patch, since the
+// idle/running flip rides in on the interrupted turn's own `result`.
+// session.js's interrupt() also drains the local input queue, but can't
+// notify a delegation origin (the provider layer knows nothing about
+// delegation) - so snapshot the about-to-be-dropped ids and fail their tags.
 export async function interruptTurn(id) {
   return queryPassthrough(id, async (row) => {
     const queuedIds = row.handle.listQueue().map((e) => e.id);
@@ -545,17 +429,10 @@ export async function interruptTurn(id) {
   });
 }
 
-// Manual last-resort recovery for the "pendingTurnsCount never reaches 0"
-// drift (see that field's own comment on toSummary) - the click-through for
-// the badge next to the spinner (app.js) that lets a human assert "nothing
-// is actually running, stop waiting for a result that isn't coming".
-// Doesn't route through queryPassthrough: this has to fail this row's own
-// stuck delegations too (same as closeSession/handleError do, via
-// failPendingDelegations), which queryPassthrough's single-action shape
-// doesn't have room for, and forceIdle's own onStateChange already
-// broadcasts the state flip - a second broadcastSummary here just also
-// covers the pendingTurnsCount reset for any tab that already rendered the
-// stale count before this ran.
+// Manual last-resort recovery for "pendingTurnsCount never reaches 0" -
+// asserts "stop waiting for a result that isn't coming". Not routed through
+// queryPassthrough: this also has to fail stuck delegations (same as
+// closeSession/handleError), which its single-action shape has no room for.
 export async function forceIdle(id) {
   const row = sessions.get(id);
   if (!row) throw new Error(`unknown session: ${id}`);
@@ -571,16 +448,11 @@ export async function setModel(id, model) {
   return queryPassthrough(id, (row) => row.handle.query.setModel(model), { model: model || null });
 }
 
-// Same shape as setModel above, except the "one query() method" is a no-op:
-// row.name is purely cockpit-side bookkeeping (session-titles.js persists
-// the durable copy; server.js's rename route calls both), the SDK has
-// nothing analogous to tell. NOT routed through queryPassthrough (unlike
-// every sibling here) - the delegation-name uniqueness check needs to run synchronously
-// right next to the mutation it's guarding, with zero `await` in between,
-// the same reasoning as createSession's own check above. queryPassthrough's
-// `await action(row)` - even against a no-op async function - is enough of
-// a yield point that two concurrent renames to the same name could both
-// pass a check performed before it.
+// row.name is purely cockpit-side bookkeeping - the SDK has nothing
+// analogous to tell. NOT routed through queryPassthrough: the uniqueness
+// check needs zero `await` between it and the mutation it guards (same
+// reasoning as createSession's check) - queryPassthrough's own `await` is
+// enough of a yield point for two concurrent renames to both pass it.
 export async function setSessionName(id, name) {
   const row = sessions.get(id);
   if (!row) throw new Error(`unknown session: ${id}`);
@@ -613,13 +485,11 @@ export async function setEffort(id, effort) {
   return queryPassthrough(id, (row) => row.handle.query.setEffort(effort), { effort });
 }
 
-// Desktop's "auto-continue" checkbox (see handleMessage's rate_limit_event
-// branch): when on and this session is currently sitting on a rejected
+// Auto-continue checkbox: when turned on while sitting on a rejected
 // rate-limit, arms the resume timer immediately rather than waiting for the
-// next rate_limit_event to flip it on - turning the box on *after* you've
-// already hit the wall shouldn't require another rejected turn to notice.
-// Turning it off just disarms whatever timer is pending; rateLimitHit
-// itself is left alone since the limit is still actually blocking.
+// next rate_limit_event - turning it on after hitting the wall shouldn't
+// need another rejected turn to notice. Turning it off just disarms the
+// pending timer; rateLimitHit is left alone since the limit still blocks.
 export async function setAutoContinue(id, enabled) {
   const row = sessions.get(id);
   if (!row) throw new Error(`unknown session: ${id}`);
@@ -663,12 +533,10 @@ export async function loadEarlierHistory(id, fetchHistoryImpl) {
   return earlier;
 }
 
-// Fork the conversation at `userMessageId` and open the fork as a new,
-// independent cockpit session (non-destructive - the original keeps
-// running). Optionally reverts files on the *original* session first
-// (forkSession() for the conversation, rewindFiles() for the files). Skips
-// the file half when the row has no checkpointing rather
-// than letting it fail.
+// Fork the conversation at `userMessageId` into a new, independent cockpit
+// session (non-destructive - the original keeps running). Optionally
+// reverts files on the *original* session first; skips the file half when
+// the row has no checkpointing rather than letting it fail.
 export async function rewind(id, turnIndex, { dryRun = false } = {}) {
   const row = sessions.get(id);
   if (!row) throw new Error(`unknown session: ${id}`);
@@ -680,30 +548,20 @@ export async function rewind(id, turnIndex, { dryRun = false } = {}) {
   if (row.turnIndexUnreliable) {
     throw new Error('could not read this session\'s prior transcript when it started, so turn numbering cannot be trusted - rewind is disabled for it. Resuming it again may resolve this.');
   }
-  // How to actually fork a conversation is provider-specific (Claude's SDK
-  // forkSession() vs Grok's own fork-then-truncate ACP calls) and lives on
-  // the descriptor itself (provider-registry.js) rather than branching here
-  // - a provider that sets conversationFork: true without a rewind
-  // implementation is a descriptor bug, not something this function should
-  // silently paper over by falling back to Claude's.
+  // How to fork a conversation is provider-specific and lives on the
+  // descriptor (provider-registry.js) rather than branching here - a
+  // provider claiming conversationFork without a rewind implementation is
+  // a descriptor bug, not something to paper over with Claude's fallback.
   if (typeof provider.rewind !== 'function') {
     throw new Error(`${provider.label} advertises conversation-fork support but has no rewind implementation`);
   }
   return provider.rewind(row, turnIndex, { dryRun });
 }
 
-// Read-only passthrough, same as supportedModels/supportedAgents in
-// server.js - no row field tracks MCP state, so there's nothing to mutate
-// or broadcast here (broadcastMcpAuth below is the exception, fired
-// directly off session.js's onMcpAuthRequest/onMcpAuthResolved instead of
-// from a row mutation, same "push without a row field" shape as
-// toggleMcpServer/reconnectMcpServer). Merges in `authUrl`/`authMessage` for
-// any server session.js's onElicitation caught a URL-mode auth request for -
-// McpServerStatus itself has no such field (name/status/error only), and
-// `status: 'needs-auth'` alone gives the panel nothing to link to. Grok
-// sessions have no getMcpAuthPending (grok-session.js's handle doesn't
-// expose one - grok-extensions.js's mcpServerStatus() stub has no
-// elicitation concept), hence the guard.
+// Read-only passthrough - no row field tracks MCP state. Merges in
+// `authUrl`/`authMessage` for any server session.js caught a URL-mode auth
+// request for, since McpServerStatus alone gives the panel nothing to link
+// to. Grok sessions have no getMcpAuthPending, hence the guard.
 export async function getMcpServerStatus(id) {
   const row = sessions.get(id);
   if (!row) throw new Error(`unknown session: ${id}`);
@@ -716,12 +574,9 @@ export async function getMcpServerStatus(id) {
   });
 }
 
-// Same shape as setPermissionMode/setModel above: call the SDK method,
-// throw on failure (both Query methods already throw), broadcast after so
-// any other tab with the settings modal open knows to re-fetch its own MCP
-// panel. No row field to keep in sync (no `patch` arg) - mcpServerStatus()
-// is the only source of truth and is fetched fresh each time the panel
-// opens.
+// No row field to keep in sync (no `patch` arg) - mcpServerStatus() is the
+// source of truth, fetched fresh each time the panel opens. Broadcasts
+// after so any other tab with the settings modal open re-fetches its panel.
 export async function toggleMcpServer(id, name, enabled) {
   return queryPassthrough(id, (row) => row.handle.query.toggleMcpServer(name, enabled));
 }
@@ -756,26 +611,11 @@ function setState(id, state) {
   if (!row) return;
   row.state = state;
   broadcastSummary(id);
-  // A row whose underlying handle ends on its own - the CLI process exits,
-  // or session.js/grok-session.js's for-await loop throws - previously
-  // lingered in `sessions` forever: only the manual closeSession() route
-  // (the "Close session" button) ever called sessions.delete, so a session
-  // nobody clicked "close" on accumulated for the cockpit process's entire
-  // lifetime (2026-08-26 review, finding #1). Reap it here, once every
-  // connected client has already been told via the broadcastSummary above -
-  // the handle is dead either way, so there's nothing left a manual close
-  // would additionally have done.
-  //
-  // 'error' is deliberately excluded from that reap (2026-09-02 review,
-  // finding #1): every production provider calls onStateChange('error')
-  // immediately followed by onError(err) (session.js/grok-session.js/
-  // codex-session.js), and onError routes to handleError below, which does
-  // its own cleanup - failPendingDelegations, turns.abandonAll(), the
-  // cockpit:error broadcast - before its own sessions.delete. Reaping here
-  // first made handleError's `sessions.get(id)` come back empty, silently
-  // skipping all of that on every real crash. A 'closed' transition has no
-  // such follow-up call (the for-await loop's normal-exit path only ever
-  // calls onStateChange('closed')), so it still reaps here.
+  // A row whose handle ends on its own would otherwise linger forever,
+  // since only closeSession() deletes it - reap here instead. 'error' is
+  // excluded: every provider follows it with onError, which does its own
+  // cleanup and delete - reaping here first would leave handleError's row
+  // lookup empty and silently skip that cleanup.
   if (state === 'closed') sessions.delete(id);
 }
 
@@ -784,15 +624,9 @@ function handleMessage(id, message) {
   if (!row) return;
   if (message.session_id) row.providerSessionId = message.session_id;
   // The CLI can move itself out of the mode it was started/set in (e.g.
-  // accepting a plan exits `plan`) without any setPermissionMode() call
-  // from us - previously only session.js's own private `currentMode`
-  // learned this (via the same 'status' message), leaving `row.mode` and
-  // every client's mode button stale. Concretely: accept a plan, the
-  // button still reads `mode: plan`, and the next Shift+Tab computes its
-  // target off that stale value and lands on `bypassPermissions` instead
-  // of the true next mode. broadcastSummary pushes the correction to every
-  // connected tab, same as setPermissionMode() does for a client-driven
-  // change.
+  // accepting a plan exits `plan`) without a setPermissionMode() call from
+  // us. Without syncing row.mode here, the client's mode button stays
+  // stale and the next Shift+Tab computes its target off the wrong value.
   if (message.type === 'system' && message.subtype === 'status' && message.permissionMode && message.permissionMode !== row.mode) {
     row.mode = message.permissionMode;
     broadcastSummary(id);
@@ -800,12 +634,9 @@ function handleMessage(id, message) {
   const hadModel = !!row.model;
   if (applyAssistantUsage(row, message)) {
     broadcastUsage(id); // cost/tokens only - cheap, no round trip, so this can track every message
-    // A "Default model" launch leaves row.model null until this call resolves
-    // it (see applyAssistantUsage's own comment) - broadcastUsage alone never
-    // reaches the header badge, since applyModelBadge only runs off
-    // cockpit:hello/cockpit:state (applySession), not cockpit:usage. Without
-    // this the badge stayed hidden for the rest of the session unless some
-    // unrelated event (e.g. renaming) happened to trigger a state broadcast.
+    // A "Default model" launch leaves row.model null until this call
+    // resolves it; broadcastUsage alone never reaches the header badge,
+    // since applyModelBadge only runs off cockpit:state, not cockpit:usage.
     if (!hadModel && row.model) broadcastSummary(id);
   }
   delegation.collectDelegationText(row, message); // buffers this turn's assistant text while a matching delegation is pending, see the 'result' branch below
@@ -814,13 +645,11 @@ function handleMessage(id, message) {
   // live stream - factored out so both call sites share one implementation
   // instead of the seed path silently missing whatever this one does.
   if (deriveTaskUpdate(row, message)) broadcastTasks(id);
-  // The hard stop, not the proactive 5h/7d chip (refreshRateLimits above,
-  // which is a poll off the experimental usage API): this is the SDK
-  // pushing rate_limit_event itself the moment a turn is actually rejected
-  // or un-rejected. status 'rejected' is the only one that blocks a turn -
-  // 'allowed'/'allowed_warning' both mean the session is free to run, so
-  // either clears whatever hit was previously recorded (a limit can lift
-  // between one event and the next without us doing anything).
+  // The hard stop, not the proactive 5h/7d chip (a poll off the
+  // experimental usage API): the SDK pushes this the moment a turn is
+  // actually rejected or un-rejected. 'rejected' is the only status that
+  // blocks a turn - the other statuses clear whatever hit was recorded,
+  // since a limit can lift between events without us doing anything.
   if (message.type === 'rate_limit_event' && message.rate_limit_info) {
     const info = message.rate_limit_info;
     if (info.status === 'rejected') {
@@ -837,15 +666,10 @@ function handleMessage(id, message) {
     }
     broadcastSummary(id);
   }
-  // Second, independent source for the same rateLimitHit state: the CLI
-  // also drops a plain-language assistant reply on a session-limit hit
-  // ("You've hit your session limit · resets 2:10am (Europe/Paris)") - and
-  // confirmed against a real hit, that wall-clock text is trustworthy where
-  // rate_limit_event's numeric resetsAt needed a unit fix (see above) to
-  // even agree with it. No model call, no token spend - just a regex over
-  // text already in the message stream. Overwrites rate_limit_event's guess
-  // when both are present; this one wins because it's the one we've
-  // actually verified against ground truth.
+  // Second, independent source for rateLimitHit: the CLI also drops a
+  // plain-language reply on a session-limit hit ("resets 2:10am (Europe/
+  // Paris)"). Overwrites rate_limit_event's guess when both are present,
+  // since this text has been verified against a real hit.
   if (message.type === 'assistant' && message.message && Array.isArray(message.message.content)) {
     for (const block of message.message.content) {
       if (block.type !== 'text' || !block.text) continue;
@@ -860,18 +684,11 @@ function handleMessage(id, message) {
   const seq = appendEvent(row.eventLog, message);
   broadcast(id, { type: 'sdk:message', message, seq });
   if (message.type === 'result') {
-    // Which turn just finished is decided by the handle's own turn tracker,
-    // never by position here: every provider stamps the finishing turn's
-    // `_cockpitQueueId` onto its result message (result-epoch.js's stamp/
-    // applyResultStamp), so the delegation tag is looked up by identity.
-    // That is what makes an interleaved human turn, a queue-pane reorder,
-    // and a late result from a force-idled generation all harmless - see
-    // result-epoch.js's module comment for the three bugs the old
-    // shift()-a-parallel-array approach kept re-introducing.
-    //
-    // `_cockpitStale` means this result belongs to an abandoned generation;
-    // its tag (if it had one) was already failed by failPendingDelegations
-    // at force-idle time, so there is deliberately nothing to claim.
+    // Which turn just finished is decided by the turn tracker, never
+    // position: every provider stamps `_cockpitQueueId` onto its result,
+    // so an interleaved human turn or a late force-idled result stays
+    // harmless. `_cockpitStale` means the tag was already failed at
+    // force-idle time, so there's nothing to claim.
     if (message._cockpitStale !== true) {
       const tag = row.handle.turns?.claimTag(message._cockpitQueueId);
       if (tag) delegation.relayDelegationResult(row, tag, { ok: true, message });
@@ -881,20 +698,10 @@ function handleMessage(id, message) {
   }
 }
 
-// FALLBACK ONLY - the real path is message.tool_use_result (see handleMessage's
-// tool_result branch). This exists in case a future CLI build ever stops
-// attaching tool_use_result and reverts to putting structured data directly in
-// `content`; it was previously (wrongly) read as camelCase toolUseResult - that
-// spelling is only the persisted-JSONL field name, not the live wire one, so it
-// was always undefined and the task panel never worked despite tests passing -
-// the CLI's actual `content` for Task* results is always a human-readable
-// summary string ("Task #1 created successfully: <subject>"), never JSON, so
-// JSON.parse here always threw and applyTaskOp always returned false.
-// Accepts any of the forms seen elsewhere in this codebase for tool results:
-// a plain string, an array of { type: 'text', text } blocks (see
-// stream-view.js's flattenToolResult), or an already-parsed object. Returns
-// null rather than throwing on anything unexpected - same tolerance
-// refreshRateLimits() has for its own experimental API.
+// FALLBACK ONLY - the real path is message.tool_use_result. The CLI's
+// actual `content` for Task* results is a human-readable string, never
+// JSON, so this realistically always returns null; kept for a hypothetical
+// future CLI build that stops attaching tool_use_result.
 function parseToolResultJson(content) {
   try {
     if (typeof content === 'string') return JSON.parse(content);
@@ -909,37 +716,16 @@ function parseToolResultJson(content) {
   return null;
 }
 
-// Accumulates one assistant message's cost/tokens into row.usageAcc (the
-// header stats strip's running total) and stamps message._usageInfo (read by
-// stream-view.js for the inline "$0.0X, N in, M out" label on every block
-// this message rendered, and by turn-chart.js/app.js for that message's bar
-// in the per-turn cost graph). Same B10 shape as deriveTaskUpdate below:
-// shared by handleMessage's live stream and createSession's seedUsage
-// (a resumed session's replayed history never goes through handleMessage),
-// so the seed path can't silently drift from the live path - which is
-// exactly what used to happen here: a resumed session's row.usageAcc and
-// every historical message's _usageInfo started from nothing, so the header
-// total under-reported and the cost graph showed no bars at all until the
-// first new live turn landed.
-//
-// cacheReadTokens/cacheWriteTokens/cacheMiss ride along for the per-turn
-// chart: "cache miss" mirrors claude-realtime-usage's own heuristic
-// (stepCost's caller in live_watcher_template.html) - a turn wrote more
-// cache than it read is one whose prompt cache had expired (or never
-// existed), not necessarily the first turn of a session.
-//
-// Returns whether it actually did anything, so handleMessage's live path
-// only pays for a broadcastUsage on messages that could plausibly have
-// changed the total (seedUsage ignores the return value - it broadcasts once
-// itself, after the whole history is folded in, not per message).
+// Accumulates one assistant message's cost/tokens into row.usageAcc and
+// stamps message._usageInfo, read by stream-view.js's cost label and
+// turn-chart.js's per-turn bar. Shared by the live stream and the
+// history-seed path so a resumed session doesn't start from nothing.
 function applyAssistantUsage(row, message) {
   if (message.type !== 'assistant' || !message.message) return false;
-  // A session started with no explicit model (row.model stays null - see
-  // createSession) never otherwise learns what the SDK/CLI actually picked;
-  // every assistant message already carries the resolved model id (both
-  // providers - see grok-messages.js's assistantMessage), so grab it once
-  // and stop - an explicit /model switch afterward overwrites this via
-  // setModel's own queryPassthrough patch, not this fallback.
+  // A session started with no explicit model never otherwise learns what
+  // the SDK/CLI actually picked; every assistant message carries the
+  // resolved model id, so grab it once. An explicit /model switch later
+  // overwrites this via setModel's own patch, not this fallback.
   if (!row.model && message.message.model) row.model = message.message.model;
   const toolNames = Array.isArray(message.message.content)
     ? message.message.content.filter((b) => b && b.type === 'tool_use').map((b) => b.name)
@@ -947,11 +733,8 @@ function applyAssistantUsage(row, message) {
   row.usageAcc.addAssistantMessage(message.message, toolNames);
   const info = costForUsage(message.message.model, message.message.usage);
   // info is only null when the message has no usage at all - an unpriced
-  // model still carries real token counts (info.cost === null in that
-  // case), so _usageInfo gets set either way now. Previously this whole
-  // block was gated on `info` truthy, which meant an unpriced model (e.g.
-  // Codex before it has a pricing table) never got a _usageInfo at all -
-  // no tokens, no cost graph bar, nothing - not just an understated cost.
+  // model still carries real token counts (info.cost === null), so
+  // _usageInfo gets set either way rather than only when a price exists.
   if (info) {
     message._usageInfo = {
       costUsd: info.cost ?? 0,
@@ -965,22 +748,10 @@ function applyAssistantUsage(row, message) {
   return true;
 }
 
-// Watches one SDK message for Task* tool activity and applies whatever it
-// resolves, returning whether row.tasks actually changed (so callers only
-// broadcast on a real change). Shared by handleMessage's live stream and
-// createSession's seedTaskState (a resumed session's replayed history never
-// goes through handleMessage - see its own comment) - keeping this as the
-// one place that knows how a Task* tool_use/tool_result pair turns into a
-// row.tasks mutation means the seed path can't silently drift from the live
-// path the way it did before this was extracted (that's what caused B10:
-// tasks created before the current browser attach never showed up).
-//
-// Stashes Task* tool_use blocks (row.pendingTaskOps) on the way in so the
-// matching tool_result - a separate 'user' message, arriving after Claude's
-// own turn ends (or, for a replayed history, appearing later in the same
-// array) - can be resolved against the input that actually produced it.
-// TaskGet isn't tracked: it only enriches one task's description, which the
-// panel doesn't show (see task-panel.js).
+// Watches one SDK message for Task* tool activity, returning whether
+// row.tasks changed. Shared by the live stream and history-seed path.
+// Stashes Task* tool_use blocks so the matching tool_result - a separate
+// later 'user' message - resolves against the input that produced it.
 function deriveTaskUpdate(row, message) {
   let changed = false;
   if (message.type === 'assistant' && message.message && Array.isArray(message.message.content)) {
@@ -994,26 +765,18 @@ function deriveTaskUpdate(row, message) {
       }
     }
   }
-  // Resolves whichever Task* call(s) this tool_result belongs to (stashed
-  // above when the tool_use was seen) and applies the resulting task-state
-  // change - see applyTaskOp's own comment for why this reads the ORIGINAL
-  // input rather than the result payload for TaskUpdate specifically.
+  // Resolves whichever Task* call this tool_result belongs to (stashed
+  // above) and applies the resulting task-state change.
   if (message.type === 'user' && message.message && Array.isArray(message.message.content)) {
     for (const block of message.message.content) {
       if (block.type !== 'tool_result') continue;
       const op = row.pendingTaskOps.get(block.tool_use_id);
       if (!op) continue;
       row.pendingTaskOps.delete(block.tool_use_id);
-      // message.tool_use_result carries the CLI's real structured payload
-      // ({task:{id,subject}}, {success,taskId,...}, {tasks:[...]}) - block.content
-      // is always the human-readable summary string it renders for the model
-      // (e.g. "Task #3 created successfully: <subject>"), confirmed by pulling
-      // the literal template strings out of the CLI binary. The live SDK
-      // stream uses snake_case tool_use_result; camelCase toolUseResult is
-      // only the persisted-JSONL field name (kept as a secondary fallback in
-      // case a message ever originates from a transcript read instead of the
-      // live stream). parseToolResultJson(block.content) is the last resort,
-      // for a future CLI build that stops attaching either field.
+      // message.tool_use_result carries the real structured payload;
+      // block.content is the human-readable summary. Live stream uses
+      // snake_case tool_use_result; camelCase toolUseResult is a fallback
+      // for transcript-read messages; parseToolResultJson is the last resort.
       const structured = message.tool_use_result !== undefined ? message.tool_use_result : message.toolUseResult;
       const data = structured !== undefined ? structured : parseToolResultJson(block.content);
       if (applyTaskOp(row, op, block, data)) changed = true;
@@ -1022,21 +785,10 @@ function deriveTaskUpdate(row, message) {
   return changed;
 }
 
-// Applies one resolved Task* call to row.tasks and reports whether anything
-// actually changed (so the caller only broadcasts on a real change, not
-// every tool_result that happens to parse). TaskUpdate reads its new field
-// values from `op.input` - the tool_use block's own input - not from the
-// result: TaskUpdateOutput only reports success + which field *names*
-// changed (updatedFields), never the new values, so the input is the only
-// place they exist. TaskList's result is the one authoritative full
-// resync - it fully replaces row.tasks rather than merging into it, since
-// it's also the only way this reconstruction ever learns a task was
-// deleted (a deleted task simply stops appearing in it).
-//
-// Known gap: `addBlocks` (marking this task as blocking others) only
-// updates the *other* tasks' blockedBy on the next TaskList resync, not
-// immediately - applying it live would mean inventing an entry for a task
-// this row hasn't seen a TaskCreate/TaskList for yet.
+// Applies one resolved Task* call to row.tasks. TaskUpdate reads new field
+// values from `op.input`, since TaskUpdateOutput only reports which names
+// changed, never the values. TaskList fully replaces row.tasks rather than
+// merging, since that's the only way a deletion is ever noticed.
 function grokTodoStatus(status) {
   if (status === 'in_progress' || status === 'completed') return status;
   return 'pending';
@@ -1067,11 +819,9 @@ function applyTaskOp(row, op, resultBlock, data) {
 
   if (op.kind === 'create' && data.task && data.task.id) {
     // A TaskCreate landing while every existing task is already completed
-    // means the previous batch is done and this is the start of a fresh
-    // one (e.g. another round of spawned agents) - drop the stale completed
-    // list instead of letting it accumulate forever across unrelated
-    // batches. A list with any pending/in_progress task is still active and
-    // is left alone even if this new task belongs to a different batch.
+    // means a fresh batch is starting - drop the stale list instead of
+    // accumulating it forever. A list with any pending/in_progress task is
+    // left alone even if this new task belongs to a different batch.
     if (row.tasks.size > 0 && [...row.tasks.values()].every((t) => t.status === 'completed')) {
       row.tasks.clear();
     }
@@ -1130,12 +880,10 @@ function broadcastQueue(id) {
   broadcast(id, queuePayload(row));
 }
 
-// MCP "needs-auth" badge - fired from session.js's
-// onMcpAuthRequest/onMcpAuthResolved (see createSession above). Unlike every
-// other broadcast* here, there's no row field to read a payload off - the
-// merged {authUrl} list only exists behind the async getMcpServerStatus()
-// round trip (session.js's mcpAuthPending Map plus a fresh SDK status call),
-// so this awaits that instead of building a payload from `row` directly.
+// MCP "needs-auth" badge, fired from session.js's onMcpAuthRequest/
+// onMcpAuthResolved. Unlike every other broadcast* here, there's no row
+// field to read a payload off - the merged {authUrl} list only exists
+// behind the async getMcpServerStatus() round trip.
 async function broadcastMcpAuth(id) {
   const row = sessions.get(id);
   if (!row) return;
@@ -1143,24 +891,22 @@ async function broadcastMcpAuth(id) {
   if (servers) broadcast(id, { type: 'cockpit:mcp-auth', servers });
 }
 
-// Queue pane operations - all three just forward to the
-// session handle (listQueue is synchronous and local, no round trip, so it
-// isn't wrapped in queryPassthrough's async shape). row.queue/the broadcast
-// itself are driven by onQueueChange, not by these calls succeeding - a
-// grok session's stubbed handle methods return false/[] harmlessly (see
-// grok-session.js) rather than throwing "not a function".
+// Queue pane operations - all three just forward to the session handle
+// (listQueue is synchronous/local, not wrapped in queryPassthrough).
+// row.queue/the broadcast are driven by onQueueChange, not by these calls
+// succeeding - a grok session's stubbed handle methods return false/[]
+// harmlessly rather than throwing.
 export function listQueue(id) {
   const row = sessions.get(id);
   if (!row) throw new Error(`unknown session: ${id}`);
   return row.handle.listQueue();
 }
 
-// Shared by removeQueued() below and interruptTurn(): queueId's turn will
-// now never run, so it will never produce a `result` either. The handle's
-// own removeQueued/interrupt has already dropped it from the turn tracker's
-// ordering; all that's left for this layer is the delegation side - if it
-// was a delegated turn, tell its origin now rather than leaving it waiting
-// forever for a reply that was just cancelled out from under it.
+// Shared by removeQueued() and interruptTurn(): queueId's turn will now
+// never run, so it will never produce a `result`. The handle's own
+// removeQueued/interrupt already dropped it from the turn tracker; all
+// that's left is the delegation side - tell the origin now if this was a
+// delegated turn.
 function failDroppedTurn(row, queueId) {
   const tag = row.handle.turns?.claimTag(queueId);
   if (tag) delegation.relayDelegationResult(row, tag, { ok: false, errorText: 'the delegated task was removed from the queue before it ran' });
@@ -1174,13 +920,9 @@ export async function removeQueued(id, queueId) {
   return removed;
 }
 
-// Both of these are now pure passthroughs. They used to also re-apply the
-// exact same pin-index-0 tail reorder to a registry-side copy of the
-// in-flight turn list - a second implementation of an algorithm
-// result-epoch.js's reorderTail already owned, and the source of two
-// misrouted-delegation bugs whenever the two drifted (see that module's
-// comment). The provider's own reorderQueue/sendNow drive the tracker
-// directly, so there is nothing left here to mirror.
+// Pure passthroughs - the provider's own reorderQueue/sendNow drive
+// result-epoch.js's turn tracker directly, so there's nothing left here to
+// mirror onto a second, registry-side copy.
 export async function reorderQueue(id, queueIds) {
   const row = sessions.get(id);
   if (!row) throw new Error(`unknown session: ${id}`);
@@ -1219,14 +961,10 @@ function parseSessionLimitResetText(text) {
   }
 }
 
-// "Next time it's HH:MM in `tz`" as an epoch-ms instant, computed without a
-// tz database of our own: format `now` into tz's wall-clock fields via
-// Intl, diff that against the target wall-clock time in minutes, then apply
-// the same diff to the real instant `now`. That sidesteps ever computing a
-// UTC offset directly - correct as long as the zone's offset doesn't change
-// between now and the target (i.e. no DST transition in the gap), which for
-// a same-day-or-next-day rate-limit reset is true in all but a freak edge
-// case around the one night a year clocks change.
+// "Next time it's HH:MM in `tz`" without a tz database: format `now` into
+// tz's wall-clock fields via Intl, diff against the target in minutes,
+// apply that diff to the real instant. Correct unless a DST transition
+// falls in the gap - a rare edge case for a same/next-day reset.
 function nextWallClockInstant(targetHour, targetMinute, tz) {
   const now = Date.now();
   const parts = new Intl.DateTimeFormat('en-US', {
@@ -1241,12 +979,10 @@ function nextWallClockInstant(targetHour, targetMinute, tz) {
 }
 
 // Arms (or re-arms) the timer that pushes "Continue" the moment the limit
-// resets, mirroring the desktop checkbox from the announcement. Re-entrant:
-// safe to call again on a later rate_limit_event or a mid-wait checkbox
-// toggle, always clearing any prior timer first so two never race. No
-// resetsAt (older SDK, or the field just wasn't sent) means there's nothing
-// to schedule against - autoContinue stays armed for next time, it just
-// can't fire on this hit.
+// resets. Re-entrant: safe to call again on a later rate_limit_event or a
+// mid-wait checkbox toggle, always clearing any prior timer first. No
+// resetsAt means there's nothing to schedule against - autoContinue stays
+// armed for next time, it just can't fire on this hit.
 function scheduleAutoContinue(id) {
   const row = sessions.get(id);
   if (!row || !row.rateLimitHit || !row.rateLimitHit.resetsAt) return;
@@ -1271,22 +1007,17 @@ function clearAutoContinueTimer(row) {
   }
 }
 
-// True once the experimental usage API has thrown once (missing method,
-// renamed method, wire error - anything). Process-wide, not per-session:
-// the method either exists on this SDK build or it doesn't, so one failure
-// means every session's session will fail identically. Stops retrying it
-// every turn once that's known, rather than eating the cost of a doomed
-// call each time. Our own cost/token numbers (usage.js's accumulator) never
-// depend on this - they come from the message stream directly and keep
-// working untouched whether this flag is set or not.
+// True once the experimental usage API has thrown once. Process-wide, not
+// per-session: the method either exists on this SDK build or it doesn't,
+// so stop retrying rather than eat a doomed call every turn. Our own
+// cost/token numbers never depend on this API.
 let rateLimitsApiBroken = false;
 
-// Best-effort plan/quota display (5h and 7d rate-limit windows) off the
-// SDK's experimental `/usage` control request - see the plan doc's Open
-// Questions #1. Deliberately isolated from refreshContextUsage/usageAcc:
-// if this API is renamed or removed in a future SDK bump, the catch below
-// just stops populating row.rateLimits (the panel quietly drops the quota
-// chip) rather than taking cost/token/context tracking down with it.
+// Best-effort plan/quota display (5h/7d rate-limit windows) off the SDK's
+// experimental `/usage` control request. Isolated from refreshContextUsage/
+// usageAcc: if this API is renamed or removed, the catch below just stops
+// populating row.rateLimits rather than taking cost/token/context tracking
+// down with it.
 async function refreshRateLimits(id) {
   if (rateLimitsApiBroken) return;
   const row = sessions.get(id);
@@ -1303,11 +1034,9 @@ async function refreshRateLimits(id) {
 }
 
 // getContextUsage() is a Query-handle round trip (unlike usage.js's
-// accumulator, which is pure local math off the message stream already
-// flowing through), so it's only called once a turn actually finishes -
-// still "live, no 1-turn lag" for the stats panel, just not on every partial
-// message. Best-effort: swallows errors (e.g. a session that closed mid
-// flight) rather than surfacing a stats-panel failure as a session error.
+// accumulator, pure local math), so it's only called once a turn finishes,
+// not on every partial message. Best-effort: swallows errors rather than
+// surfacing a stats-panel failure as a session error.
 async function refreshContextUsage(id) {
   const row = sessions.get(id);
   if (!row || !row.handle?.query?.getContextUsage) return;
@@ -1350,29 +1079,21 @@ function handleError(id, err) {
   const row = sessions.get(id);
   if (!row) return;
   // A rate-limit hit can arm scheduleAutoContinue's timer before the CLI
-  // dies. Unlike closeSession, this used to leave that timer armed - it
-  // would fire later, pushTurn 'Continue' into a now-dead handle, and
-  // broadcast a live-looking 'running' state for a session that's actually
-  // errored (confirmed in review: ghost spinner/pending-turn count with
-  // nothing behind it, since compose only re-disables on error/closed, it
-  // never re-enables on a stray running broadcast).
+  // dies; left armed, it would later pushTurn 'Continue' into a dead handle
+  // and broadcast a ghost 'running' state.
   clearAutoContinueTimer(row);
   row.state = 'error';
-  // A crashing row's for-await loop (session.js/grok-session.js) exits
-  // without ever emitting the 'result' message handleMessage's delegation
-  // branch waits for, so any tags still pending here would otherwise strand
-  // their origin session waiting forever.
+  // A crashing row's for-await loop exits without ever emitting the
+  // 'result' message the delegation branch waits for, so pending tags
+  // would otherwise strand their origin session forever.
   delegation.failPendingDelegations(row, String((err && err.message) || err));
-  // ...and the tracker's own in-flight list has to give up on them too, or
-  // this row keeps reporting a non-zero pendingTurnsCount forever (the row
-  // is reaped below, but a summary can still be broadcast off it first).
   // abandonAll(), not a plain drop: a result that somehow still lands must
-  // read as stale rather than match a slot.
+  // read as stale rather than match a slot, and pendingTurnsCount would
+  // otherwise never return to 0.
   row.handle?.turns?.abandonAll();
   broadcast(id, { type: 'cockpit:error', error: String((err && err.stack) || err) });
-  // The only reap for an errored row (setState deliberately does not reap
-  // on 'error' - see its own comment) - happens last, after the cleanup
-  // above has had a live row to work with.
+  // The only reap for an errored row - setState deliberately skips 'error'
+  // so this cleanup runs first against a still-live row.
   sessions.delete(id);
 }
 

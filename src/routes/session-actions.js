@@ -1,10 +1,8 @@
 // The /api/sessions/:id/:action dispatcher - every route that acts on one
-// live session (mode, interrupt, model, thinking budget, MCP/plugin toggles,
-// permissions, rewind, etc). Actions are registered in the ACTIONS table
-// below, keyed by `${method} ${action}`; the dispatcher does the shared
-// row/token lookup once and wraps every handler in one try/catch, so each
-// handler just returns its 200 body or throws to signal an error. Split out
-// of server.js unchanged (behavior-wise).
+// live session. Actions are registered in the ACTIONS table below, keyed
+// by `${method} ${action}`; the dispatcher does the shared row/token
+// lookup once and wraps every handler in one try/catch, so each handler
+// just returns its 200 body or throws to signal an error.
 import * as registry from '../session-registry.js';
 import { PERMISSION_MODES } from '../permissions.js';
 import { readAllowRules, addAllowRule, removeAllowRule, formatRule } from '../permission-rules.js';
@@ -94,10 +92,9 @@ const ACTIONS = {
   'POST reload-plugins': async ({ id, row }) => {
     const result = await registry.reloadPlugins(id);
     // The SDK's plugin list has no notion of the on-disk enabledPlugins
-    // override (settings.local.json) - it just reports what's currently
-    // loaded, which is true regardless of what was last saved (B3). Merge
-    // the saved map in here so the panel's toggle reflects what a restart
-    // would actually pick up, not just "it's loaded right now".
+    // override - it just reports what's currently loaded. Merge the saved
+    // map in here so the panel's toggle reflects what a restart would
+    // actually pick up, not just "it's loaded right now".
     if (getProvider(row.provider).capabilities.pluginToggleViaFile && Array.isArray(result.plugins)) {
       const enabledMap = await readEnabledPlugins(row.cwd).catch(() => ({}));
       result.plugins = result.plugins.map((plugin) => {
@@ -174,24 +171,20 @@ const ACTIONS = {
     return { allow: await readAllowRules(row.cwd) };
   },
 
-  // Renames the live session (header label, tab title via app.js) *and*
-  // persists it (session-titles.js) so it survives to the next resume -
-  // same "live effect first, best-effort persist" shape as the
-  // 'thinking'/'auto-continue' routes below. Needs row.claudeSessionId to
-  // persist against (the transcript's own session id, latched once the
-  // SDK's first system/init message arrives) - too early to have one is
-  // the same "session exists but the CLI hasn't reported in yet" window
-  // rewind()/loadEarlierHistory() already guard against, so this uses the
-  // same signal (throw a clear error) rather than silently no-op-ing.
+  // Renames the live session *and* persists it so it survives to the next
+  // resume - same "live effect first, best-effort persist" shape as the
+  // 'thinking'/'auto-continue' routes below. Needs row.providerSessionId
+  // to persist against (latched once the SDK's first init arrives); too
+  // early to have one throws a clear error instead of a silent no-op.
   'POST title': async ({ id, row, req }) => {
     const body = await readJsonBody(req);
     const title = typeof body.title === 'string' ? body.title : '';
     if (!row.providerSessionId) {
       throw new RouteError(409, { error: 'session has no provider session id yet - try again once it has started' });
     }
-    // Same delegation-name uniqueness requirement as POST /api/sessions - a rename
-    // must not collide with another live session's name in the same cwd
-    // either. Fast-fail only, same caveat as the create route's own
+    // Same delegation-name uniqueness requirement as POST /api/sessions -
+    // a rename must not collide with another live session's name in the
+    // same cwd either. Fast-fail only, same caveat as the create route's own
     // pre-check - registry.setSessionName below is the authoritative,
     // race-free check (err.code === 'ERR_NAME_TAKEN', caught below).
     const trimmedTitle = title.trim() || null;
@@ -219,12 +212,10 @@ const ACTIONS = {
     const body = await readJsonBody(req);
     const provider = getProvider(row.provider);
     // provider.efforts is the advertised superset across every model a
-    // provider might use - not every model supports every value in it
-    // (Codex in particular: see provider-registry.js's resolveEfforts).
-    // A provider that can narrow that down for the session's actual
-    // current model does so here, so an unsupported choice is rejected
-    // now instead of accepted here and only failing when the next turn
-    // starts.
+    // provider might use - not every model supports every value in it. A
+    // provider that can narrow that down for the session's actual current
+    // model does so here, rejecting an unsupported choice now instead of
+    // failing when the next turn starts.
     const validEfforts = provider.resolveEfforts ? await provider.resolveEfforts(row) : provider.efforts;
     // null means resolveEfforts couldn't reach the live model catalog
     // (see provider-registry.js's own comment) - fail closed rather than
@@ -237,12 +228,10 @@ const ACTIONS = {
       throw new RouteError(400, { error: `invalid effort: ${body.effort}` });
     }
     await registry.setEffort(id, body.effort);
-    // Persisted (2026-08-24 review fix) so the next brand-new session
-    // started in this cwd inherits it - same "live effect first,
-    // best-effort persist" shape as the 'thinking' route below. A
-    // FORKED session already inherits effort a different way (the
-    // rewind route passes `row.effort` straight into createSession),
-    // so this write only matters for the "new session, same cwd" gap.
+    // Persisted so the next brand-new session in this cwd inherits it - a
+    // forked session already inherits effort a different way (the rewind
+    // route passes `row.effort` straight into createSession), so this
+    // write only matters for the "new session, same cwd" gap.
     try {
       await setSessionDefaults(row.cwd, { effort: body.effort });
     } catch {
@@ -260,9 +249,8 @@ const ACTIONS = {
     const body = await readJsonBody(req);
     const maxThinkingTokens = body.maxThinkingTokens ?? null;
     const thinkingDisplay = body.thinkingDisplay ?? null;
-    // Same shape as the 'mode'/'rewind' routes' own validation - malformed
-    // JSON (readJsonBody's catch returns `{}`) or a bad value used to
-    // silently land as "thinking off" instead of a 400 (B11).
+    // Malformed JSON (readJsonBody's catch returns `{}`) or a bad value
+    // must 400 rather than silently landing as "thinking off".
     if (maxThinkingTokens !== null && (!Number.isFinite(maxThinkingTokens) || maxThinkingTokens < 0)) {
       throw new RouteError(400, { error: 'maxThinkingTokens must be a non-negative number or null' });
     }
@@ -270,15 +258,11 @@ const ACTIONS = {
       throw new RouteError(400, { error: `invalid thinkingDisplay: ${thinkingDisplay}` });
     }
     await registry.setMaxThinkingTokens(id, maxThinkingTokens, thinkingDisplay);
-    // Best-effort but awaited: persisted to session-defaults.js so the
-    // next session started or forked in this cwd inherits it
-    // (seedSessionDefaults). Awaiting (rather than firing and
-    // forgetting) closes the narrow race where an immediate rewind/fork
-    // right after this request could read the settings file before this
-    // write landed. Still wrapped in try/catch, not the dispatcher's
-    // shared one: a failed write here (disk full, permissions) shouldn't
-    // fail the request - the live SDK call already succeeded and the
-    // client already has what it asked for, it just won't carry forward.
+    // Best-effort but awaited: persisted so the next session started or
+    // forked in this cwd inherits it. Awaiting closes the narrow race
+    // where an immediate rewind/fork could read the settings file before
+    // this write lands. A failed write here shouldn't fail the request -
+    // the live SDK call already succeeded - so it's caught, not rethrown.
     try {
       await setSessionDefaults(row.cwd, { maxThinkingTokens, thinkingDisplay });
     } catch {
@@ -301,21 +285,19 @@ const ACTIONS = {
 
   'POST approval-decision': async ({ id, row, req }) => {
     const body = await readJsonBody(req);
-    // `alwaysAllow` (the permission "always allow this tool" toggle)
-    // rides along on the same decision object session.js's resolveApproval
-    // already receives - stripped back off before it's ever handed to the
-    // SDK as the actual PermissionResult (see that function). `false`/
-    // `undefined` means "just this once"; `true` is accepted for backward
+    // `alwaysAllow` rides along on the same decision object
+    // session.js's resolveApproval receives, stripped back off before it's
+    // handed to the SDK as the actual PermissionResult. `false`/undefined
+    // means "just this once"; `true` is accepted for backward
     // compatibility and coerced to `'session'`.
     if (![undefined, false, true, 'session', 'project'].includes(body.alwaysAllow)) {
       throw new RouteError(400, { error: `invalid alwaysAllow: ${body.alwaysAllow}` });
     }
-    // The UI hides "always in this project" for a provider whose
-    // capabilities.projectPersistentApprovals is false, but defend here
-    // too - Grok's and Codex's own resolveApproval() have no scope
-    // concept beyond turn/session, so a 'project' choice for either
-    // would otherwise silently collapse to session-scoped with no
-    // indication the promised persistence never happened.
+    // The UI hides "always in this project" when capabilities.
+    // projectPersistentApprovals is false, but defend here too - Grok's
+    // and Codex's resolveApproval() have no scope beyond turn/session, so
+    // a 'project' choice would otherwise silently collapse to
+    // session-scoped with no indication persistence never happened.
     if (body.alwaysAllow === 'project' && !getProvider(row.provider).capabilities.projectPersistentApprovals) {
       throw new RouteError(400, { error: `${row.provider} sessions cannot persist an "always allow" choice across a restart - use "rest of this session" instead` });
     }
@@ -363,15 +345,10 @@ const ACTIONS = {
         history: forkedHistory,
       });
       // Model carries forward via createSession above. Thinking budget and
-      // auto-continue don't have createSession params (they're only ever
-      // set live via their own setters) - seedSessionDefaults() applies
-      // them explicitly here from `row`'s own live in-memory state, not
-      // the cwd-level persisted store: that store only reflects whichever
-      // session in this cwd wrote to it *last*, which isn't necessarily
-      // `row` when another session shares the same cwd. Passing row's
-      // live values directly keeps a fork's seeding tied to the session
-      // actually being forked, regardless of what else has touched this
-      // cwd in the meantime.
+      // auto-continue have no createSession param, so seedSessionDefaults()
+      // applies them explicitly from `row`'s live in-memory state rather
+      // than the cwd-level persisted store, which only reflects whichever
+      // session in this cwd wrote to it last - not necessarily `row`.
       await seedSessionDefaults(forked, {
         maxThinkingTokens: row.maxThinkingTokens,
         thinkingDisplay: row.thinkingDisplay,
@@ -400,7 +377,7 @@ const ACTIONS = {
     return fileSuggestions(row.cwd, url.searchParams.get('q'), extraFolders);
   },
 
-  // Public Query method (plan Spike C) - no adapter/fallback needed like
+  // Public Query method, no adapter/fallback needed like
   // file_suggestions/get_workspace_diff. Cheap to call fresh each time:
   // supportedCommands() already tracks the latest commands_changed push
   // internally, so this never returns stale data after one.

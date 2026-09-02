@@ -1,11 +1,6 @@
-// Cost/token accounting for the live stats panel. Cost math is ported
-// verbatim from claude-realtime-usage/live_watcher_template.html's
-// stepCost() (itself mirroring that project's parse.py cost_for_usage()) -
-// same pricing table, same formula, so the two tools agree on a dollar
-// figure for the same session. Claude rates live in pricing.json (a copy
-// of the claude-realtime-usage table). Grok rates live in pricing_grok.json,
-// Codex rates in pricing_codex.json, so the three catalogs cannot clobber
-// each other.
+// Cost/token accounting for the live stats panel. Claude rates live in
+// pricing.json, Grok in pricing_grok.json, Codex in pricing_codex.json,
+// kept as separate catalogs so they cannot clobber each other.
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -83,15 +78,11 @@ const NO_TOOL_BUCKET = '(no tool call)';
 export function createUsageAccumulator() {
   const totals = { costUsd: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
   const unpriced = new Set();
-  // name -> { costUsd, calls, inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens }.
-  // A turn's cost/tokens are the API's only unit of billing - there's no
-  // per-tool-call usage from the SDK - so a turn that fired N tool_use
-  // blocks has its cost split evenly across those N buckets (same tool
-  // called twice in one turn gets credited twice). This keeps
-  // sum(perTool.costUsd) === totals.costUsd exactly, at the cost of being
-  // an even-split approximation rather than a true per-call figure. Turns
-  // with no tool_use land in NO_TOOL_BUCKET (plain text turns, the final
-  // wrap-up after a tool result, etc.) so nothing is silently dropped.
+  // name -> { costUsd, calls, inputTokens, outputTokens, cacheReadTokens,
+  //   cacheWriteTokens }. The SDK reports cost/tokens per turn, not per
+  // tool call, so a turn with N tool_use blocks has its cost split evenly
+  // across those N buckets - this keeps sum(perTool.costUsd) ===
+  // totals.costUsd exactly. Turns with no tool_use land in NO_TOOL_BUCKET.
   const perTool = new Map();
 
   function addToolBucket(name, info, n) {

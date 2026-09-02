@@ -1,23 +1,8 @@
-// Per-cwd map of transcript-session-id -> user-set title. Stored under the
-// `sessionTitles` key in the same `.claude/settings.local.json` file
-// session-defaults.js/plugin-settings.js use (settings-file.js), for the
-// same reasons: survives a cockpit process restart, shared across every
-// browser/tab pointed at this cwd, lives with the project instead of a
-// machine-global store.
-//
-// Keyed by the *transcript* session id (the JSONL filename - session-
-// registry.js's row.claudeSessionId, session-launcher.js's sessionId), not
-// the cockpit registry's own in-memory randomUUID() - the latter is gone
-// the moment a session closes or the process restarts, so a title stored
-// against it would never survive to the next resume.
-//
-// If a project directory is later moved or renamed, this map simply misses
-// on lookup (the transcript's recorded cwd still points at the old path)
-// and the affected sessions fall back to their usual label - graceful
-// degradation, not corruption. Callers never need to know that: this
-// module's functions all take `cwd` as an opaque key, so relocating the
-// store itself (e.g. to something keyed by an id that survives a move)
-// would be a change contained entirely to this file.
+// Per-cwd map of transcript-session-id -> user-set title, stored in
+// `.claude/settings.local.json` to survive a restart. Keyed by the
+// *transcript* session id, not the registry's in-memory randomUUID()
+// (gone once a session closes, so a title stored against it wouldn't
+// survive to the next resume). Project-dir moves just miss and fall back.
 import { readSettingsFile, updateSettingsFile } from './settings-file.js';
 
 const MAX_TITLE_LENGTH = 120; // matches session-launcher.js's scanTranscript label truncation

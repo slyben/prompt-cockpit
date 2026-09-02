@@ -22,11 +22,10 @@ function outputText(item) {
 }
 
 // Shared by every item type below that renders as a tool call: a paired
-// tool_use/tool_result (usage.js's cost accounting doesn't touch these -
-// only assistant text/thinking blocks carry usage). `result` omitted means
-// no tool_result is emitted at all (a handful of item types - webSearch,
-// imageView, plan, review-mode markers - have no completion/output field in
-// the app-server's schema to report back).
+// tool_use/tool_result (usage.js's cost accounting ignores these; only
+// assistant text/thinking blocks carry usage). `result` omitted means no
+// tool_result is emitted (webSearch, imageView, plan, and review-mode
+// markers have no completion/output field in the app-server's schema).
 function toolCallMessages(sessionId, model, id, name, input, result) {
   const toolUse = assistantMessage(sessionId, [{ type: 'tool_use', id, name, input }], model);
   if (!result) return [toolUse];
@@ -107,14 +106,9 @@ export function codexItemToMessages(item, sessionId, { model } = {}) {
       },
     ];
   }
-  // The remaining item types (per developers.openai.com/codex/app-server's
-  // tagged union) never had any rendering at all before this - they were
-  // silently dropped, and MCP tool calls in particular are a common enough
-  // part of a real Codex turn that dropping them left visible gaps in the
-  // transcript. Render each as a generic tool call - stream-view.js already
-  // falls back to a plain key/value dump (classifyTool()'s 'other' bucket)
-  // for any tool name it doesn't specially format, so no frontend changes
-  // are needed to make these show up.
+  // The remaining item types render as a generic tool call - stream-view.js
+  // already falls back to a plain key/value dump for any tool name it
+  // doesn't specially format, so no frontend changes are needed here.
   if (item.type === 'mcpToolCall') {
     const id = item.id || `mcp-${randomUUID()}`;
     const name = `mcp__${item.server || 'server'}__${item.tool || 'tool'}`;
@@ -182,16 +176,11 @@ export function codexNotificationToMessages(method, params, sessionId, { model }
     return codexItemToMessages(params.item, sessionId, { model });
   }
   if (method === 'thread/tokenUsage/updated') {
-    // usage.js's costForUsage()/createUsageAccumulator() (session-registry.js)
-    // key off message.usage/message.model exactly like Grok's own usage
-    // notification (grok-messages.js's usageFromUpdate) - stamping it onto a
-    // zero-content assistant message is what makes the stats strip/turn
-    // chart pick it up for free, no Codex-specific wiring needed downstream.
-    // NOTE: the app-server's public docs don't publish this notification's
-    // exact field names (unlike the item types above) - this reads every
-    // spelling variant that plausibly matches OpenAI's own usage-object
-    // convention, the same hedge grok-messages.js takes for ACP's usage
-    // naming, but hasn't been checked against a live app-server response.
+    // Stamping usage onto a zero-content assistant message (message.usage/
+    // message.model) is what makes the stats strip/turn chart pick it up
+    // for free. The app-server doesn't publish this notification's exact
+    // field names, so usageFromTokenUpdate() reads every plausible spelling
+    // variant - unverified against a live app-server response.
     const usage = usageFromTokenUpdate(params);
     return usage ? [assistantMessage(sessionId, [], model, usage)] : [];
   }

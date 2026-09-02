@@ -6,12 +6,11 @@
 import { escapeHtml } from '/escape-html.js';
 const MIN_WEEKS_SHOWN = 53; // ~a year of columns, GitHub-heatmap style - floor, not a fixed count
 const LEVEL_THRESHOLDS = [1, 5, 15, 40]; // message-count breakpoints for the 5 shade levels (0-4)
-// Pixel width of one grid column step: a cell is 10px wide including its
-// 1px border (style.css sets box-sizing: border-box globally, so the border
-// does NOT add to it), plus the grid's 3px gap = 13px. Must track
+// Pixel width of one grid column step: a 10px cell (border-box, so its
+// 1px border doesn't add to it) plus the grid's 3px gap = 13px. Must track
 // .stats-heatmap-cell/.stats-heatmap-grid's CSS in style.css - used to
-// pixel-position month labels exactly over their column (see renderHeatmap's
-// monthRow loop). Getting this wrong slides every label off its column.
+// pixel-position month labels exactly over their column; getting this
+// wrong slides every label off its column.
 const COL_STEP_PX = 13;
 
 export function initGlobalStatsPanel({ bodyEl, rangeSelect, refreshButton }) {
@@ -26,10 +25,9 @@ export function initGlobalStatsPanel({ bodyEl, rangeSelect, refreshButton }) {
 
     let stats;
     try {
-      // Guarded like the addEventListener below it (line 59) - this module
-      // otherwise treats rangeSelect as optional throughout, so reading
-      // .value unguarded here was inconsistent and would throw if it's ever
-      // absent (2026-08-24 review).
+      // Guarded like the addEventListener below - this module otherwise
+      // treats rangeSelect as optional throughout, so reading .value
+      // unguarded here would be inconsistent and could throw if it's absent.
       const range = rangeSelect ? rangeSelect.value : 'all';
       const res = await fetch(`/api/stats?range=${encodeURIComponent(range)}`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -44,12 +42,10 @@ export function initGlobalStatsPanel({ bodyEl, rangeSelect, refreshButton }) {
     }
     bodyEl.innerHTML = '';
     // A fixed 53 columns falls short of the panel's actual width on wider
-    // windows, leaving a bare gap after the last (current) week instead of
-    // the grid running edge-to-edge like GitHub's. Grow the column count to
-    // whatever the panel can currently fit, using a fixed-width reference
-    // element already in the DOM (bodyEl) since the heatmap itself doesn't
-    // exist yet to measure. Never shrinks below MIN_WEEKS_SHOWN (~a year),
-    // even on a narrow panel - in that case it just scrolls, as before.
+    // windows, leaving a bare gap instead of the grid running edge-to-edge
+    // like GitHub's. Grow the column count to whatever the panel can
+    // currently fit, measured against bodyEl (already in the DOM) since the
+    // heatmap itself doesn't exist yet. Never shrinks below MIN_WEEKS_SHOWN.
     const weeksShown = computeWeeksShown(bodyEl);
     bodyEl.append(renderHeatmap(stats, weeksShown), renderOverview(stats), renderModelTable(stats), renderAccountLimitsSection());
     // Wider-than-panel content (still possible on a narrow window) scrolls -
@@ -119,11 +115,10 @@ function renderHeatmap(stats, weeksShown) {
   }
 
   // Month labels, one row above the grid - stamped only on the first column
-  // whose Monday falls in a new month, not every column (which would just
-  // repeat "Aug Aug Aug…" across the whole row). Positioned with an exact
-  // pixel offset (COL_STEP_PX per column) rather than as a flexed 12px-wide
-  // span with overflow spill - the spill trick left every label reading as
-  // shifted right of the column it actually belongs to.
+  // whose Monday falls in a new month, not every column (which would repeat
+  // "Aug Aug Aug…" across the row). Positioned with an exact pixel offset
+  // (COL_STEP_PX per column) rather than a flexed span with overflow spill -
+  // the spill trick left every label shifted right of its actual column.
   const header = document.createElement('div');
   header.className = 'stats-heatmap-header';
   const corner = document.createElement('div');
@@ -288,15 +283,11 @@ function renderModelTable(stats) {
   return wrap;
 }
 
-// Account-level plan quota, the one figure everything else in this panel
-// can't show: it's tracked server-side by Anthropic across every device
-// signed into this account (this local-transcript-scanning panel, by
-// design, only ever sees this machine - see global-stats.js's own module
-// comment). Fetched by shelling out to `claude -p "/usage"`
-// (src/account-limits.js) - a real subprocess spawn, a few seconds, so this
-// loads on its own (independent of the rest of this tab's fetch, and its
-// own Refresh button) rather than blocking or riding along with the local
-// scan above.
+// Account-level plan quota, the one figure this panel's own local scan
+// can't show: tracked server-side by Anthropic across every device, while
+// this panel only ever sees local transcripts. Fetched by shelling out to
+// `claude -p "/usage"` - a real subprocess spawn, a few seconds - so it
+// loads independently, with its own Refresh button, rather than blocking.
 function renderAccountLimitsSection() {
   const wrap = document.createElement('div');
   wrap.className = 'stats-section';

@@ -27,15 +27,11 @@ export function assertSafeGrokArgs(args) {
   }
 }
 
-// Official installer drops grok.exe; an npm shim is grok.cmd. Prefer a real
-// .exe anywhere we can see it (PATH or the installer dir) before accepting
-// a shim: shell:false is not enough once Windows picks .cmd, because spawn
-// still goes through cmd.exe (injection + zombie children on kill).
-//
-// PATH is searched first so a user-managed grok.exe wins, then the
-// installer's own <GROK_HOME|~/.grok>/bin, which it does not add to PATH -
-// without that second location a stock install resolves to a bare name and
-// dies ENOENT. Shims are last-resort only.
+// Official installer drops grok.exe; an npm shim is grok.cmd. Prefer a
+// real .exe over a shim: shell:false doesn't stop Windows from routing
+// .cmd/.bat through cmd.exe (injection, zombie children on kill).
+// Search PATH first (user override), then the installer's own
+// <GROK_HOME|~/.grok>/bin, which isn't on PATH by default.
 export function resolveGrokBin({
   platform = process.platform,
   pathVar = process.env.PATH,
