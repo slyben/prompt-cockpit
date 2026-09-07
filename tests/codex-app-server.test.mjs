@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events';
-import { mkdtemp, mkdir, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
@@ -127,6 +127,25 @@ test('JSON-RPC client correlates responses, notifications, and server requests',
   assert.deepEqual(writes.at(-1), { id: 9, result: { decision: 'accept' } });
 });
 
+test('JSON-RPC client suppresses a late response after serverRequest/resolved', async () => {
+  const writes = [];
+  let receive;
+  let release;
+  const client = createCodexRpcClient({
+    writeLine: (line) => writes.push(JSON.parse(line)),
+    subscribeLine: (handler) => { receive = handler; },
+  });
+  client.onServerRequest(() => new Promise((resolve) => { release = resolve; }));
+
+  receive(JSON.stringify({ method: 'approve', id: 12, params: { threadId: 'thread-1' } }));
+  await new Promise((resolve) => setImmediate(resolve));
+  receive(JSON.stringify({ method: 'serverRequest/resolved', params: { threadId: 'thread-1', requestId: 12 } }));
+  release({ handled: true, result: { decision: 'cancel' } });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(writes, []);
+});
+
 test('manager initializes once and turns a missing executable into a rejected readiness promise', async () => {
   const proc = new EventEmitter();
   const requests = [];
@@ -147,9 +166,35 @@ test('manager initializes once and turns a missing executable into a rejected re
   });
 
   assert.equal(requests[0][0], 'initialize');
+  const packageVersion = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8')).version;
+  assert.equal(requests[0][1].clientInfo.version, packageVersion);
   proc.emit('error', Object.assign(new Error('spawn codex ENOENT'), { code: 'ENOENT' }));
   await assert.rejects(manager.ready(), /Unable to start codex app-server.*ENOENT/);
   assert.deepEqual(notifications, []);
+});
+
+test('manager retires itself when the initialize handshake is rejected', async () => {
+  const proc = new EventEmitter();
+  let killCalls = 0;
+  proc.kill = () => { killCalls += 1; };
+  const client = {
+    request(method) {
+      if (method === 'initialize') return Promise.reject(new Error('initialize rejected: incompatible client'));
+      return Promise.reject(new Error('unexpected request'));
+    },
+    notify: () => {},
+    onNotification: () => () => {},
+    onServerRequest: () => () => {},
+    rejectAll: () => {},
+  };
+  const manager = createCodexAppServerManager({
+    connectImpl: () => ({ proc, client, getStderr: () => '' }),
+  });
+
+  await assert.rejects(manager.ready(), /initialize rejected/);
+  assert.equal(manager.isClosed(), true);
+  assert.equal(killCalls, 1, 'a rejected handshake must terminate its child process');
+  await assert.rejects(manager.request('thread/list'), /codex app-server is closed/);
 });
 
 test('manager notifies onClose subscribers when the app-server process exits, not just rejectAll', async () => {

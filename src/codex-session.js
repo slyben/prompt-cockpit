@@ -1,5 +1,8 @@
 // Long-lived Codex thread backed by the shared app-server manager. Exposes
 // the same handle contract as session.js and grok-session.js.
+import { listCodexModels } from './codex-models.js';
+import { rewindCodexConversation } from './codex-rewind.js';
+import { createCodexExtensions } from './codex-extensions.js';
 import { randomUUID } from 'node:crypto';
 import { getCodexAppServerManager } from './codex-app-server.js';
 import { codexNotificationToMessages } from './codex-messages.js';
@@ -9,10 +12,18 @@ function unsupported(name) {
   return async () => { throw new Error(`${name} is not supported on Codex sessions yet`); };
 }
 
-function eventBelongsToTurn(params, threadId, activeTurnId) {
-  if (params?.threadId) return params.threadId === threadId;
+function eventBelongsToHandle(params, threadId, ownedTurnIds, recentTurnIds, method) {
+  if (!params?.threadId || params.threadId !== threadId) return false;
   const eventTurnId = params?.turnId || params?.turn?.id;
-  return Boolean(activeTurnId && eventTurnId === activeTurnId);
+  if (!eventTurnId) return true;
+  // Token usage is cumulative for the whole thread, including resume/fork
+  // replay after the RPC returns and late updates after turn/completed.
+  if (method === 'thread/tokenUsage/updated') return true;
+  return ownedTurnIds.has(eventTurnId) || recentTurnIds.has(eventTurnId);
+}
+
+function requestBelongsToThread(params, threadId) {
+  return params?.threadId === threadId || params?.conversationId === threadId;
 }
 
 function approvalAction(mode, method) {
@@ -32,7 +43,16 @@ function turnPermissionParams(mode) {
   if (mode === 'dontAsk') {
     return { approvalPolicy: 'never', sandboxPolicy: { type: 'workspaceWrite' } };
   }
-  return { approvalPolicy: 'onRequest', sandboxPolicy: { type: 'workspaceWrite' } };
+  return { approvalPolicy: 'on-request', sandboxPolicy: { type: 'workspaceWrite' } };
+}
+
+const MAX_RECENT_TURN_IDS = 64;
+const MAX_RECENT_ITEM_IDS = 256;
+
+function rememberBounded(set, value, maxSize) {
+  if (!value) return;
+  set.add(value);
+  while (set.size > maxSize) set.delete(set.values().next().value);
 }
 
 export function startCodexSession({
@@ -46,6 +66,9 @@ export function startCodexSession({
   onStateChange,
   onError,
   onApprovalRequest,
+  onApprovalResolved,
+  onMcpAuthRequest,
+  onMcpAuthResolved,
   onQueueChange,
   manager = getCodexAppServerManager(),
 }) {
@@ -54,14 +77,25 @@ export function startCodexSession({
   let currentModel = model || null;
   let currentEffort = effort || null;
   let activeTurnId = null;
+  let startPending = false;
+  const ownedTurnIds = new Set();
+  // Keep a bounded tail because item/completed and other turn-scoped events
+  // can arrive just after turn/completed. Unlike ownedTurnIds, these ids are
+  // never allowed to grow with the lifetime of the session.
+  const recentTurnIds = new Set();
   let turnCounter = turnIndexOffset;
   let closed = false;
   let pumping = false;
   const pending = [];
   const resultEpoch = createResultEpochTracker();
   const pendingApprovals = new Map();
+  const mcpAuthPending = new Map();
+  const startedItemIds = new Set();
+  const startedItemTurns = new Map();
+  const recentStartedItemIds = new Set();
   const completedTurns = new Map();
   const completionWaiters = new Map();
+  const extensions = createCodexExtensions({ cwd, manager, getThreadId: () => threadId });
 
   let resolveReady;
   let rejectReady;
@@ -77,11 +111,45 @@ export function startCodexSession({
   }
 
   function settleTurn(turnId, params) {
-    completedTurns.set(turnId, params);
+    if (turnId) {
+      ownedTurnIds.delete(turnId);
+      rememberBounded(recentTurnIds, turnId, MAX_RECENT_TURN_IDS);
+    }
+    // Keep enough item ids to turn a late item/completed into a result-only
+    // row, but do not retain every interrupted/pending item forever. Only
+    // move items belonging to this turn; a late completion for an older turn
+    // must not clear the next turn's still-pending tool rows.
+    for (const [itemId, itemTurnId] of startedItemTurns) {
+      if (itemTurnId !== turnId) continue;
+      startedItemTurns.delete(itemId);
+      if (startedItemIds.delete(itemId)) rememberBounded(recentStartedItemIds, itemId, MAX_RECENT_ITEM_IDS);
+    }
+
     const waiter = completionWaiters.get(turnId);
     if (waiter) {
+      completedTurns.set(turnId, params);
       completionWaiters.delete(turnId);
       waiter.resolve(params);
+    } else if (turnId === activeTurnId) {
+      // The notification can beat the turn/start response. Keep the result so
+      // waitForTurn() can consume it after the RPC settles. A duplicate/late
+      // completion after the turn has already been consumed need not be
+      // retained in completedTurns.
+      completedTurns.set(turnId, params);
+    }
+  }
+
+  // Undoes an optimistic turn/started claim that the turn/start response
+  // proved wrong. Deliberately not routed through recentTurnIds: that tail
+  // exists to keep accepting late events for turns this handle really ran,
+  // and a sibling's turn is not one of them.
+  function releaseMisclaimedTurn(turnId) {
+    ownedTurnIds.delete(turnId);
+    completedTurns.delete(turnId);
+    for (const [itemId, itemTurnId] of startedItemTurns) {
+      if (itemTurnId !== turnId) continue;
+      startedItemTurns.delete(itemId);
+      startedItemIds.delete(itemId);
     }
   }
 
@@ -90,14 +158,39 @@ export function startCodexSession({
     return new Promise((resolve, reject) => completionWaiters.set(turnId, { resolve, reject }));
   }
 
+  function clearApproval(requestId) {
+    const key = String(requestId);
+    const pending = pendingApprovals.get(key);
+    if (!pending) return false;
+    pendingApprovals.delete(key);
+    const result = pending.kind === 'permissions'
+      ? { permissions: [], scope: 'turn' }
+      : pending.kind === 'userInput'
+        ? { answers: {} }
+        : pending.kind === 'legacyDecision'
+          ? { decision: 'abort' }
+          : { decision: 'cancel' };
+    pending.resolve({ handled: true, result });
+    onApprovalResolved?.(key);
+    return true;
+  }
+
   // If the shared app-server crashes mid-turn, rejectAll() only reaches
   // in-flight RPC requests, not a waitForTurn() promise parked with no
   // request behind it - without this the session sits in 'running' forever.
   const unsubscribeManagerClose = manager.onClose((err) => {
     if (closed) return;
     closed = true;
+    startPending = false;
+    activeTurnId = null;
+    ownedTurnIds.clear();
+    recentTurnIds.clear();
+    startedItemIds.clear();
+    startedItemTurns.clear();
+    recentStartedItemIds.clear();
     for (const waiter of completionWaiters.values()) waiter.reject(err);
     completionWaiters.clear();
+    extensions.dispose();
     unsubscribe();
     unsubscribeRequests();
     onStateChange('error');
@@ -105,17 +198,101 @@ export function startCodexSession({
   });
 
   const unsubscribe = manager.subscribe((method, params) => {
-    if (closed || !threadId || !eventBelongsToTurn(params, threadId, activeTurnId)) return;
-    for (const message of codexNotificationToMessages(method, params, threadId, { model: currentModel })) {
+    if (closed || !threadId) return;
+    if (method === 'serverRequest/resolved') {
+      if (params?.threadId && params.threadId !== threadId) return;
+      if (params?.requestId != null) clearApproval(params.requestId);
+      return;
+    }
+    if (method === 'mcpServer/oauthLogin/completed') {
+      if (params?.threadId && params.threadId !== threadId) return;
+      if (params?.success && params?.name && mcpAuthPending.delete(params.name)) onMcpAuthResolved?.({ serverName: params.name });
+      return;
+    }
+    if (method === 'mcpServer/startupStatus/updated' && params?.threadId && params.threadId !== threadId) return;
+    if (method === 'mcpServer/startupStatus/updated' && params?.status === 'ready' && params?.name
+      && mcpAuthPending.delete(params.name)) onMcpAuthResolved?.({ serverName: params.name });
+    // app-server can publish turn/started before the turn/start response
+    // settles. Claim that id while this handle has a start in flight so the
+    // event stream and Stop button are live during that window. Other handles
+    // on the same thread have no startPending flag and cannot claim it.
+    if (method === 'turn/started' && startPending && !activeTurnId
+      && params?.threadId === threadId) {
+      const startedTurnId = params?.turn?.id || params?.turnId;
+      if (startedTurnId) {
+        activeTurnId = startedTurnId;
+        ownedTurnIds.add(startedTurnId);
+      }
+    }
+    if (!eventBelongsToHandle(params, threadId, ownedTurnIds, recentTurnIds, method)) return;
+    // thread/start and thread/resume expose the resolved model at the
+    // response's top level, while a later safety reroute is a notification.
+    // Keep the model current because token-usage notifications do not carry
+    // one of their own and costForUsage needs the effective model id.
+    if (method === 'model/rerouted' && params?.toModel) currentModel = params.toModel;
+    for (const message of codexNotificationToMessages(method, params, threadId, {
+      model: currentModel,
+      startedItemIds,
+      recentStartedItemIds,
+    })) {
       resultEpoch.stamp(message);
       onMessage(message);
     }
-    if (method === 'turn/started' && params.turn?.id) activeTurnId = params.turn.id;
-    if (method === 'turn/completed') settleTurn(params.turn?.id || activeTurnId, params);
+    if (method === 'item/started' && params?.item?.id) {
+      startedItemTurns.set(params.item.id, params.turnId || params.turn?.id || activeTurnId);
+    } else if (method === 'item/completed' && params?.item?.id) {
+      startedItemTurns.delete(params.item.id);
+    }
+    if (method === 'turn/completed') settleTurn(params.turn?.id || params.turnId || activeTurnId, params);
   });
 
   const unsubscribeRequests = manager.onServerRequest(async (method, params, requestId) => {
-    if (closed || !threadId || params?.threadId !== threadId) return { handled: false };
+    if (closed || !threadId || !requestBelongsToThread(params, threadId)) return { handled: false };
+    if (method === 'mcpServer/elicitation/request') {
+      if (params.mode !== 'url' || !params.url || !params.serverName) {
+        // Form-mode elicitation needs a dynamic schema editor that the
+        // settings UI does not provide. Decline it explicitly so the MCP
+        // server gets a protocol response instead of a JSON-RPC -32601.
+        return { handled: true, result: { action: 'decline' } };
+      }
+      mcpAuthPending.set(params.serverName, {
+        url: params.url,
+        message: params.message || '',
+        elicitationId: params.elicitationId || null,
+      });
+      onMcpAuthRequest?.({
+        serverName: params.serverName,
+        url: params.url,
+        message: params.message || '',
+      });
+      return { handled: true, result: { action: 'accept' } };
+    }
+    if (method === 'item/tool/requestUserInput') {
+      return new Promise((resolve) => {
+        const id = String(requestId);
+        pendingApprovals.set(id, { resolve, kind: 'userInput', toolName: 'AskUserQuestion' });
+        onApprovalRequest?.({
+          requestId: id,
+          toolName: 'AskUserQuestion',
+          displayName: 'Codex asks for input',
+          input: { itemId: params.itemId, questions: params.questions || [] },
+          answerFormat: 'question-ids',
+          title: 'Codex asks for input',
+        });
+      });
+    }
+    if (method === 'item/tool/call') {
+      return {
+        handled: true,
+        result: {
+          contentItems: [{
+            type: 'inputText',
+            text: `Prompt Cockpit cannot execute Codex client tool "${params.tool || 'unknown'}"`,
+          }],
+          success: false,
+        },
+      };
+    }
     if (method === 'item/permissions/requestApproval') {
       const permissions = params.permissions ?? [];
       if (currentMode === 'bypassPermissions' || currentMode === 'dontAsk' || currentMode === 'auto') {
@@ -138,6 +315,33 @@ export function startCodexSession({
           displayName: 'Additional permissions',
           input: params,
           title: params.reason || 'Codex requests additional permissions',
+        });
+      });
+    }
+    const legacyApproval = method === 'execCommandApproval' || method === 'applyPatchApproval';
+    if (legacyApproval) {
+      const approvalMethod = method === 'applyPatchApproval'
+        ? 'item/fileChange/requestApproval'
+        : 'item/commandExecution/requestApproval';
+      const action = approvalAction(currentMode, approvalMethod);
+      if (action !== 'ask') {
+        return { handled: true, result: { decision: action === 'accept' ? 'approved' : 'denied' } };
+      }
+      return new Promise((resolve) => {
+        const id = String(requestId);
+        pendingApprovals.set(id, {
+          resolve,
+          kind: 'legacyDecision',
+          toolName: method === 'applyPatchApproval' ? 'Edit' : 'Bash',
+        });
+        onApprovalRequest?.({
+          requestId: id,
+          toolName: method === 'applyPatchApproval' ? 'Edit' : 'Bash',
+          displayName: method === 'applyPatchApproval' ? 'File change' : 'Command',
+          input: method === 'applyPatchApproval'
+            ? { fileChanges: params.fileChanges || [], reason: params.reason }
+            : { command: params.command, cwd: params.cwd, reason: params.reason },
+          title: params.reason || null,
         });
       });
     }
@@ -173,7 +377,7 @@ export function startCodexSession({
       threadId = result?.thread?.id || threadId;
       if (!threadId) throw new Error('Codex app-server did not return a thread id');
       manager.retainThread(threadId);
-      currentModel = result?.thread?.model || currentModel;
+      currentModel = result?.model || result?.thread?.model || currentModel;
       onMessage({
         type: 'system', subtype: 'init', session_id: threadId,
         model: currentModel, cwd, permissionMode: currentMode,
@@ -182,6 +386,12 @@ export function startCodexSession({
       resolveReady();
       pump();
     } catch (err) {
+      if (closed) return;
+      closed = true;
+      extensions.dispose();
+      unsubscribe();
+      unsubscribeRequests();
+      unsubscribeManagerClose();
       rejectReady(err);
       onStateChange('error');
       onError(err);
@@ -203,11 +413,33 @@ export function startCodexSession({
     };
     if (currentModel) params.model = currentModel;
     if (currentEffort) params.effort = currentEffort;
-    const result = await manager.request('turn/start', params);
-    activeTurnId = result?.turn?.id || activeTurnId;
+    startPending = true;
+    let result;
+    try {
+      result = await manager.request('turn/start', params);
+    } finally {
+      startPending = false;
+    }
+    if (closed) {
+      resultEpoch.consume(entry.id);
+      return;
+    }
+    const responseTurnId = result?.turn?.id;
+    // Two handles starting a turn on a shared thread in the same instant both
+    // see a turn/started they cannot attribute, so the earlier claim can be a
+    // sibling's turn. The turn/start response is authoritative: drop the wrong
+    // id (and anything attributed to it) and adopt the real one, rather than
+    // failing the session over a race neither side could have resolved.
+    if (activeTurnId && responseTurnId && activeTurnId !== responseTurnId) {
+      releaseMisclaimedTurn(activeTurnId);
+      activeTurnId = null;
+    }
+    activeTurnId = responseTurnId || activeTurnId;
     if (!activeTurnId) throw new Error('Codex app-server did not return a turn id');
-    await waitForTurn(activeTurnId);
-    completedTurns.delete(activeTurnId);
+    if (!completedTurns.has(activeTurnId)) ownedTurnIds.add(activeTurnId);
+    const turnId = activeTurnId;
+    await waitForTurn(turnId);
+    completedTurns.delete(turnId);
     activeTurnId = null;
     resultEpoch.consume(entry.id);
   }
@@ -234,6 +466,12 @@ export function startCodexSession({
           // nobody can see anymore. manager.onClose covers the whole-app-
           // server-died case; this covers the per-turn failure case.
           closed = true;
+          ownedTurnIds.clear();
+          recentTurnIds.clear();
+          startedItemIds.clear();
+          startedItemTurns.clear();
+          recentStartedItemIds.clear();
+          extensions.dispose();
           onError(err);
         }
       }
@@ -281,13 +519,23 @@ export function startCodexSession({
   function close() {
     if (closed) return;
     closed = true;
+    extensions.dispose();
     for (const pending of pendingApprovals.values()) {
       const result = pending.kind === 'permissions'
         ? { permissions: [], scope: 'turn' }
-        : { decision: 'cancel' };
+        : pending.kind === 'userInput'
+          ? { answers: {} }
+          : pending.kind === 'legacyDecision'
+            ? { decision: 'abort' }
+            : { decision: 'cancel' };
       pending.resolve({ handled: true, result });
     }
     pendingApprovals.clear();
+    ownedTurnIds.clear();
+    recentTurnIds.clear();
+    startedItemIds.clear();
+    startedItemTurns.clear();
+    recentStartedItemIds.clear();
     unsubscribe();
     unsubscribeRequests();
     unsubscribeManagerClose();
@@ -320,12 +568,25 @@ export function startCodexSession({
           permissions: allow ? pending.permissions : [],
           scope: allow && decision?.alwaysAllow ? 'session' : 'turn',
         }
-      : {
-          decision: allow && decision?.alwaysAllow
-            ? 'acceptForSession'
-            : allow ? 'accept' : 'decline',
-        };
+      : pending.kind === 'userInput'
+        ? {
+            answers: allow && decision?.updatedInput?.answers && typeof decision.updatedInput.answers === 'object'
+              ? decision.updatedInput.answers
+              : {},
+          }
+        : pending.kind === 'legacyDecision'
+          ? {
+              decision: allow && decision?.alwaysAllow
+                ? 'approved_for_session'
+                : allow ? 'approved' : 'denied',
+            }
+          : {
+              decision: allow && decision?.alwaysAllow
+                ? 'acceptForSession'
+                : allow ? 'accept' : 'decline',
+            };
     pending.resolve({ handled: true, result });
+    onApprovalResolved?.(String(requestId));
     return true;
   }
 
@@ -369,6 +630,14 @@ export function startCodexSession({
     },
     setMode: async (mode) => { currentMode = mode; },
     resolveApproval,
+    getMcpAuthPending: () => [...mcpAuthPending.entries()].map(([name, entry]) => ({
+      name, url: entry.url, message: entry.message,
+    })),
+    rewindConversation: async (turnIndex, options) => {
+      await ready;
+      if (closed) throw new Error('Codex session is closed');
+      return rewindCodexConversation(manager, threadId, cwd, turnIndex, options);
+    },
     getMode: () => currentMode,
     listQueue,
     removeQueued,
@@ -376,29 +645,19 @@ export function startCodexSession({
     sendNow,
     debugSnapshot: () => ({ threadId, activeTurnId, queuedTurns: pending.length, currentMode, ...resultEpoch.snapshot() }),
     query: {
-      supportedModels: async () => {
-        const result = await manager.request('model/list', { limit: 100, includeHidden: false });
-        return (result?.data || []).map((entry) => ({
-          value: entry.model || entry.id,
-          displayName: entry.displayName || entry.model || entry.id,
-          description: entry.description || '',
-          resolvedModel: entry.model || entry.id,
-          // Not every model supports every advertised effort value (e.g.
-          // some lack 'none'/'minimal', others lack 'ultra') - carried
-          // through so resolveEfforts() can validate per-model.
-          supportedEfforts: Array.isArray(entry.supportedReasoningEfforts) ? entry.supportedReasoningEfforts : null,
-        }));
-      },
+      supportedModels: () => listCodexModels(manager),
       setModel: async (next) => { currentModel = next || null; },
       setEffort: async (next) => { currentEffort = next || null; },
       setMaxThinkingTokens: unsupported('setMaxThinkingTokens'),
-      supportedCommands: async () => [],
-      supportedAgents: async () => [],
-      mcpServerStatus: async () => [],
-      toggleMcpServer: unsupported('toggleMcpServer'),
-      reconnectMcpServer: unsupported('reconnectMcpServer'),
-      reloadPlugins: async () => ({ plugins: [] }),
-      setPluginEnabled: unsupported('setPluginEnabled'),
+      supportedCommands: extensions.supportedCommands,
+      supportedAgents: extensions.supportedAgents,
+      mcpServerStatus: extensions.mcpServerStatus,
+      toggleMcpServer: extensions.toggleMcpServer,
+      reconnectMcpServer: extensions.reconnectMcpServer,
+      mcpOauthLogin: extensions.mcpOauthLogin,
+      reloadPlugins: extensions.reloadPlugins,
+      setPluginEnabled: extensions.setPluginEnabled,
+      codexRateLimits: extensions.codexRateLimits,
     },
   };
 }

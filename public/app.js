@@ -27,7 +27,7 @@ import { initQueuePanel } from '/queue-panel.js';
 import { createPromptHistoryStore, fuzzyScore } from '/prompt-history.js';
 import { initHistorySearch } from '/history-search.js';
 import { PERMISSION_MODES } from '/permissions.js';
-import { createProviderCatalog } from '/provider-catalog.js';
+import { createProviderCatalog, supportedEffortsForModel } from '/provider-catalog.js';
 import { createAgentLivenessTracker } from '/agent-liveness.js';
 
 // Starts with the two providers understood by older servers. The launcher
@@ -314,7 +314,8 @@ function sessionAddressName() {
 function composePlaceholder() {
   return `Message ${sessionAddressName()}... (Enter to send, Shift+Enter for newline, @ for files, / for commands)`;
 }
-let cachedModels = null; // Query.supportedModels() result, fetched once per session on first /model - see fetchModels
+let cachedModels = null; // Query.supportedModels() result, fetched once per session for /model or Settings
+let settingsEffortModelsPending = false;
 // Whether the plugin panel has already paid its one reload cost for this
 // session (B2) - opening Settings repeatedly used to re-run reload-plugins
 // (and its side effect of reloading commands/agents/MCP servers) every
@@ -323,6 +324,7 @@ let cachedModels = null; // Query.supportedModels() result, fetched once per ses
 let pluginsLoadedForSession = false;
 let hasFileCheckpointing = true; // set from cockpit:hello/state - see applySession
 let canForkConversation = true;
+let rewindIncludesSelectedTurn = false; // provider capability, not a provider-id branch
 let turnIndexUnreliable = false; // set from cockpit:hello/state - hides the rewind button entirely, see applySession
 
 // Reconnect: the highest event seq rendered so far (event-log.js),
@@ -640,12 +642,22 @@ async function reconnectMcpServerApi(name) {
   });
 }
 
+async function authenticateMcpServer(name) {
+  const result = await sessionFetch('/mcp-auth', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ name }),
+  });
+  return result.authorizationUrl;
+}
+
 const mcpPanel = initMcpPanel({
   listEl: document.getElementById('mcpServerList'),
   refreshButton: document.getElementById('mcpRefreshBtn'),
   fetchStatus: fetchMcpStatus,
   toggleServer: toggleMcpServer,
   reconnectServer: reconnectMcpServerApi,
+  authenticateServer: authenticateMcpServer,
 });
 
 // Plugins panel (settings modal) - loadOrReloadPlugins reuses reloadPlugins()
@@ -917,6 +929,7 @@ const settings = initSettings({
   // the round trip rather than surface a confusing error on open.
   onOpen: () => {
     if (!sessionId) return;
+    refreshSettingsEffortCatalog();
     mcpPanel.refresh(); // read-only status GET, safe to re-run every open
     // Plugin panel only auto-loads once per session (B2, see
     // pluginsLoadedForSession) - past the first open, its "Reload plugins"
@@ -1201,16 +1214,28 @@ thinkingBudgetBtn.addEventListener('change', () => selectThinking());
 thinkingDisplayBtn.addEventListener('change', () => selectThinking());
 
 // Effort option labels/tooltips (Grok's low/medium/high/xhigh, Claude's
-// wider low..max ladder with its blank "Default" entry) are static
+// wider low..max ladder with its blank "Default" entry) come from the
 // launch-time catalog data served on launch.effortOptions (/api/providers),
-// read back here via launchConfig(). effortLabel() above reads the same
-// field for the header badge.
+// except dynamic providers such as Codex, which narrow the list to the
+// selected model's live model/list metadata.
 
 // Settings modal's Effort select is provider-aware (unlike the launcher's
 // startEffortSelect, which only ever needs to reflect the provider picker
 // at launch time) - a live session's provider doesn't change, but this
 // function still needs to run per-summary since the modal's DOM is shared
 // across every session tab a browser might switch between via history nav.
+function dynamicModelCatalog(provider) {
+  if (Array.isArray(cachedModels)) return cachedModels;
+  return startModelCatalogProvider === provider && Array.isArray(startModelCatalog)
+    ? startModelCatalog
+    : [];
+}
+
+function hasDynamicModelCatalog(provider) {
+  return Array.isArray(cachedModels)
+    || (startModelCatalogProvider === provider && Array.isArray(startModelCatalog) && startModelCatalog.length > 0);
+}
+
 function fillSettingsEffortSelect(provider) {
   // thinkingBudget is Claude-only today (provider-registry.js's
   // capabilities) - it's what distinguishes "this provider's effort select
@@ -1218,18 +1243,36 @@ function fillSettingsEffortSelect(provider) {
   // also ships a static effortOptions catalog but no separate thinking-
   // budget dial.
   const thinkingBudget = providerCatalog.get(provider)?.capabilities?.thinkingBudget;
-  const options = launchConfig(provider).effortOptions;
-  const advertisedEfforts = launchConfig(provider).efforts;
-  const list = Array.isArray(options)
+  const launch = launchConfig(provider);
+  const options = launch.effortOptions;
+  const advertisedEfforts = launch.efforts;
+  const dynamicModels = launch.dynamicModels === true;
+  const modelCatalog = dynamicModels ? dynamicModelCatalog(provider) : [];
+  const catalogReady = dynamicModels && hasDynamicModelCatalog(provider);
+  const loadingCatalog = dynamicModels && settingsEffortModelsPending && !catalogReady;
+  const modelEfforts = dynamicModels
+    ? supportedEffortsForModel(
+      modelCatalog,
+      currentModel,
+      advertisedEfforts,
+    )
+    : advertisedEfforts;
+  const list = loadingCatalog
+    ? [{ value: '', label: 'Loading supported efforts…' }]
+    : Array.isArray(options)
     ? options
-    : Array.isArray(advertisedEfforts)
-      ? [{ value: '', label: 'Default' }, ...advertisedEfforts.map((value) => ({ value, label: String(value) }))]
+    : Array.isArray(modelEfforts)
+      ? [{ value: '', label: 'Default' }, ...modelEfforts.map((value) => ({ value, label: String(value) }))]
       : [];
-  effortBtn.title = thinkingBudget
+  const defaultTitle = thinkingBudget
     ? "Claude's reasoning effort for this session - low is cheaper and faster, high/xhigh/max spend more on thinking depth and thoroughness. Default leaves it up to the model."
     : Array.isArray(options)
       ? 'Grok reasoning effort. Low is cheaper and faster. High / Extra high spend more on reasoning.'
       : `${providerCatalog.label(provider)} reasoning effort for this session.`;
+  effortBtn.title = loadingCatalog
+    ? `${providerCatalog.label(provider)} model effort choices are loading - please wait.`
+    : defaultTitle;
+  effortBtn.disabled = loadingCatalog;
   effortBtn.innerHTML = '';
   for (const opt of list) {
     const option = document.createElement('option');
@@ -1238,6 +1281,34 @@ function fillSettingsEffortSelect(provider) {
     effortBtn.append(option);
   }
 }
+
+// Dynamic providers need the live model catalog before Settings can safely
+// offer model-specific effort values. The launcher often already supplied
+// it, but a resumed session can arrive while the launcher is pointed at a
+// different provider, so fetch it on demand when Settings opens.
+async function refreshSettingsEffortCatalog() {
+  const provider = currentProvider;
+  if (!sessionId || launchConfig(provider).dynamicModels !== true) return;
+  if (hasDynamicModelCatalog(provider)) {
+    fillSettingsEffortSelect(provider);
+    return;
+  }
+  const attachedSession = sessionId;
+  const selectedValue = effortBtn.value;
+  settingsEffortModelsPending = true;
+  fillSettingsEffortSelect(provider);
+  try {
+    await fetchModels();
+  } catch {
+    // Leave the fallback list available after a failed optional refresh;
+    // the server-side effort route still validates against the live catalog.
+  }
+  if (sessionId !== attachedSession || currentProvider !== provider) return;
+  settingsEffortModelsPending = false;
+  fillSettingsEffortSelect(provider);
+  if (selectedValue) effortBtn.value = selectedValue;
+}
+
 fillSettingsEffortSelect('grok'); // placeholder population before any session summary arrives
 effortBtn.addEventListener('change', () => selectEffort());
 
@@ -1630,7 +1701,7 @@ async function onRewindClick(turnIndex) {
     : 'Files on disk are left as-is. This session stays open.';
   const lead = hasFileCheckpointing
     ? 'Rewind here? Opens a new session forked at this point.'
-    : `Fork back to here? Opens a new ${sessionProviderLabel()} session at this turn.`;
+    : `Fork back to here? Opens a new ${sessionProviderLabel()} session at this turn.${rewindIncludesSelectedTurn ? ' Includes this turn and its response.' : ''}`;
   if (!confirm(`${lead} ${fileNote}`)) return;
   const res = await fetch(`/api/sessions/${sessionId}/rewind`, {
     method: 'POST',
@@ -1775,8 +1846,37 @@ function launchModels(provider) {
   return [{ value: '', label: 'Default model' }];
 }
 
-function fillStartModels() {
-  const list = launchModels(selectedProvider());
+let startModelsRequest = 0;
+let startModelCatalog = [];
+let startModelCatalogProvider = null;
+async function fillStartModels() {
+  const request = ++startModelsRequest;
+  const provider = selectedProvider();
+  startModelCatalog = [];
+  startModelCatalogProvider = provider;
+  let list = launchModels(provider);
+  startModelSelect.disabled = false;
+  startModelSelect.title = '';
+  if (launchConfig(provider).dynamicModels) {
+    startModelSelect.innerHTML = '<option value="">Loading models…</option>';
+    startModelSelect.disabled = true;
+    try {
+      const res = await fetch(`/api/providers/${encodeURIComponent(provider)}/models`);
+      const models = await res.json();
+      if (!res.ok) throw new Error(models.error || 'Could not load models');
+      if (!Array.isArray(models)) throw new Error('Model list was not an array');
+      if (request !== startModelsRequest) return;
+      startModelCatalog = models;
+      list = [{ value: '', label: 'Default model' }, ...models.map((model) => ({
+        value: model.value, label: model.displayName || model.value,
+      }))];
+    } catch (err) {
+      list = [{ value: '', label: 'Default model (model list unavailable)' }];
+      if (request === startModelsRequest) startModelSelect.title = String(err.message || err);
+    }
+    if (request !== startModelsRequest) return;
+    startModelSelect.disabled = false;
+  }
   startModelSelect.innerHTML = '';
   for (const item of list) {
     const opt = document.createElement('option');
@@ -1784,6 +1884,7 @@ function fillStartModels() {
     opt.textContent = item.label;
     startModelSelect.append(opt);
   }
+  if (typeof fillStartEffort === 'function') fillStartEffort();
 }
 
 // Launcher's effort/thinking-budget picker - same slot, repopulated per
@@ -1802,8 +1903,11 @@ function fillStartEffort() {
   const grok = !thinkingBudget && Array.isArray(options);
   const generic = !thinkingBudget && !grok;
   const advertisedEfforts = launchConfig(provider).efforts;
-  const genericEfforts = Array.isArray(advertisedEfforts)
-    ? [{ value: '', label: 'Default effort' }, ...advertisedEfforts.map((value) => ({ value, label: String(value) }))]
+  const modelEfforts = launchConfig(provider).dynamicModels
+    ? supportedEffortsForModel(startModelCatalog, startModelSelect.value, advertisedEfforts)
+    : advertisedEfforts;
+  const genericEfforts = Array.isArray(modelEfforts)
+    ? [{ value: '', label: 'Default effort' }, ...modelEfforts.map((value) => ({ value, label: String(value) }))]
     : [];
   const list = grok ? options : generic ? genericEfforts : THINKING_BUDGET_PRESETS;
   startEffortSelect.title = grok
@@ -1844,6 +1948,7 @@ startProviderSelect.addEventListener('change', () => {
   fillStartEffort();
   loadResumable();
 });
+startModelSelect.addEventListener('change', fillStartEffort);
 fillStartModels();
 
 // Checked once on launch (server caches the result too - see
@@ -2020,8 +2125,10 @@ function connect(id, token, { reconnect = false } = {}) {
     agentsList.innerHTML = '';
     agentsBtn.classList.remove('open');
     cachedModels = null;
+    settingsEffortModelsPending = false;
     hasFileCheckpointing = true; // corrected by cockpit:hello before any message can reach renderMessage
     canForkConversation = true;
+    rewindIncludesSelectedTurn = false;
     turnIndexUnreliable = false; // same
     previousState = null;
     agentLiveness.reset(); // new session - any toolUseIds a previous session's tracker was still polling are meaningless here
@@ -2135,6 +2242,8 @@ function connect(id, token, { reconnect = false } = {}) {
       applySession(payload.session);
     } else if (payload.type === 'cockpit:approval-request') {
       approvalPanel.enqueue(payload.request);
+    } else if (payload.type === 'cockpit:approval-resolved') {
+      approvalPanel.remove(payload.requestId);
     } else if (payload.type === 'cockpit:usage') {
       statsPanel.update(payload.usage, payload.context, payload.rateLimits);
       // context.autoCompact comes from src/context-usage.js server-side:
@@ -2239,6 +2348,7 @@ function applySession(session) {
   hasFileCheckpointing = session.hasFileCheckpointing;
   const caps = session.capabilities || {};
   canForkConversation = caps.conversationFork !== false;
+  rewindIncludesSelectedTurn = caps.rewindIncludesSelectedTurn === true;
   // Grok's and Codex's own approval responses have no project-level scope
   // (only turn/session) - offering "always in this project" for either
   // would promise a persistence that server-side never happens.

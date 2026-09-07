@@ -2,17 +2,24 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { startCodexSession } from '../src/codex-session.js';
 
-function createManager() {
+function createManager({ deferTurnStart = false, turnStartId = 'turn-1' } = {}) {
   const calls = [];
+  const notificationHandlers = new Set();
   let notify;
   let serverRequest;
   let completeTurns = true;
+  let releaseTurnStart;
   const closeHandlers = new Set();
   const manager = {
     calls,
     set completeTurns(value) { completeTurns = value; },
+    releaseTurnStart() { releaseTurnStart?.(); },
     ready: async () => {},
-    subscribe(handler) { notify = handler; return () => {}; },
+    subscribe(handler) {
+      notify = handler;
+      notificationHandlers.add(handler);
+      return () => notificationHandlers.delete(handler);
+    },
     onServerRequest(handler) { serverRequest = handler; return () => {}; },
     onClose(handler) { closeHandlers.add(handler); return () => closeHandlers.delete(handler); },
     fail(err) { for (const handler of closeHandlers) handler(err); },
@@ -32,18 +39,24 @@ function createManager() {
         return { thread: { id: params.threadId || 'thread-new', model: params.model || 'codex-model' } };
       }
       if (method === 'turn/start') {
-        const result = { turn: { id: 'turn-1', status: 'inProgress' } };
-        if (completeTurns) {
-          setImmediate(() => notify('turn/completed', {
-            threadId: params.threadId,
-            turn: { id: 'turn-1', status: 'completed' },
-          }));
+        const result = { turn: { id: turnStartId, status: 'inProgress' } };
+        const finish = () => {
+          if (completeTurns) {
+            setImmediate(() => notificationHandlers.forEach((handler) => handler('turn/completed', {
+              threadId: params.threadId,
+              turn: { id: turnStartId, status: 'completed' },
+            })));
+          }
+          return result;
+        };
+        if (deferTurnStart) {
+          return new Promise((resolve) => { releaseTurnStart = () => resolve(finish()); });
         }
-        return result;
+        return finish();
       }
       return {};
     },
-    emit(method, params) { notify(method, params); },
+    emit(method, params) { notificationHandlers.forEach((handler) => handler(method, params)); },
     requestFromServer(method, params, id = 7) { return serverRequest(method, params, id); },
   };
   return manager;
@@ -88,10 +101,125 @@ test('Codex sessions start a thread, queue a prompt, and finish a streamed turn'
   assert.equal(turn.threadId, 'thread-new');
   assert.equal(turn.input[0].text, 'Explain this repo');
   assert.equal(turn.effort, 'high');
-  assert.equal(turn.approvalPolicy, 'onRequest');
+  assert.equal(turn.approvalPolicy, 'on-request');
   assert.deepEqual(turn.sandboxPolicy, { type: 'workspaceWrite' });
   assert.ok(messages.some((message) => message.type === 'result' && message.subtype === 'success'));
   handle.close();
+});
+
+test('Codex claims turn/started before turn/start resolves so events and interrupt are not dropped', async () => {
+  const manager = createManager({ deferTurnStart: true });
+  const { handle, states } = startOptions(manager);
+  handle.pushInput('race the turn start');
+  await waitFor(() => manager.calls.some(([method]) => method === 'turn/start'), 'turn/start request');
+
+  manager.emit('turn/started', {
+    threadId: 'thread-new', turn: { id: 'turn-1', status: 'inProgress' },
+  });
+  await waitFor(() => handle.debugSnapshot().activeTurnId === 'turn-1', 'claimed active turn');
+
+  await handle.interrupt();
+  assert.deepEqual(manager.calls.at(-1), ['turn/interrupt', { threadId: 'thread-new', turnId: 'turn-1' }]);
+
+  manager.releaseTurnStart();
+  await waitFor(() => states.at(-1) === 'idle', 'idle after raced turn');
+  handle.close();
+});
+
+test('Codex adopts the turn/start response id when it claimed a sibling turn in the race window', async () => {
+  const manager = createManager({ deferTurnStart: true, turnStartId: 'turn-mine' });
+  manager.completeTurns = false; // this test drives turn/completed by hand
+  const { handle, messages, states } = startOptions(manager);
+  handle.pushInput('race a sibling turn start');
+  await waitFor(() => manager.calls.some(([method]) => method === 'turn/start'), 'turn/start request');
+
+  // Neither handle can attribute a turn/started during the window, so this one
+  // optimistically claims a turn the app-server actually started for a sibling.
+  manager.emit('turn/started', {
+    threadId: 'thread-new', turn: { id: 'turn-sibling', status: 'inProgress' },
+  });
+  await waitFor(() => handle.debugSnapshot().activeTurnId === 'turn-sibling', 'claimed sibling turn');
+
+  manager.releaseTurnStart();
+  await waitFor(() => handle.debugSnapshot().activeTurnId === 'turn-mine', 'adopted response turn id');
+  assert.ok(!states.includes('error'), 'the race must not fail the session');
+
+  // The mis-claimed id is released outright, not parked in the late-event
+  // tail, so the sibling's remaining output stays out of this transcript.
+  const before = messages.length;
+  manager.emit('item/completed', {
+    threadId: 'thread-new', turnId: 'turn-sibling',
+    item: { id: 'sibling-item', type: 'commandExecution', command: 'rm -rf /', status: 'completed' },
+  });
+  assert.equal(messages.length, before, 'sibling turn events must be ignored after release');
+
+  manager.emit('turn/completed', {
+    threadId: 'thread-new', turn: { id: 'turn-mine', status: 'completed' },
+  });
+  await waitFor(() => states.at(-1) === 'idle', 'idle after adopting the real turn');
+  handle.close();
+});
+
+test('Codex uses the resolved top-level thread model for token pricing', async () => {
+  const manager = createManager();
+  manager.completeTurns = false;
+  const originalRequest = manager.request.bind(manager);
+  manager.request = async (method, params) => {
+    if (method === 'thread/start') {
+      manager.calls.push([method, params]);
+      return { thread: { id: 'thread-new' }, model: 'gpt-5.3-codex' };
+    }
+    return originalRequest(method, params);
+  };
+  const { handle, messages } = startOptions(manager);
+  await waitFor(() => manager.calls.some(([method]) => method === 'thread/start'), 'thread start');
+  handle.pushInput('model probe');
+  await waitFor(() => manager.calls.some(([method]) => method === 'turn/start'), 'turn start');
+
+  manager.emit('thread/tokenUsage/updated', {
+    threadId: 'thread-new', turnId: 'turn-1',
+    tokenUsage: {
+      last: { inputTokens: 100, cachedInputTokens: 25, outputTokens: 10, reasoningOutputTokens: 2, totalTokens: 110 },
+      total: { inputTokens: 100, cachedInputTokens: 25, outputTokens: 10, reasoningOutputTokens: 2, totalTokens: 110 },
+    },
+  });
+
+  const usage = messages.find((message) => message.type === 'assistant' && message.message?.usage);
+  assert.ok(usage);
+  assert.equal(usage.message.model, 'gpt-5.3-codex');
+  assert.equal(usage.message.usage.input_tokens, 75);
+  handle.close();
+});
+
+// Wire values follow the app-server AskForApproval schema, independently of
+// the camelCase SandboxPolicy discriminators and Cockpit's UI mode names.
+test('Codex turn policies remain valid when switching permission modes', async () => {
+  const manager = createManager();
+  const { handle, states, errors } = startOptions(manager);
+  try {
+    const modes = [
+      ['default', 'on-request', 'workspaceWrite'],
+      ['acceptEdits', 'on-request', 'workspaceWrite'],
+      ['auto', 'on-request', 'workspaceWrite'],
+      ['dontAsk', 'never', 'workspaceWrite'],
+      ['plan', 'never', 'readOnly'],
+      ['bypassPermissions', 'never', 'dangerFullAccess'],
+      ['default', 'on-request', 'workspaceWrite'],
+    ];
+    for (const [mode, approvalPolicy, sandboxType] of modes) {
+      await handle.setMode(mode);
+      const previousTurns = manager.calls.filter(([method]) => method === 'turn/start').length;
+      handle.pushInput(`Check ${mode}`);
+      await waitFor(() => manager.calls.filter(([method]) => method === 'turn/start').length > previousTurns, mode);
+      await waitFor(() => states.at(-1) === 'idle', `${mode} completion`);
+      const turn = manager.calls.filter(([method]) => method === 'turn/start').at(-1)[1];
+      assert.equal(turn.approvalPolicy, approvalPolicy, mode);
+      assert.deepEqual(turn.sandboxPolicy, { type: sandboxType }, mode);
+    }
+    assert.deepEqual(errors, []);
+  } finally {
+    handle.close();
+  }
 });
 
 test('Codex resume uses thread/resume and command approvals follow permission mode', async () => {
@@ -129,6 +257,127 @@ test('Codex permission requests reach the client and return only requested grant
     handled: true,
     result: { permissions: requested, scope: 'session' },
   });
+  handle.close();
+});
+
+test('Codex requestUserInput uses the shared question UI contract and returns Codex answers', async () => {
+  const manager = createManager();
+  const approvals = [];
+  const { handle } = startOptions(manager, { onApprovalRequest: (request) => approvals.push(request) });
+  await waitFor(() => manager.calls.length > 0, 'thread start');
+
+  const responsePromise = manager.requestFromServer('item/tool/requestUserInput', {
+    threadId: 'thread-new', turnId: 'turn-1', itemId: 'item-1',
+    questions: [{ id: 'choice', header: 'Choice', question: 'Pick one', options: [{ label: 'yes', description: 'continue' }] }],
+  }, 51);
+  await waitFor(() => approvals.length === 1, 'question approval');
+  assert.equal(approvals[0].toolName, 'AskUserQuestion');
+  assert.equal(approvals[0].answerFormat, 'question-ids');
+  assert.equal(handle.resolveApproval(approvals[0].requestId, {
+    behavior: 'allow', updatedInput: { answers: { choice: { answers: ['yes'] } } },
+  }), true);
+  assert.deepEqual(await responsePromise, {
+    handled: true,
+    result: { answers: { choice: { answers: ['yes'] } } },
+  });
+  handle.close();
+});
+
+test('Codex legacy approval aliases return legacy decisions and client-tool calls fail explicitly', async () => {
+  const manager = createManager();
+  const approvals = [];
+  const { handle } = startOptions(manager, { onApprovalRequest: (request) => approvals.push(request) });
+  await waitFor(() => manager.calls.length > 0, 'thread start');
+
+  const commandResponse = manager.requestFromServer('execCommandApproval', {
+    conversationId: 'thread-new', command: 'npm test', cwd: '/repo', reason: 'Run tests',
+  }, 61);
+  await waitFor(() => approvals.length === 1, 'legacy command approval');
+  assert.equal(approvals[0].toolName, 'Bash');
+  assert.equal(handle.resolveApproval(61, { behavior: 'allow', alwaysAllow: 'session' }), true);
+  assert.deepEqual(await commandResponse, {
+    handled: true,
+    result: { decision: 'approved_for_session' },
+  });
+
+  assert.deepEqual(await manager.requestFromServer('item/tool/call', {
+    threadId: 'thread-new', tool: 'computer', input: {},
+  }, 62), {
+    handled: true,
+    result: {
+      contentItems: [{
+        type: 'inputText',
+        text: 'Prompt Cockpit cannot execute Codex client tool "computer"',
+      }],
+      success: false,
+    },
+  });
+
+  const patchResponse = manager.requestFromServer('applyPatchApproval', {
+    conversationId: 'thread-new', fileChanges: [{ path: 'src/app.js' }], reason: 'Edit source',
+  }, 63);
+  await waitFor(() => approvals.length === 2, 'legacy patch approval');
+  handle.close();
+  assert.deepEqual(await patchResponse, {
+    handled: true,
+    result: { decision: 'abort' },
+  });
+});
+
+test('Codex MCP URL elicitation is accepted and exposes a pending auth link', async () => {
+  const manager = createManager();
+  const authRequests = [];
+  const authResolved = [];
+  const { handle } = startOptions(manager, {
+    onMcpAuthRequest: (request) => authRequests.push(request),
+    onMcpAuthResolved: (request) => authResolved.push(request),
+  });
+  await waitFor(() => manager.calls.length > 0, 'thread start');
+
+  const response = await manager.requestFromServer('mcpServer/elicitation/request', {
+    threadId: 'thread-new', turnId: 'turn-1', serverName: 'github',
+    elicitationId: 'elic-1', mode: 'url', url: 'https://example.com/oauth', message: 'Authorize GitHub',
+  }, 52);
+  assert.deepEqual(response, { handled: true, result: { action: 'accept' } });
+  assert.deepEqual(handle.getMcpAuthPending(), [{ name: 'github', url: 'https://example.com/oauth', message: 'Authorize GitHub' }]);
+  assert.deepEqual(authRequests, [{ serverName: 'github', url: 'https://example.com/oauth', message: 'Authorize GitHub' }]);
+
+  manager.emit('mcpServer/oauthLogin/completed', { name: 'github', success: true });
+  await waitFor(() => handle.getMcpAuthPending().length === 0, 'MCP auth completion');
+  assert.deepEqual(authResolved, [{ serverName: 'github' }]);
+  handle.close();
+});
+
+test('Codex MCP form elicitation is explicitly declined when no schema form UI exists', async () => {
+  const manager = createManager();
+  const { handle } = startOptions(manager);
+  await waitFor(() => manager.calls.length > 0, 'thread start');
+  const response = await manager.requestFromServer('mcpServer/elicitation/request', {
+    threadId: 'thread-new', serverName: 'github', mode: 'form', message: 'Enter a token', requestedSchema: {},
+  });
+  assert.deepEqual(response, { handled: true, result: { action: 'decline' } });
+  handle.close();
+});
+
+test('Codex clears an approval when app-server sends serverRequest/resolved', async () => {
+  const manager = createManager();
+  const approvals = [];
+  const resolved = [];
+  const { handle } = startOptions(manager, {
+    onApprovalRequest: (request) => approvals.push(request),
+    onApprovalResolved: (requestId) => resolved.push(requestId),
+  });
+  await waitFor(() => manager.calls.length > 0, 'thread start');
+
+  const responsePromise = manager.requestFromServer('item/commandExecution/requestApproval', {
+    threadId: 'thread-new', turnId: 'turn-1', command: 'npm test',
+  }, 42);
+  await waitFor(() => approvals.length === 1, 'command approval');
+  manager.emit('serverRequest/resolved', { threadId: 'thread-new', requestId: 42 });
+
+  assert.deepEqual(await responsePromise, { handled: true, result: { decision: 'cancel' } });
+  assert.deepEqual(resolved, ['42']);
+  assert.equal(handle.resolveApproval('42', { behavior: 'allow' }), false);
   handle.close();
 });
 
@@ -266,6 +515,19 @@ test('a single turn/start failure closes the session so pump() does not keep dri
   assert.equal(handle.pushInput('third'), null, 'the session must refuse new work once a turn has fatally failed');
 });
 
+test('a thread/start failure closes the Codex handle instead of accepting work after the row is reaped', async () => {
+  const manager = createManager();
+  const originalRequest = manager.request.bind(manager);
+  manager.request = async (method, params) => {
+    if (method === 'thread/start') throw new Error('thread/start rejected: unavailable');
+    return originalRequest(method, params);
+  };
+  const { handle, errors } = startOptions(manager);
+  await waitFor(() => errors.length > 0, 'thread/start failure to surface');
+  assert.match(errors[0].message, /thread\/start rejected/);
+  assert.equal(handle.pushInput('after startup failure'), null);
+});
+
 test('closing a session sends turn/interrupt before thread/unsubscribe, not just unsubscribe', async () => {
   const manager = createManager();
   manager.completeTurns = false;
@@ -298,4 +560,109 @@ test('closing one of two Cockpit sessions on the same Codex thread does not unsu
 
   second.handle.close();
   await waitFor(() => manager.calls.some(([method]) => method === 'thread/unsubscribe'), 'unsubscribe sent');
+});
+
+test('a passive session on a shared thread does not claim or interrupt another session turn', async () => {
+  const manager = createManager();
+  manager.completeTurns = false;
+  const first = startOptions(manager);
+  await waitFor(() => manager.calls.filter(([method]) => method === 'thread/start').length === 1, 'first thread start');
+  const second = startOptions(manager);
+  await waitFor(() => manager.calls.filter(([method]) => method === 'thread/start').length === 2, 'second thread start');
+
+  first.handle.pushInput('owned turn');
+  await waitFor(() => manager.calls.some(([method]) => method === 'turn/start'), 'owned turn start');
+  manager.emit('turn/started', { threadId: 'thread-new', turn: { id: 'other-session-turn', status: 'inProgress' } });
+  assert.equal(second.handle.debugSnapshot().activeTurnId, null);
+
+  const interruptCount = () => manager.calls.filter(([method]) => method === 'turn/interrupt').length;
+  second.handle.close();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(interruptCount(), 0);
+
+  first.handle.close();
+  await waitFor(() => interruptCount() === 1, 'owned turn interrupt');
+});
+
+test('Codex keeps token usage for a turn after it completes', async () => {
+  const manager = createManager();
+  const { handle, messages, states } = startOptions(manager);
+  handle.pushInput('usage after complete');
+  await waitFor(() => states.at(-1) === 'idle', 'idle after turn');
+  assert.equal(handle.debugSnapshot().activeTurnId, null);
+
+  manager.emit('thread/tokenUsage/updated', {
+    threadId: 'thread-new', turnId: 'turn-1',
+    tokenUsage: {
+      last: { inputTokens: 20, outputTokens: 5, totalTokens: 25 },
+      total: { inputTokens: 20, outputTokens: 5, totalTokens: 25 },
+    },
+  });
+  const usage = messages.find((message) => message.type === 'assistant' && message.message?.usage);
+  assert.ok(usage);
+  assert.equal(usage.message.usage.output_tokens, 5);
+  handle.close();
+});
+
+test('Codex still applies item/completed after the turn is done', async () => {
+  const manager = createManager();
+  manager.completeTurns = false;
+  const { handle, messages, states } = startOptions(manager);
+  handle.pushInput('late item');
+  await waitFor(() => manager.calls.some(([method]) => method === 'turn/start'), 'turn start');
+  manager.emit('item/started', {
+    threadId: 'thread-new', turnId: 'turn-1',
+    item: { id: 'cmd-late', type: 'commandExecution', command: 'ls', status: 'inProgress' },
+  });
+  manager.emit('turn/completed', {
+    threadId: 'thread-new', turn: { id: 'turn-1', status: 'completed' },
+  });
+  await waitFor(() => states.at(-1) === 'idle', 'idle after turn');
+  manager.emit('item/completed', {
+    threadId: 'thread-new', turnId: 'turn-1',
+    item: { id: 'cmd-late', type: 'commandExecution', command: 'ls', status: 'completed', aggregatedOutput: 'ok' },
+  });
+  assert.ok(messages.some((message) => message.message?.content?.[0]?.type === 'tool_result'
+    && message.message.content[0].tool_use_id === 'cmd-late'));
+  handle.close();
+});
+
+test('Codex resume accepts token usage replay before any local turn', async () => {
+  const manager = createManager();
+  const { handle, messages } = startOptions(manager, { resume: 'thread-existing' });
+  await waitFor(() => manager.calls.some(([method]) => method === 'thread/resume'), 'thread/resume');
+  assert.equal(handle.debugSnapshot().activeTurnId, null);
+
+  manager.emit('thread/tokenUsage/updated', {
+    threadId: 'thread-existing', turnId: 'historical-turn',
+    tokenUsage: {
+      last: { inputTokens: 50, outputTokens: 10, totalTokens: 60 },
+      total: { inputTokens: 50, outputTokens: 10, totalTokens: 60 },
+    },
+  });
+  const usage = messages.find((message) => message.type === 'assistant' && message.message?.usage);
+  assert.ok(usage);
+  assert.equal(usage.message.usage.input_tokens, 50);
+  handle.close();
+});
+
+test('a passive session ignores another session\'s tool items on the shared thread', async () => {
+  const manager = createManager();
+  manager.completeTurns = false;
+  const first = startOptions(manager);
+  await waitFor(() => manager.calls.filter(([method]) => method === 'thread/start').length === 1, 'first thread start');
+  const second = startOptions(manager);
+  await waitFor(() => manager.calls.filter(([method]) => method === 'thread/start').length === 2, 'second thread start');
+
+  first.handle.pushInput('owned turn');
+  await waitFor(() => manager.calls.some(([method]) => method === 'turn/start'), 'owned turn start');
+  manager.emit('item/started', {
+    threadId: 'thread-new', turnId: 'turn-1',
+    item: { id: 'cmd-owned', type: 'commandExecution', command: 'ls', status: 'inProgress' },
+  });
+  assert.ok(first.messages.some((message) => message.message?.content?.[0]?.type === 'tool_use'));
+  assert.equal(second.messages.filter((message) => message.message?.content?.[0]?.type === 'tool_use').length, 0);
+
+  first.handle.close();
+  second.handle.close();
 });

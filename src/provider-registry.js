@@ -9,6 +9,7 @@ import { listGrokSessions } from './grok-launcher.js';
 import { fetchSessionHistory } from './session-history.js';
 import { fetchGrokSessionHistory } from './grok-history.js';
 import { isGrokAvailable } from './grok-cli.js';
+import { listCodexModels } from './codex-models.js';
 import { startCodexSession } from './codex-session.js';
 import { listCodexSessions, fetchCodexSessionHistory } from './codex-history.js';
 import { isCodexAvailable } from './codex-app-server.js';
@@ -20,8 +21,8 @@ export const GROK_EFFORTS = ['low', 'medium', 'high', 'xhigh'];
 export const CODEX_EFFORTS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
 
 // Static launch-time catalogs - what the launcher's model/effort
-// dropdowns show before a session exists (neither CLI can enumerate
-// its own models pre-launch). This is the one place a new model or
+// dropdowns show before a session exists. Codex discovers its models
+// dynamically through app-server. This is the one place a new static model or
 // effort tier gets added; providerDetails() below is the one place it
 // rides to the browser.
 const CLAUDE_START_MODELS = [
@@ -71,10 +72,8 @@ const PROVIDERS = Object.freeze({
     efforts: CLAUDE_EFFORTS,
     models: CLAUDE_START_MODELS,
     effortOptions: CLAUDE_EFFORT_OPTIONS,
-    // Moved out of session-registry.js's rewind() (formerly an
-    // if (provider === 'grok') {...} else {...this...} branch) so a third
-    // conversation-fork-capable provider doesn't fall through to Claude's
-    // implementation by default the way Codex almost did.
+    // Rewind lives on the descriptor so a new provider cannot silently fall
+    // through to Claude's fork implementation.
     rewind: async (row, turnIndex, { dryRun } = {}) => {
       const userMessageId = await resolveTurnUuid(row.providerSessionId, row.cwd, turnIndex);
       let filesResult = null;
@@ -96,6 +95,7 @@ const PROVIDERS = Object.freeze({
       pluginToggleViaHandle: false,
       pluginToggleViaFile: true,
       conversationFork: true,
+      rewindIncludesSelectedTurn: false,
       projectPersistentApprovals: true,
     }),
   }),
@@ -133,6 +133,7 @@ const PROVIDERS = Object.freeze({
       pluginToggleViaHandle: true,
       pluginToggleViaFile: false,
       conversationFork: true,
+      rewindIncludesSelectedTurn: false,
       // Grok's ACP permission responses have no scope concept beyond the
       // single decision for this request (grok-session.js's resolveApproval
       // ignores decision.alwaysAllow entirely) - "always in this project"
@@ -148,6 +149,8 @@ const PROVIDERS = Object.freeze({
     listResumableSessions: listCodexSessions,
     fetchHistory: fetchCodexSessionHistory,
     efforts: CODEX_EFFORTS,
+    listModels: listCodexModels,
+    rewind: (row, turnIndex, options) => row.handle.rewindConversation(turnIndex, options),
     // CODEX_EFFORTS is the advertised superset - not every model supports
     // every value. session-actions.js's effort route calls this to
     // validate against the live model rather than trusting the static
@@ -162,7 +165,7 @@ const PROVIDERS = Object.freeze({
       }
       const entry = row.model
         ? models.find((m) => m.value === row.model || m.resolvedModel === row.model)
-        : models[0];
+        : models.find((m) => m.isDefault) || models[0];
       return entry?.supportedEfforts?.length ? entry.supportedEfforts : CODEX_EFFORTS;
     },
     capabilities: Object.freeze({
@@ -170,15 +173,13 @@ const PROVIDERS = Object.freeze({
       thinkingBudget: false,
       effort: true,
       autoContinue: false,
-      mcpToggle: false,
-      pluginToggleViaHandle: false,
-      // Codex has no plugin concept at all (query.reloadPlugins() is a
-      // stub returning an empty list) - distinct from pluginToggleViaHandle
-      // being false, which used to mean "assume Claude's file-based
-      // fallback" and would otherwise route a Codex plugin toggle into
-      // .claude/settings.local.json, a store that isn't Codex's.
+      mcpToggle: true,
+      pluginToggleViaHandle: true,
+      // Codex's app-server owns both MCP/plugin configuration. These are
+      // handle-backed controls, not Claude's settings.local.json fallback.
       pluginToggleViaFile: false,
-      conversationFork: false,
+      conversationFork: true,
+      rewindIncludesSelectedTurn: true,
       // Per the app-server's approval-decision shapes (accept/
       // acceptForSession/decline/cancel), there's no project-level grant -
       // only turn-scoped or session-scoped. codex-session.js's resolveApproval
@@ -221,6 +222,7 @@ export function providerDetails(provider) {
     capabilities: { ...descriptor.capabilities },
     launch: {
       efforts: [...descriptor.efforts],
+      ...(descriptor.listModels ? { dynamicModels: true } : {}),
       // Static launch-time catalogs are omitted entirely for a provider
       // that doesn't define one (e.g. Codex today) rather than serialized
       // as an empty array, so the client's generic fallback

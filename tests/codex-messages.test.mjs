@@ -51,6 +51,13 @@ test('completed command and file-change items become tool use/result pairs', () 
   assert.equal(file[1].message.content[0].content, 'File change declined');
 });
 
+test('Codex item phases use explicit started/result-only/both names', () => {
+  const item = { id: 'cmd-phase', type: 'commandExecution', command: 'echo ok', status: 'completed' };
+  assert.equal(codexItemToMessages(item, 'thread-1', { phase: 'result-only' }).length, 1);
+  assert.equal(codexItemToMessages(item, 'thread-1', { phase: 'both' }).length, 2);
+  assert.throws(() => codexItemToMessages(item, 'thread-1', { phase: 'completed' }), /invalid Codex item phase/);
+});
+
 test('turn completion and stored threads preserve status and history', () => {
   const failed = codexNotificationToMessages('turn/completed', {
     turn: { id: 'turn-1', status: 'failed', error: { message: 'boom' } },
@@ -69,6 +76,68 @@ test('turn completion and stored threads preserve status and history', () => {
   });
   assert.deepEqual(messages.map(({ type }) => type), ['user', 'assistant']);
   assert.equal(messages[1].message.model, 'codex-model');
+});
+
+test('current Codex item shapes preserve reasoning, MCP objects, and collaboration calls', () => {
+  const history = codexThreadToMessages({
+    id: 'thread-1', turns: [{ status: 'completed', items: [
+      { type: 'reasoning', summary: ['first thought', 'second thought'] },
+    ] }],
+  });
+  assert.equal(history[0].message.content[0].thinking, 'first thought\nsecond thought');
+
+  const mcp = codexItemToMessages({
+    id: 'mcp-object', type: 'mcpToolCall', server: 'github', tool: 'search', arguments: {},
+    status: 'completed', result: { content: [{ type: 'text', text: 'found it' }] },
+  }, 'thread-1');
+  assert.equal(mcp[1].message.content[0].content, 'found it');
+
+  const failed = codexItemToMessages({
+    id: 'mcp-error', type: 'mcpToolCall', server: 'github', tool: 'search', arguments: {},
+    status: 'failed', error: { message: 'permission denied' },
+  }, 'thread-1');
+  assert.equal(failed[1].message.content[0].content, 'permission denied');
+
+  const collab = codexItemToMessages({
+    id: 'collab-1', type: 'collabAgentToolCall', tool: 'spawnAgent', prompt: 'inspect',
+    receiverThreadIds: ['agent-1'], senderThreadId: 'thread-1', status: 'completed', agentsStates: {},
+  }, 'thread-1');
+  assert.equal(collab[0].message.content[0].name, 'spawnAgent');
+  assert.equal(collab[1].message.content[0].tool_use_id, 'collab-1');
+});
+
+test('item started/completed events render one pending tool row and one result', () => {
+  const startedItemIds = new Set();
+  const started = codexNotificationToMessages('item/started', {
+    threadId: 'thread-1', turnId: 'turn-1',
+    item: { id: 'mcp-live', type: 'mcpToolCall', server: 'github', tool: 'search', arguments: {}, status: 'inProgress' },
+  }, 'thread-1', { startedItemIds });
+  assert.equal(started.length, 1);
+  assert.equal(started[0].message.content[0].type, 'tool_use');
+
+  const completed = codexNotificationToMessages('item/completed', {
+    threadId: 'thread-1', turnId: 'turn-1',
+    item: { id: 'mcp-live', type: 'mcpToolCall', server: 'github', tool: 'search', arguments: {}, status: 'completed', result: { content: [{ type: 'text', text: 'done' }] } },
+  }, 'thread-1', { startedItemIds });
+  assert.equal(completed.length, 1);
+  assert.equal(completed[0].message.content[0].type, 'tool_result');
+  assert.equal(completed[0].message.content[0].tool_use_id, 'mcp-live');
+});
+
+test('item started/completed command events do not duplicate tool rows', () => {
+  const startedItemIds = new Set();
+  const started = codexNotificationToMessages('item/started', {
+    item: { id: 'cmd-live', type: 'commandExecution', command: 'npm test', cwd: '/repo', status: 'inProgress' },
+  }, 'thread-1', { startedItemIds });
+  assert.equal(started.length, 1);
+  assert.equal(started[0].message.content[0].name, 'Bash');
+
+  const completed = codexNotificationToMessages('item/completed', {
+    item: { id: 'cmd-live', type: 'commandExecution', command: 'npm test', cwd: '/repo', status: 'completed', aggregatedOutput: 'ok' },
+  }, 'thread-1', { startedItemIds });
+  assert.equal(completed.length, 1);
+  assert.equal(completed[0].message.content[0].type, 'tool_result');
+  assert.equal(completed[0].message.content[0].tool_use_id, 'cmd-live');
 });
 
 test('previously-dropped item types (MCP calls, plans, web search, review mode, ...) render as generic tool calls', () => {
@@ -95,11 +164,13 @@ test('previously-dropped item types (MCP calls, plans, web search, review mode, 
   assert.equal(dynamic[1].message.content[0].is_error, false);
 
   const search = codexItemToMessages({ id: 'ws-1', type: 'webSearch', query: 'weather' }, 'thread-1');
-  assert.equal(search.length, 1, 'no result field in the schema - no tool_result pair');
+  assert.equal(search.length, 2, 'generic completed items should close their tool row');
   assert.equal(search[0].message.content[0].name, 'WebSearch');
+  assert.equal(search[1].message.content[0].tool_use_id, 'ws-1');
 
   const image = codexItemToMessages({ id: 'img-1', type: 'imageView', path: '/tmp/x.png' }, 'thread-1');
   assert.equal(image[0].message.content[0].name, 'ViewImage');
+  assert.equal(image[1].message.content[0].content, 'Viewed x.png');
 
   const plan = codexItemToMessages({ id: 'plan-1', type: 'plan', text: '1. do x\n2. do y' }, 'thread-1');
   assert.equal(plan[0].message.content[0].name, 'Plan');
@@ -118,19 +189,51 @@ test('previously-dropped item types (MCP calls, plans, web search, review mode, 
 test('thread/tokenUsage/updated stamps a usage-only assistant message the stats pipeline can price', () => {
   const withUsage = codexNotificationToMessages('thread/tokenUsage/updated', {
     threadId: 'thread-1',
-    usage: { input_tokens: 100, output_tokens: 40, cached_input_tokens: 10 },
+    turnId: 'turn-1',
+    tokenUsage: {
+      last: { inputTokens: 100, cachedInputTokens: 10, outputTokens: 40, reasoningOutputTokens: 12, totalTokens: 140 },
+      total: { inputTokens: 300, cachedInputTokens: 20, outputTokens: 60, reasoningOutputTokens: 18, totalTokens: 360 },
+      modelContextWindow: 200000,
+    },
   }, 'thread-1', { model: 'gpt-5-codex' });
   assert.equal(withUsage.length, 1);
   assert.deepEqual(withUsage[0].message.content, []);
   assert.deepEqual(withUsage[0].message.usage, {
-    input_tokens: 100, output_tokens: 40, cache_read_input_tokens: 10, cache_creation_input_tokens: 0,
+    input_tokens: 90, output_tokens: 40, cache_read_input_tokens: 10, cache_creation_input_tokens: 0,
+    reasoning_output_tokens: 12, total_tokens: 140,
   });
+  assert.deepEqual(withUsage[0]._cumulativeUsage, {
+    input_tokens: 280, output_tokens: 60, cache_read_input_tokens: 20, cache_creation_input_tokens: 0,
+    reasoning_output_tokens: 18, total_tokens: 360,
+  });
+  assert.equal(withUsage[0]._contextUsage.totalTokens, 140);
+  assert.equal(withUsage[0]._contextUsage.maxTokens, 200000);
+  assert.ok(Math.abs(withUsage[0]._contextUsage.percentage - 0.07) < 1e-12);
+  assert.equal(withUsage[0]._contextUsage.isAutoCompactEnabled, false);
+  assert.equal(withUsage[0]._contextUsage.autoCompactThreshold, null);
 
-  // Also accepts the camelCase spelling in case that's what the server sends.
+  // Also accepts the legacy flat/camelCase spelling from older bridges.
   const camel = codexNotificationToMessages('thread/tokenUsage/updated', {
     tokenUsage: { inputTokens: 5, outputTokens: 2 },
   }, 'thread-1');
   assert.equal(camel[0].message.usage.input_tokens, 5);
 
   assert.deepEqual(codexNotificationToMessages('thread/tokenUsage/updated', {}, 'thread-1'), []);
+});
+
+test('item started/completed generic items stay pending until completed', () => {
+  const startedItemIds = new Set();
+  const started = codexNotificationToMessages('item/started', {
+    item: { id: 'ws-live', type: 'webSearch', query: 'weather', status: 'inProgress' },
+  }, 'thread-1', { startedItemIds });
+  assert.equal(started.length, 1);
+  assert.equal(started[0].message.content[0].type, 'tool_use');
+  assert.equal(started[0].message.content[0].name, 'WebSearch');
+
+  const completed = codexNotificationToMessages('item/completed', {
+    item: { id: 'ws-live', type: 'webSearch', query: 'weather', status: 'completed' },
+  }, 'thread-1', { startedItemIds });
+  assert.equal(completed.length, 1);
+  assert.equal(completed[0].message.content[0].type, 'tool_result');
+  assert.equal(completed[0].message.content[0].tool_use_id, 'ws-live');
 });

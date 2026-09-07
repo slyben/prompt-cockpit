@@ -88,3 +88,17 @@ export function createProviderCatalog(payload) {
 
   return { add, get, has, list, label, validate };
 }
+
+// Dynamic providers can advertise a narrower effort ladder per model. Keep
+// the browser-side selection logic in this small pure helper so an older or
+// incomplete catalog still falls back to the provider's advertised superset.
+export function supportedEffortsForModel(models, selectedValue, fallback = []) {
+  const entries = Array.isArray(models) ? models : [];
+  const selected = selectedValue
+    ? entries.find((model) => model?.value === selectedValue || model?.resolvedModel === selectedValue)
+    : entries.find((model) => model?.isDefault === true);
+  const supported = Array.isArray(selected?.supportedEfforts)
+    ? selected.supportedEfforts.filter((effort) => typeof effort === 'string' && effort)
+    : [];
+  return supported.length ? supported : (Array.isArray(fallback) ? [...fallback] : []);
+}

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createProviderCatalog, normalizeProviderCatalog } from '../public/provider-catalog.js';
+import { createProviderCatalog, normalizeProviderCatalog, supportedEffortsForModel } from '../public/provider-catalog.js';
 
 test('provider catalog preserves the legacy ids-only /api/providers response', () => {
   const catalog = createProviderCatalog({ providers: ['claude', 'grok'] });
@@ -34,4 +34,15 @@ test('provider catalog accepts a details map and can retain a session provider r
   catalog.add('local-agent');
   assert.equal(catalog.validate('local-agent'), 'local-agent');
   assert.equal(catalog.label('local-agent'), 'Local Agent');
+});
+
+test('model effort selection uses the selected or default model and keeps a safe fallback', () => {
+  const models = [
+    { value: 'fast', supportedEfforts: ['low'] },
+    { value: 'default', isDefault: true, supportedEfforts: ['minimal', 'medium'] },
+    { value: 'unknown', supportedEfforts: null },
+  ];
+  assert.deepEqual(supportedEffortsForModel(models, 'fast', ['none', 'low', 'high']), ['low']);
+  assert.deepEqual(supportedEffortsForModel(models, '', ['none', 'low', 'high']), ['minimal', 'medium']);
+  assert.deepEqual(supportedEffortsForModel(models, 'unknown', ['none', 'low', 'high']), ['none', 'low', 'high']);
 });

@@ -68,8 +68,8 @@ test('mcpServersFromInspect maps inspect rows to panel status', () => {
 test('pluginsFromInspect keeps name/scope/enabled for the panel toggle', () => {
   const plugins = pluginsFromInspect(INSPECT);
   assert.deepEqual(plugins, [
-    { name: 'playwright', version: '1.2.0', source: 'user', enabled: true },
-    { name: 'quiet', version: null, source: 'project', enabled: false },
+    { name: 'playwright', version: '1.2.0', source: 'user', enabled: true, restartRequired: true },
+    { name: 'quiet', version: null, source: 'project', enabled: false, restartRequired: true },
   ]);
   assert.equal(pluginNameFromKey('playwright@user'), 'playwright');
   assert.equal(pluginNameFromKey('playwright'), 'playwright');

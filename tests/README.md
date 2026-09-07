@@ -9,6 +9,11 @@ injects a stubbed `queryImpl` (same pattern, one level deeper -
 `startSession` now takes it the same way `createSession` takes
 `startSessionImpl`) instead of the real SDK-backed ones.
 
+`codex-live.manual.mjs` is deliberately outside that glob. Run it by hand
+after changing Codex wiring: `node tests/codex-live.manual.mjs`. It uses the
+signed-in Codex account, so its approval and rewind probes are opt-in via
+`CODEX_LIVE_APPROVAL=1` and `CODEX_LIVE_REWIND=1`.
+
 ## MVP4 - live stats panel
 
 `usage.test.mjs` covers `src/usage.js` directly: `costForUsage` against the

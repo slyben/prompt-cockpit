@@ -241,6 +241,10 @@ function appendToolCallRow(container, block, usageInfo, parent, turnPointIndex, 
   const argsEl = document.createElement('span');
   argsEl.className = 'tool-row-args';
   argsEl.textContent = summarizeToolInput(block.name, block.input);
+  const pathValue = pathArgumentValue(block.name, block.input);
+  const commandValue = typeof block.input?.command === 'string' ? block.input.command : '';
+  if (pathValue && pathValue !== argsEl.textContent) argsEl.title = pathValue;
+  if (commandValue && commandForDisplay(commandValue) !== commandValue) argsEl.title = commandValue;
 
   const metaEl = document.createElement('span');
   metaEl.className = 'tool-row-meta usage-meta';
@@ -343,7 +347,7 @@ export function formatUsageInline(info) {
 function classifyTool(name) {
   if (name === 'Edit' || name === 'MultiEdit' || name === 'Write' || name === 'NotebookEdit') return 'edit';
   if (name === 'Bash' || name === 'BashOutput' || name === 'KillShell') return 'bash';
-  if (name === 'Read' || name === 'NotebookRead') return 'read';
+  if (name === 'Read' || name === 'read_file' || name === 'NotebookRead') return 'read';
   if (name === 'Glob' || name === 'Grep' || name === 'WebSearch') return 'search';
   return 'other';
 }
@@ -356,6 +360,9 @@ function formatToolInput(name, input) {
   if (!input || typeof input !== 'object') return JSON.stringify(input);
 
   if (name === 'Edit') {
+    if (Array.isArray(input.changes)) {
+      return { header: `${input.changes.length} file${input.changes.length === 1 ? '' : 's'} changed`, code: JSON.stringify(input.changes, null, 2), lang: 'json' };
+    }
     const lang = langFromPath(input.file_path);
     const header = input.file_path ? [{ text: input.file_path, cls: 'diff-meta' }] : [];
     const diff = diffLines(input.old_string, input.new_string);
@@ -439,6 +446,12 @@ function highlightSource(code, lang) {
 // collapsed block label with no separate name element next to it).
 function summarizeToolInput(name, input) {
   if (!input || typeof input !== 'object') return '';
+  if (name === 'Edit' && Array.isArray(input.changes)) {
+    const paths = input.changes.map((change) => change?.path || change?.file_path || change?.filename).filter(Boolean);
+    const labels = paths.slice(0, 3).map(basenameForDisplay);
+    const suffix = paths.length > labels.length ? ` +${paths.length - labels.length} more` : '';
+    return `${paths.length} file${paths.length === 1 ? '' : 's'}${labels.length ? `: ${labels.join(', ')}` : ''}${suffix}`;
+  }
   if (name === 'Edit' && typeof input.file_path === 'string') {
     const { added, removed } = countDiff(diffLines(input.old_string, input.new_string));
     return `${input.file_path} (+${added} -${removed})`;
@@ -450,15 +463,49 @@ function summarizeToolInput(name, input) {
     }, { added: 0, removed: 0 });
     return `${input.file_path} (+${totals.added} -${totals.removed})`;
   }
-  const preferredKeys = ['file_path', 'path', 'command', 'pattern', 'query', 'url', 'prompt'];
+  const preferredKeys = ['file_path', 'target_file', 'path', 'command', 'pattern', 'query', 'url', 'prompt'];
   const key = preferredKeys.find((k) => k in input) || Object.keys(input)[0];
   if (!key) return '';
   // JSON.stringify(undefined) returns the value undefined, not a string
   // (e.g. a key explicitly set to undefined) - String() coalesces it to the
   // literal text "undefined" instead of crashing on .length below.
-  const value = typeof input[key] === 'string' ? input[key] : String(JSON.stringify(input[key]));
+  const rawValue = typeof input[key] === 'string' ? input[key] : String(JSON.stringify(input[key]));
+  const value = isPathKey(key) ? basenameForDisplay(rawValue)
+    : key === 'command' ? commandForDisplay(rawValue) : rawValue;
   const truncated = value.length > 80 ? `${value.slice(0, 80)}…` : value;
-  return `${key}: ${JSON.stringify(truncated)}`;
+  return `${key}: ${quoteForSummary(truncated)}`;
+}
+
+function isPathKey(key) {
+  return key === 'path' || key === 'file_path' || key === 'target_file';
+}
+
+function quoteForSummary(value) {
+  // Human summary, not a round-trippable literal: keep quotes, do not
+  // JSON-escape backslashes (Windows paths would show as D:\\foo).
+  return `"${String(value).replace(/"/g, '\\"')}"`;
+}
+
+function basenameForDisplay(value) {
+  return value.split(/[\\/]/).filter(Boolean).pop() || value;
+}
+
+function pathArgumentValue(name, input) {
+  if (!input || typeof input !== 'object') return '';
+  if (name === 'Edit' && Array.isArray(input.changes)) {
+    return input.changes.map((change) => change?.path || change?.file_path || change?.filename).filter(Boolean).join('\n');
+  }
+  if (name === 'Edit' || name === 'MultiEdit') return typeof input.file_path === 'string' ? input.file_path : '';
+  const key = ['file_path', 'target_file', 'path'].find((candidate) => typeof input[candidate] === 'string');
+  return key ? input[key] : '';
+}
+
+function commandForDisplay(value) {
+  // Codex on Windows often reports the launcher rather than the useful
+  // command: `powershell.exe -Command <payload>`. Keep only the payload in
+  // the compact row; the complete invocation remains in the tooltip.
+  const match = /^\s*(?:"[^"]+"|'[^']+'|\S+)\s+-Command\s+([\s\S]*)$/i.exec(value);
+  return match ? match[1].trim() : value;
 }
 
 function renderUser(container, message, onRewindClick, hasFileCheckpointing, rewindLabel, timestampMs = null, toolOpts = {}) {

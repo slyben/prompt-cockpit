@@ -2,6 +2,33 @@
 
 All notable changes to this project are documented here.
 
+## [0.1.7]
+- Codex reaches feature parity with Claude and Grok: rewind (forks through
+  the selected completed turn, including its response), native MCP and
+  plugin controls, MCP OAuth login, and slash commands from `skills/list`
+- Codex models discovered live from `model/list` instead of a static
+  catalog; the effort picker narrows to what the selected model supports
+- Codex token usage normalized into the shared cost accounting, with
+  cumulative thread totals converted to per-turn deltas and a resume
+  baseline so a resumed thread is not charged twice
+- Codex plan quota shown in the cost strip, alongside a new 7-day window
+  chip for every provider
+- Approvals: `requestUserInput` questions, legacy exec/patch approval
+  shapes, and cross-tab resolution so a decision in one tab clears the
+  banner in the others
+- Tool rows stream live on `item/started` and close on `item/completed`
+  instead of appearing only once finished
+- Windows tool rows show the real command and basename instead of an
+  escaped path or a `powershell.exe -Command` prefix
+- Turn ownership hardened for multiple sessions sharing one Codex thread:
+  no dropped events during the `turn/start` race, no cross-session
+  interrupts, and bounded retention of turn/item ids
+- `pricing_codex.json` gained gpt-5.5 and gpt-5.6 rates
+- Renamed from `claude-prompt-cockpit` to `prompt-cockpit`: the npm package
+  name and Grok's ACP handshake both dropped the `claude-` prefix left over
+  from before Grok and Codex existed. Both Grok and Codex now read their
+  reported version from `package.json` instead of a hardcoded copy
+
 ## [0.1.6]
 - Security: CSP/X-Frame-Options/nosniff headers, 1MB request/WS payload
   caps, timing-safe token comparisons

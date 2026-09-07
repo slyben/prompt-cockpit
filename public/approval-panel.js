@@ -77,7 +77,7 @@ export function initApprovalPanel({
 
     approvalDetail.textContent = isPlan && request.input?.plan
       ? request.input.plan
-      : JSON.stringify(request.input, null, 2);
+      : formatApprovalDetail(request);
     approvalDetail.classList.toggle('plan-detail', isPlan);
 
     // Plan review - preview + comment/revise, only for
@@ -96,12 +96,13 @@ export function initApprovalPanel({
 
   // Builds the AskUserQuestion form: one block per question (pill options,
   // single/multi-select per `q.multiSelect`, plus a free-text "Other"
-  // fallback), and one Submit for the whole set. `answers` must be keyed by
-  // the *exact* question text - not an index, not the header - since that's
-  // what the tool's schema expects back.
+  // fallback), and one Submit for the whole set. Default keys answers by
+  // question text; `question-ids` keys them by question id and wraps each
+  // value in an `answers` array.
   function renderQuestionForm(request) {
     questionForm.innerHTML = '';
     const questions = request.input.questions || [];
+    const keyedById = request.answerFormat === 'question-ids';
     const state = new Map(); // question text -> { selected: Set<label>, otherEl }
 
     for (const q of questions) {
@@ -153,13 +154,14 @@ export function initApprovalPanel({
       block.append(optionsEl);
 
       const other = document.createElement('input');
-      other.type = 'text';
+      other.type = q.isSecret ? 'password' : 'text';
       other.className = 'q-other';
       other.placeholder = 'Other (type your own answer)…';
+      if (keyedById && !q.isOther) other.hidden = true;
       block.append(other);
 
       questionForm.append(block);
-      state.set(q.question, { selected, otherEl: other });
+      state.set(keyedById ? (q.id || q.question) : q.question, { selected, otherEl: other });
     }
 
     const actions = document.createElement('div');
@@ -173,12 +175,14 @@ export function initApprovalPanel({
     questionForm.onsubmit = (event) => {
       event.preventDefault();
       const answers = {};
-      for (const [questionText, { selected, otherEl }] of state) {
+      for (const [questionKey, { selected, otherEl }] of state) {
         const typed = otherEl.value.trim();
-        if (typed) answers[questionText] = typed;
-        else if (selected.size > 0) answers[questionText] = [...selected].join(', ');
+        const values = typed ? [typed] : [...selected];
+        if (keyedById) answers[questionKey] = { answers: values };
+        else if (typed) answers[questionKey] = typed;
+        else if (selected.size > 0) answers[questionKey] = values.join(', ');
       }
-      sendDecision('allow', { questions, answers });
+      sendDecision('allow', keyedById ? { answers } : { questions, answers });
     };
 
     const skipBtn = document.createElement('button');
@@ -199,8 +203,39 @@ export function initApprovalPanel({
   // changes" reason; server.js defaults it when omitted.
   async function sendDecision(decision, updatedInput, alwaysAllow, message) {
     if (!pendingApprovalRequestId) return;
-    await postDecision({ requestId: pendingApprovalRequestId, decision, updatedInput, alwaysAllow, message });
-    approvalQueue.shift();
+    const requestId = pendingApprovalRequestId;
+    await postDecision({ requestId, decision, updatedInput, alwaysAllow, message });
+    remove(requestId);
+  }
+
+  function formatApprovalDetail(request) {
+    const input = request.input || {};
+    if (request.toolName === 'Bash' && input.command) {
+      const lines = [input.command];
+      if (input.cwd) lines.push(`cwd: ${input.cwd}`);
+      if (input.reason) lines.push(`reason: ${input.reason}`);
+      return lines.join('\n');
+    }
+    if (request.toolName === 'Edit' && Array.isArray(input.fileChanges)) {
+      const paths = input.fileChanges.map((change) => change?.path || change?.file_path).filter(Boolean);
+      return [paths.length ? paths.join('\n') : 'File changes requested', input.reason ? `reason: ${input.reason}` : ''].filter(Boolean).join('\n');
+    }
+    if (request.toolName === 'RequestPermissions' && Array.isArray(input.permissions)) {
+      const permissions = input.permissions.map((permission) => permission?.description || permission?.type || JSON.stringify(permission));
+      return [permissions.join('\n'), input.reason ? `reason: ${input.reason}` : ''].filter(Boolean).join('\n');
+    }
+    return JSON.stringify(input, null, 2);
+  }
+
+  function remove(requestId) {
+    const index = approvalQueue.findIndex((request) => String(request.requestId) === String(requestId));
+    if (index < 0) return;
+    const wasCurrent = String(pendingApprovalRequestId) === String(requestId);
+    approvalQueue.splice(index, 1);
+    if (!wasCurrent) {
+      updateApprovalQueueCount();
+      return;
+    }
     approvalBanner.hidden = true;
     questionForm.hidden = true;
     questionForm.innerHTML = '';
@@ -209,6 +244,7 @@ export function initApprovalPanel({
     pendingApprovalRequestId = null;
     pendingApprovalToolName = null;
     if (approvalQueue.length) renderBanner(approvalQueue[0]);
+    else updateApprovalQueueCount();
   }
 
   approveBtn.addEventListener('click', () => {
@@ -249,5 +285,5 @@ export function initApprovalPanel({
     updateApprovalQueueCount();
   }
 
-  return { enqueue, reset };
+  return { enqueue, remove, reset };
 }

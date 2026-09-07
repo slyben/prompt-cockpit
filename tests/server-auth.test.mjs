@@ -91,6 +91,7 @@ function fakeStartSession() {
       mcpServerStatus: async () => [{ name: 'example', status: 'connected' }],
       toggleMcpServer: async () => {},
       reconnectMcpServer: async () => {},
+      mcpOauthLogin: async (name) => { lastMcpAuthName = name; return 'https://example.com/oauth'; },
       reloadPlugins: async () => ({ plugins: [{ name: 'formatter', source: 'anthropic-tools' }] }),
       setPluginEnabled: async (pluginKey, enabled) => {
         lastPluginEnabled = { pluginKey, enabled };
@@ -100,6 +101,7 @@ function fakeStartSession() {
 }
 
 let lastPluginEnabled = null;
+let lastMcpAuthName = null;
 let lastInterruptCalled = false;
 
 test('GET / serves the launcher page', async () => {
@@ -654,6 +656,20 @@ test('POST /api/sessions/:id/mcp-toggle and mcp-reconnect require a name and oth
   assert.deepEqual(await reconnected.json(), { reconnected: true });
 });
 
+test('POST /api/sessions/:id/mcp-auth returns the Codex authorization URL', async () => {
+  registry._reset();
+  lastMcpAuthName = null;
+  const row = registry.createSession({ cwd: '/tmp', provider: 'codex', startSessionImpl: fakeStartSession });
+  const res = await fetch(`${ORIGIN}/api/sessions/${row.id}/mcp-auth`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${row.token}` },
+    body: JSON.stringify({ name: 'github' }),
+  });
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), { authorizationUrl: 'https://example.com/oauth' });
+  assert.equal(lastMcpAuthName, 'github');
+});
+
 test('POST /api/sessions/:id/reload-plugins merges the on-disk enabledPlugins map into the SDK plugin list', async () => {
   registry._reset();
   const cwd = await makeTmpCwd();
@@ -695,17 +711,20 @@ test('POST /api/sessions/:id/plugin-enabled on a grok session uses grok plugin, 
   }
 });
 
-test('POST /api/sessions/:id/plugin-enabled on a codex session is rejected instead of writing settings.local.json', async () => {
+test('POST /api/sessions/:id/plugin-enabled on a codex session uses the handle, not settings.local.json', async () => {
   registry._reset();
   const cwd = await makeTmpCwd();
   try {
+    lastPluginEnabled = null;
     const row = registry.createSession({ cwd, provider: 'codex', startSessionImpl: fakeStartSession });
     const res = await fetch(`${ORIGIN}/api/sessions/${row.id}/plugin-enabled`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', authorization: `Bearer ${row.token}` },
       body: JSON.stringify({ pluginKey: 'formatter@anthropic-tools', enabled: true }),
     });
-    assert.equal(res.status, 400);
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), { enabled: true });
+    assert.deepEqual(lastPluginEnabled, { pluginKey: 'formatter@anthropic-tools', enabled: true });
     const settingsFile = settingsPath(cwd);
     await assert.rejects(readFile(settingsFile), /ENOENT/);
   } finally {

@@ -1,8 +1,6 @@
-// Settings modal's Plugins section. Unlike mcp-panel.js there's no live
-// enable/disable on Query - only a read-only list (reloadPlugins()) and a
-// settings.local.json flag that takes effect next session start, not
-// immediately. The toggle writes that flag without touching the running
-// session; reload button's own errors go to warningEl, not the list.
+// Settings modal's Plugins section. The provider decides whether a toggle is
+// live or persisted for the next session; this panel only owns the shared
+// list/toggle chrome.
 import { initListPanel } from '/list-panel.js';
 
 export function initPluginPanel({ listEl, reloadButton, warningEl, fetchPlugins, reloadPlugins, setPluginEnabled }) {
@@ -64,21 +62,23 @@ export function initPluginPanel({ listEl, reloadButton, warningEl, fetchPlugins,
 
     top.append(name, source);
 
-    if (plugin.source) {
-      const pluginKey = `${plugin.name}@${plugin.source}`;
+    if (plugin.source && plugin.canToggle !== false) {
+      const pluginKey = plugin.id || `${plugin.name}@${plugin.source}`;
       const toggle = document.createElement('input');
       toggle.type = 'checkbox';
-      // Reflects what's saved to settings.local.json, not "loaded right now" -
-      // a plugin can be loaded in the live session (SDK read it at startup)
-      // while showing disabled here because it was toggled off since, and
-      // won't reload until the next session start.
+      // Reflects the provider's reported enabled state. Providers that
+      // require a restart can still show the new setting immediately.
       toggle.checked = plugin.enabled !== false;
-      toggle.title = 'Enable/disable this plugin (takes effect next session start)';
+      toggle.title = plugin.restartRequired
+        ? 'Enable/disable this plugin (takes effect next session start)'
+        : 'Enable/disable this plugin';
       toggle.addEventListener('change', async () => {
         toggle.disabled = true;
         try {
           await setPluginEnabled(pluginKey, toggle.checked);
-          showNote(li, 'Takes effect on next session start.');
+          showNote(li, plugin.restartRequired
+            ? 'Takes effect on next session start.'
+            : 'Plugin setting saved.');
         } catch (err) {
           toggle.checked = !toggle.checked;
           showNote(li, `Could not save: ${err.message || err}`, true);
@@ -90,6 +90,7 @@ export function initPluginPanel({ listEl, reloadButton, warningEl, fetchPlugins,
     }
 
     li.append(top);
+    if (plugin.toggleDisabledReason) showNote(li, plugin.toggleDisabledReason, true);
     return li;
   }
 

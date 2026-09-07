@@ -7,6 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as registry from '../src/session-registry.js';
+import { codexNotificationToMessages } from '../src/codex-messages.js';
 import { fakeWs, fakeStartSession, pendingTurnCount, frontDelegationTag } from './test-helpers.mjs';
 
 test('createSession issues a token that checkToken accepts, and only that token', () => {
@@ -50,6 +51,15 @@ test('toSummary derives claudeSessionId as null for a non-Claude row - it never 
   assert.equal(registry.toSummary(row).claudeSessionId, null);
 });
 
+test('Codex system/init propagates the resolved model onto the session summary', () => {
+  registry._reset();
+  const startSessionImpl = fakeStartSession();
+  const row = registry.createSession({ cwd: '/tmp', provider: 'codex', resume: 'codex-thread', startSessionImpl });
+  startSessionImpl.emitMessage({ type: 'system', subtype: 'init', session_id: 'codex-thread', model: 'gpt-5.3-codex' });
+  assert.equal(registry.get(row.id).model, 'gpt-5.3-codex');
+  assert.equal(registry.toSummary(row).model, 'gpt-5.3-codex');
+});
+
 test('an assistant message with usage broadcasts cockpit:usage with running cost/token totals', () => {
   registry._reset();
   const startSessionImpl = fakeStartSession();
@@ -68,6 +78,133 @@ test('an assistant message with usage broadcasts cockpit:usage with running cost
   assert.equal(last.usage.inputTokens, 1000);
   assert.equal(last.usage.outputTokens, 500);
   assert.ok(last.usage.costUsd > 0);
+});
+
+test('Codex cumulative token updates add only the new total delta and price cached input once', () => {
+  registry._reset();
+  const startSessionImpl = fakeStartSession();
+  const row = registry.createSession({ cwd: '/tmp', provider: 'codex', startSessionImpl });
+  const ws = fakeWs();
+  registry.attachClient(row.id, ws);
+
+  const notification = (last, total) => codexNotificationToMessages('thread/tokenUsage/updated', {
+    threadId: 'codex-thread', turnId: `turn-${total.totalTokens}`,
+    tokenUsage: { last, total },
+  }, 'codex-thread', { model: 'gpt-5.3-codex' })[0];
+  startSessionImpl.emitMessage(notification(
+    { inputTokens: 1000, cachedInputTokens: 400, outputTokens: 100, reasoningOutputTokens: 20, totalTokens: 1100 },
+    { inputTokens: 1000, cachedInputTokens: 400, outputTokens: 100, reasoningOutputTokens: 20, totalTokens: 1100 },
+  ));
+  startSessionImpl.emitMessage(notification(
+    { inputTokens: 500, cachedInputTokens: 200, outputTokens: 80, reasoningOutputTokens: 10, totalTokens: 580 },
+    { inputTokens: 1500, cachedInputTokens: 600, outputTokens: 180, reasoningOutputTokens: 30, totalTokens: 1680 },
+  ));
+
+  const usage = ws.sent.filter((message) => message.type === 'cockpit:usage').at(-1).usage;
+  assert.equal(usage.inputTokens, 900);
+  assert.equal(usage.outputTokens, 180);
+  assert.equal(usage.cacheReadTokens, 600);
+  // 900 uncached * $1.75/M + 600 cached * $0.175/M + 180 output * $14/M.
+  assert.equal(usage.costUsd, 0.001575 + 0.000105 + 0.00252);
+});
+
+test('resumed Codex sessions baseline the thread lifetime total before counting new usage', () => {
+  registry._reset();
+  const startSessionImpl = fakeStartSession();
+  const row = registry.createSession({
+    cwd: '/tmp', provider: 'codex', resume: 'codex-thread', history: [], startSessionImpl,
+  });
+  const ws = fakeWs();
+  registry.attachClient(row.id, ws);
+
+  const notification = (last, total) => codexNotificationToMessages('thread/tokenUsage/updated', {
+    threadId: 'codex-thread', turnId: `turn-${total.totalTokens}`,
+    tokenUsage: { last, total },
+  }, 'codex-thread', { model: 'gpt-5.3-codex' })[0];
+  startSessionImpl.emitMessage(notification(
+    { inputTokens: 600, outputTokens: 100, totalTokens: 700 },
+    { inputTokens: 600, outputTokens: 100, totalTokens: 700 },
+  ));
+  assert.equal(ws.sent.filter((message) => message.type === 'cockpit:usage').at(-1).usage.inputTokens, 0);
+
+  startSessionImpl.emitMessage(notification(
+    { inputTokens: 200, outputTokens: 40, totalTokens: 240 },
+    { inputTokens: 800, outputTokens: 140, totalTokens: 940 },
+  ));
+  const usage = ws.sent.filter((message) => message.type === 'cockpit:usage').at(-1).usage;
+  assert.equal(usage.inputTokens, 200);
+  assert.equal(usage.outputTokens, 40);
+});
+
+test('Codex token usage updates populate the context meter from the latest context size', () => {
+  registry._reset();
+  const startSessionImpl = fakeStartSession();
+  const row = registry.createSession({ cwd: '/tmp', provider: 'codex', startSessionImpl });
+  const ws = fakeWs();
+  registry.attachClient(row.id, ws);
+
+  const [message] = codexNotificationToMessages('thread/tokenUsage/updated', {
+    threadId: 'codex-thread',
+    turnId: 'turn-1',
+    tokenUsage: {
+      last: { inputTokens: 100, cachedInputTokens: 10, outputTokens: 40, totalTokens: 140 },
+      total: { inputTokens: 100, cachedInputTokens: 10, outputTokens: 40, totalTokens: 140 },
+      modelContextWindow: 200000,
+    },
+  }, 'codex-thread', { model: 'gpt-5.3-codex' });
+  startSessionImpl.emitMessage(message);
+
+  const last = ws.sent.filter((entry) => entry.type === 'cockpit:usage').at(-1);
+  assert.equal(last.context.totalTokens, 140);
+  assert.equal(last.context.maxTokens, 200000);
+  assert.ok(Math.abs(last.context.percentage - 0.07) < 1e-12);
+  assert.equal(last.context.autoCompact.enabled, false);
+});
+
+test('a Codex turn fetches native account rate limits and broadcasts the shared stats shape', async () => {
+  registry._reset();
+  const startSessionImpl = fakeStartSession({
+    codexRateLimits: async () => ({
+      five_hour: { utilization: 14, resets_at: 1788796894000 },
+      seven_day: { utilization: 18, resets_at: 1789335920000 },
+    }),
+  });
+  const row = registry.createSession({ cwd: '/tmp', provider: 'codex', startSessionImpl });
+  const ws = fakeWs();
+  registry.attachClient(row.id, ws);
+
+  startSessionImpl.emitMessage({ type: 'result', num_turns: 1 });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  const last = ws.sent.filter((message) => message.type === 'cockpit:usage').at(-1);
+  assert.equal(last.rateLimits.five_hour.utilization, 14);
+  assert.equal(last.rateLimits.seven_day.utilization, 18);
+  assert.equal(startSessionImpl.codexRateLimitsCalls, 1);
+});
+
+test('a Codex rate-limit failure backs off one query without blocking a replacement handle', async () => {
+  registry._reset();
+  const failing = fakeStartSession({
+    codexRateLimits: async () => { throw new Error('temporary app-server failure'); },
+  });
+  const first = registry.createSession({ cwd: '/tmp', provider: 'codex', startSessionImpl: failing });
+  registry.attachClient(first.id, fakeWs());
+  failing.emitMessage({ type: 'result', num_turns: 1 });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  failing.emitMessage({ type: 'result', num_turns: 1 });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(failing.codexRateLimitsCalls, 1, 'the failed query is backed off briefly');
+
+  const replacement = fakeStartSession({
+    codexRateLimits: async () => ({ five_hour: { utilization: 5, resets_at: 123 } }),
+  });
+  const second = registry.createSession({ cwd: '/tmp', provider: 'codex', startSessionImpl: replacement });
+  const ws = fakeWs();
+  registry.attachClient(second.id, ws);
+  replacement.emitMessage({ type: 'result', num_turns: 1 });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(replacement.codexRateLimitsCalls, 1, 'a replacement handle can retry after an app-server restart');
+  assert.equal(ws.sent.filter((message) => message.type === 'cockpit:usage').at(-1).rateLimits.five_hour.utilization, 5);
 });
 
 test('attachClient sends a zeroed cockpit:usage snapshot even before any assistant message arrives', () => {
@@ -420,15 +557,21 @@ test('rewind() on grok forks a new session and leaves the original running', asy
   assert.equal(registry.get(row.id), row);
 });
 
-test('rewind() rejects providers without conversation-fork capability before Claude-specific work', async () => {
+test('rewind() on Codex routes preview and fork through its session handle', async () => {
   registry._reset();
   const impl = fakeStartSession();
-  const row = registry.createSession({ cwd: '/tmp', provider: 'codex', startSessionImpl: impl });
-
-  await assert.rejects(
-    () => registry.rewind(row.id, 1),
-    /Codex sessions do not support conversation rewind/,
-  );
+  const row = registry.createSession({ cwd: '/tmp', provider: 'codex', resume: 'codex-source', history: [], startSessionImpl: impl });
+  const calls = [];
+  row.handle.rewindConversation = async (turnIndex, options) => {
+    calls.push([turnIndex, options]);
+    return { filesResult: { conversationOnly: true }, forkedSessionId: options.dryRun ? null : 'codex-child' };
+  };
+  assert.equal((await registry.rewind(row.id, 2, { dryRun: true })).forkedSessionId, null);
+  assert.equal((await registry.rewind(row.id, 2)).forkedSessionId, 'codex-child');
+  assert.deepEqual(calls, [[2, { dryRun: true }], [2, { dryRun: false }]]);
+  assert.equal(row.providerSessionId, 'codex-source');
+  assert.equal(impl.closed, undefined);
+  registry._reset();
 });
 
 test('setHandlePluginEnabled passes through to the grok handle', async () => {
@@ -612,6 +755,25 @@ test('two overlapping approval requests both survive attach and resolve independ
   assert.deepEqual(await second, { behavior: 'deny' });
   assert.equal(registry.getDebugInfo(row.id).pendingApprovalCount, 0);
   assert.equal(registry.getDebugInfo(row.id).hasPendingApproval, false);
+});
+
+test('a provider-cleared approval is removed and broadcast to every attached tab', () => {
+  registry._reset();
+  const startSessionImpl = fakeStartSession();
+  const row = registry.createSession({ cwd: '/tmp', startSessionImpl });
+  const first = fakeWs();
+  const second = fakeWs();
+  registry.attachClient(row.id, first);
+  registry.attachClient(row.id, second);
+
+  startSessionImpl.emitApprovalRequest({ plan: 'stale plan' });
+  const request = first.sent.find((message) => message.type === 'cockpit:approval-request').request;
+  startSessionImpl.emitApprovalResolved(request.requestId);
+
+  assert.equal(registry.getDebugInfo(row.id).pendingApprovalCount, 0);
+  for (const ws of [first, second]) {
+    assert.deepEqual(ws.sent.at(-1), { type: 'cockpit:approval-resolved', requestId: request.requestId });
+  }
 });
 
 test('resolveApproval on an unknown request id or session returns false rather than throwing', () => {

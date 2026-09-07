@@ -30,7 +30,7 @@ Open the URL printed in the console - `http://localhost:4317/?op=<KEYSTRING>` - 
 
 1. Choose **Claude**, **Grok**, or **Codex** in the launcher.
 2. Point it at a project folder (type a path, pick a recent one, or Browse).
-3. Optionally name the session (needed later if another session will `/ask` it) and pick a model. Leave the model on Default to use the CLI's usual one.
+3. Optionally name the session (needed later if another session will `/ask` it) and pick a model. Leave the model on Default to use the CLI's usual one. Codex's model list is read live from the CLI, so it reflects whatever that install actually offers; Claude and Grok use a built-in list.
 4. Click **Start**.
 5. Type a prompt and send. Approvals (plan exit, gated tools) show up as a banner above the compose box.
 
@@ -41,16 +41,16 @@ Tabs using different providers can run at the same time. A session keeps the pro
 ## Once you are in a session
 
 - **Mode cycle** (Shift+Tab on the compose box, or the mode control) - default / plan / accept-edits and the rest of the CLI's modes.
-- **Rewind** on a user turn - opens a new session forked at that point. The original stays. Claude can also revert files when this process started the session fresh. Grok is conversation-only (files on disk stay as they are). Codex does not support rewind yet.
+- **Rewind** on a user turn - opens a new session forked at that point. The original stays. Claude can also revert files when this process started the session fresh. Grok is conversation-only (files on disk stay as they are). Codex forks through the selected completed turn, including its response; files on disk stay as they are. Codex requires a CLI with `thread/fork.lastTurnId` support.
 - **`@`** in the compose box - file autocomplete in the project.
 - **Cost strip** - spend, tokens in/out, cache hit rate, context used. Grok and Codex have an effort picker instead of Claude's thinking-token budget.
 - **`/ask Name: …`** - send a task to another named session in the same folder. The answer comes back as a queued turn.
 
-Settings (gear) covers MCP servers, plugins, permission rules, and UI prefs. On Grok, MCP/plugin toggles go through the Grok CLI (`grok inspect` / `grok mcp` / `grok plugin`) and may need a new session before the agent picks them up.
+Settings (gear) covers MCP servers, plugins, permission rules, and UI prefs. On Grok, MCP/plugin toggles go through the Grok CLI (`grok inspect` / `grok mcp` / `grok plugin`) and may need a new session before the agent picks them up. On Codex, current app-server builds provide native MCP/plugin status and config writes; plugin changes are shown immediately but take effect for a new session.
 
 ## Status
 
-MVP1-MVP5 shipped (session in a browser, plan/rewind/`@`/diffs, reconnect, live stats, Grok backend, cross-session `/ask`), plus Codex as a third provider. MVP6-MVP7 (Windows-hosted sessions over SSH, phone approvals) are not started.
+MVP1-MVP5 shipped (session in a browser, plan/rewind/`@`/diffs, reconnect, live stats, Grok backend, cross-session `/ask`). Codex is a full third provider as of 0.1.7: rewind, native MCP and plugin controls, live model discovery, and plan quota all work, and its remaining gaps (thinking budget, auto-continue, project-scoped always-allow) are ones the CLI itself does not offer. MVP6-MVP7 (Windows-hosted sessions over SSH, phone approvals) are not started.
 
 See `tests/README.md` for automated vs hand-verified coverage, and `backlog.md` for open follow-ups.
 

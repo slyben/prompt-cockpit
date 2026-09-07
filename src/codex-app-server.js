@@ -9,10 +9,13 @@ import path from 'node:path';
 import { createInterface } from 'node:readline';
 
 const REQUEST_TIMEOUT_MS = 20 * 60 * 1000;
+const PACKAGE_VERSION = JSON.parse(
+  readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
+).version;
 const CLIENT_INFO = {
   name: 'prompt_cockpit',
   title: 'Prompt Cockpit',
-  version: '0.1.5', // keep in sync with package.json's version
+  version: PACKAGE_VERSION,
 };
 
 function pathCandidates(pathVar, installDir, names) {
@@ -179,20 +182,30 @@ export function createCodexRpcClient({ writeLine, subscribeLine }) {
   const pending = new Map();
   const notificationHandlers = new Set();
   const serverRequestHandlers = new Set();
+  const activeServerRequests = new Set();
+  const resolvedServerRequests = new Set();
 
   function send(payload) {
     writeLine(JSON.stringify(payload));
   }
 
   async function handleServerRequest(msg) {
-    for (const handler of serverRequestHandlers) {
-      const handled = await handler(msg.method, msg.params || {}, msg.id);
-      if (handled && handled.handled) {
-        send({ id: msg.id, result: handled.result ?? null });
-        return;
+    const requestId = String(msg.id);
+    activeServerRequests.add(requestId);
+    try {
+      for (const handler of serverRequestHandlers) {
+        const handled = await handler(msg.method, msg.params || {}, msg.id);
+        if (handled && handled.handled) {
+          if (resolvedServerRequests.delete(requestId)) return;
+          send({ id: msg.id, result: handled.result ?? null });
+          return;
+        }
       }
+      if (resolvedServerRequests.delete(requestId)) return;
+      send({ id: msg.id, error: { code: -32601, message: `Method not handled: ${msg.method}` } });
+    } finally {
+      activeServerRequests.delete(requestId);
     }
-    send({ id: msg.id, error: { code: -32601, message: `Method not handled: ${msg.method}` } });
   }
 
   function handleLine(line) {
@@ -215,9 +228,14 @@ export function createCodexRpcClient({ writeLine, subscribeLine }) {
     if (!msg.method) return;
     if (msg.id != null) {
       Promise.resolve(handleServerRequest(msg)).catch((err) => {
+        if (resolvedServerRequests.delete(String(msg.id))) return;
         send({ id: msg.id, error: { code: -32000, message: String(err?.message || err) } });
       });
       return;
+    }
+    if (msg.method === 'serverRequest/resolved' && msg.params?.requestId != null) {
+      const requestId = String(msg.params.requestId);
+      if (activeServerRequests.has(requestId)) resolvedServerRequests.add(requestId);
     }
     for (const handler of notificationHandlers) handler(msg.method, msg.params || {});
   }
@@ -316,7 +334,6 @@ export function createCodexAppServerManager({ connectImpl = spawnCodexAppServer 
       connection.client.notify('initialized', {});
       return result;
     });
-  readyPromise.catch(() => {});
 
   // Marks the manager dead and tells every subscribed Codex session so
   // (via closeHandlers) - a session's own turn/completed waiter otherwise
@@ -327,8 +344,20 @@ export function createCodexAppServerManager({ connectImpl = spawnCodexAppServer 
     if (closed) return;
     closed = true;
     connection.client.rejectAll(err);
+    // A rejected initialize request leaves the child alive even though this
+    // manager is no longer usable. Kill it here, rather than only in the
+    // explicit close() path, so failed handshakes cannot accumulate orphan
+    // app-server processes. The closed guard makes a later exit/error event
+    // harmless and keeps this teardown one-shot.
+    try { connection.proc?.kill?.(); } catch { /* already stopped */ }
     for (const handler of closeHandlers) handler(err);
   }
+
+  // A protocol-level initialize rejection leaves the child process alive but
+  // unusable. Treat it like any other app-server death so the singleton can
+  // be recreated for the next session instead of poisoning every request.
+  readyPromise.catch((err) => fail(err));
+  readyPromise.catch(() => {});
 
   connection.proc?.on('error', (err) => {
     fail(new Error(`Unable to start codex app-server: ${String(err?.message || err)}`, { cause: err }));
@@ -343,6 +372,10 @@ export function createCodexAppServerManager({ connectImpl = spawnCodexAppServer 
     async request(method, params = {}, options) {
       if (closed) throw new Error('codex app-server is closed');
       await readyPromise;
+      // The process can exit after the first check but before the handshake
+      // continuation resumes. Do not enqueue a request onto a dead transport
+      // in that small race; it would otherwise sit until the long RPC timeout.
+      if (closed) throw new Error('codex app-server is closed');
       return connection.client.request(method, params, options);
     },
     subscribe(handler) {
@@ -384,7 +417,6 @@ export function createCodexAppServerManager({ connectImpl = spawnCodexAppServer 
       offNotification();
       offRequest();
       fail(new Error('codex app-server closed'));
-      try { connection.proc?.kill(); } catch { /* already stopped */ }
     },
   };
 }

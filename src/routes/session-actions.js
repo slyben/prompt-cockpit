@@ -89,6 +89,13 @@ const ACTIONS = {
     return { reconnected: true };
   },
 
+  'POST mcp-auth': async ({ id, req }) => {
+    const body = await readJsonBody(req);
+    if (!body.name) throw new RouteError(400, { error: 'name required' });
+    const authorizationUrl = await registry.mcpOauthLogin(id, body.name);
+    return { authorizationUrl };
+  },
+
   'POST reload-plugins': async ({ id, row }) => {
     const result = await registry.reloadPlugins(id);
     // The SDK's plugin list has no notion of the on-disk enabledPlugins

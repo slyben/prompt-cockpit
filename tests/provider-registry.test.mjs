@@ -40,15 +40,19 @@ test('descriptors own launch, history, and capability metadata', () => {
   assert.equal(typeof codex.startSession, 'function');
   assert.equal(typeof codex.listResumableSessions, 'function');
   assert.equal(typeof codex.fetchHistory, 'function');
-  assert.equal(codex.capabilities.conversationFork, false);
-  assert.equal(codex.capabilities.mcpToggle, false);
-  assert.equal(codex.capabilities.pluginToggleViaHandle, false);
+  assert.equal(codex.capabilities.conversationFork, true);
+  assert.equal(claude.capabilities.rewindIncludesSelectedTurn, false);
+  assert.equal(grok.capabilities.rewindIncludesSelectedTurn, false);
+  assert.equal(codex.capabilities.rewindIncludesSelectedTurn, true);
+  assert.equal(typeof codex.rewind, 'function');
+  assert.equal(codex.capabilities.mcpToggle, true);
+  assert.equal(codex.capabilities.pluginToggleViaHandle, true);
   assert.equal(codex.capabilities.pluginToggleViaFile, false);
   assert.ok(codex.efforts.includes('high'));
 
   // Only Claude's approval responses can persist an "always allow" choice
-  // across a restart (permission-rules.js) - Grok's ACP replies and Codex's
-  // app-server decisions both only ever carry a turn/session-scoped grant.
+  // through Cockpit's project rule store. Codex's app-server plugin/MCP
+  // config is separate, and its approval response remains turn/session scoped.
   assert.equal(claude.capabilities.projectPersistentApprovals, true);
   assert.equal(grok.capabilities.projectPersistentApprovals, false);
   assert.equal(codex.capabilities.projectPersistentApprovals, false);
@@ -64,10 +68,8 @@ test('descriptors own launch, history, and capability metadata', () => {
     },
   });
 
-  // Codex defines neither a static model catalog nor effort-option labels
-  // (its launcher falls back to the generic value-list rendering) - launch
-  // stays exactly `{ efforts }`, no empty models/effortOptions arrays.
-  assert.deepEqual(providerDetails('codex').launch, { efforts: codex.efforts });
+  // Codex advertises live model discovery instead of a static catalog.
+  assert.deepEqual(providerDetails('codex').launch, { efforts: codex.efforts, dynamicModels: true });
 });
 
 test('codex.resolveEfforts narrows to the current model\'s supported values, falling back to the static list', async () => {
@@ -81,6 +83,15 @@ test('codex.resolveEfforts narrows to the current model\'s supported values, fal
     ] } },
   });
   assert.deepEqual(modelSpecific, ['low', 'medium']);
+
+  const defaultModel = await codex.resolveEfforts({
+    model: null,
+    handle: { query: { supportedModels: async () => [
+      { value: 'fallback', supportedEfforts: ['high'] },
+      { value: 'recommended', isDefault: true, supportedEfforts: ['minimal'] },
+    ] } },
+  });
+  assert.deepEqual(defaultModel, ['minimal']);
 
   // A model the catalog doesn't (yet) annotate with supportedEfforts falls
   // back to the advertised superset rather than rejecting everything.

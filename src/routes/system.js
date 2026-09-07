@@ -5,7 +5,7 @@ import { defaultScreenshotDir } from '../os-defaults.js';
 import { listDirectory } from '../session-launcher.js';
 import { respondJson } from '../http-utils.js';
 import { availableProviders } from '../provider-availability.js';
-import { providerDetails } from '../provider-registry.js';
+import { providerDetails, getProvider } from '../provider-registry.js';
 import { getHandshakeSecret, regenerateHandshakeSecret, memorySnapshot } from '../session-registry.js';
 import { computeGlobalStats } from '../global-stats.js';
 import { fetchAccountLimits } from '../account-limits.js';
@@ -57,6 +57,26 @@ export function registerSystemRoutes(router) {
       providers,
       providerDetails: providers.map(providerDetails),
     });
+  });
+
+  // This endpoint intentionally has no session token: it is a launcher-level
+  // catalog read like /api/resumable. Dynamic providers may start/reuse a
+  // shared child process while discovering models, so keep it behind the
+  // router's Origin/Host checks rather than treating it as a side-effect-free
+  // public resource.
+  router.get('/api/providers/:provider/models', async (req, res, url, { provider }) => {
+    let descriptor;
+    try { descriptor = getProvider(provider); } catch (err) {
+      return respondJson(res, 400, { error: err.message });
+    }
+    try {
+      const models = descriptor.listModels
+        ? await descriptor.listModels()
+        : descriptor.models || [];
+      return respondJson(res, 200, models);
+    } catch (err) {
+      return respondJson(res, 502, { error: String(err.message || err) });
+    }
   });
 
   router.get('/api/browse', async (req, res, url) => {

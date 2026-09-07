@@ -56,6 +56,7 @@ export function pluginsFromInspect(inspect) {
       version: plugin.version || null,
       source: plugin.scope || 'grok',
       enabled: plugin.enabled !== false,
+      restartRequired: true,
     }));
 }
 

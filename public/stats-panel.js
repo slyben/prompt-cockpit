@@ -7,6 +7,7 @@ export function initStatsPanel({ el }) {
   reset();
 
   function fmtUSD(v) {
+    if (!Number.isFinite(Number(v))) return '—';
     if (v > 0 && v < 0.01) return '$' + v.toFixed(4);
     return '$' + v.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   }
@@ -50,10 +51,9 @@ export function initStatsPanel({ el }) {
     if (usage.unpriced && usage.unpriced.length) {
       parts.push(`<span class="stat-warn" title="No pricing entry for: ${usage.unpriced.join(', ')} - cost shown may be understated">⚠ unpriced model</span>`);
     }
-    // Best-effort plan quota, off the SDK's experimental usage API - absent
-    // on API key/Bedrock/Vertex sessions, and `rateLimits` just stays null
-    // (chip never appears) if that API ever breaks. Other chips don't
-    // depend on it.
+    // Best-effort plan quota from the provider adapter. It is absent when the
+    // provider/account cannot report limits, and never affects token/cost
+    // rendering if the optional lookup breaks.
     const fiveHour = rateLimits && rateLimits.five_hour;
     if (fiveHour && fiveHour.utilization != null) {
       // toLocaleTimeString matches the rate-limit-hit banner's clock format.
@@ -61,6 +61,13 @@ export function initStatsPanel({ el }) {
         ? ` (resets ${new Date(fiveHour.resets_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })})`
         : '';
       parts.push(`<span title="Plan 5-hour window utilization">${Math.round(fiveHour.utilization)}% 5h${resetLabel}</span>`);
+    }
+    const sevenDay = rateLimits && rateLimits.seven_day;
+    if (sevenDay && sevenDay.utilization != null) {
+      const resetLabel = sevenDay.resets_at
+        ? ` (resets ${new Date(sevenDay.resets_at).toLocaleDateString()})`
+        : '';
+      parts.push(`<span title="Plan 7-day window utilization">${Math.round(sevenDay.utilization)}% 7d${resetLabel}</span>`);
     }
     el.innerHTML = parts.join('<span class="stat-sep">·</span>');
     el.hidden = false;

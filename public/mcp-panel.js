@@ -6,7 +6,7 @@
 import { initListPanel } from '/list-panel.js';
 import { isSafeHref } from '/markdown.js';
 
-export function initMcpPanel({ listEl, refreshButton, fetchStatus, toggleServer, reconnectServer }) {
+export function initMcpPanel({ listEl, refreshButton, fetchStatus, toggleServer, reconnectServer, authenticateServer }) {
   const panel = initListPanel({
     listEl,
     fetchItems: fetchStatus,
@@ -35,8 +35,11 @@ export function initMcpPanel({ listEl, refreshButton, fetchStatus, toggleServer,
 
     const toggle = document.createElement('input');
     toggle.type = 'checkbox';
-    toggle.checked = server.status !== 'disabled';
-    toggle.title = toggle.checked ? 'Disable server' : 'Enable server';
+    toggle.checked = server.enabled !== false && server.status !== 'disabled';
+    toggle.disabled = server.canToggle === false;
+    toggle.title = toggle.disabled
+      ? (server.toggleDisabledReason || 'This server cannot be toggled from these settings')
+      : toggle.checked ? 'Disable server' : 'Enable server';
     toggle.addEventListener('change', async () => {
       toggle.disabled = true;
       try {
@@ -84,6 +87,25 @@ export function initMcpPanel({ listEl, refreshButton, fetchStatus, toggleServer,
       authLink.rel = 'noopener noreferrer';
       authLink.textContent = 'Authenticate ↗';
       top.append(authLink);
+    } else if (server.status === 'needs-auth' && server.canAuthenticate === true && authenticateServer) {
+      const authButton = document.createElement('button');
+      authButton.type = 'button';
+      authButton.className = 'mcp-auth-link';
+      authButton.textContent = 'Authenticate ↗';
+      authButton.title = `Authenticate ${server.name}`;
+      authButton.addEventListener('click', async () => {
+        authButton.disabled = true;
+        try {
+          const authorizationUrl = await authenticateServer(server.name);
+          if (!authorizationUrl || !isSafeHref(authorizationUrl)) throw new Error('The provider returned an unsafe or missing authorization URL');
+          window.open(authorizationUrl, '_blank', 'noopener,noreferrer');
+          await panel.refresh();
+        } catch (err) {
+          authButton.disabled = false;
+          showInlineError(li, `Could not start authentication for ${server.name}: ${err.message || err}`);
+        }
+      });
+      top.append(authButton);
     }
     if (server.canReconnect !== false) top.append(reconnectBtn);
     if (server.source) {

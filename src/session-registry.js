@@ -7,7 +7,7 @@ import { randomUUID, timingSafeEqual } from 'node:crypto';
 import path from 'node:path';
 import { countWithinTokenBudget, countRealUserTurns, INITIAL_HISTORY_TOKEN_BUDGET } from './session-history.js';
 import { createEventLog, append as appendEvent, replay as replayEvents } from './event-log.js';
-import { createUsageAccumulator, costForUsage } from './usage.js';
+import { createUsageAccumulator } from './usage.js';
 import { contextPayload } from './context-usage.js';
 import { getProvider, parseProvider } from './provider-registry.js';
 import { createDelegation } from './delegation.js';
@@ -96,7 +96,7 @@ export function createSession({ cwd, resume, name, model, permissionMode, histor
     // CLI, not free on every message) - see refreshContextUsage below.
     usageAcc: createUsageAccumulator(),
     contextUsage: null,
-    rateLimits: null, // best-effort, see refreshRateLimits - stays null if the experimental API is unavailable/broken
+    rateLimits: null, // best-effort provider-normalized plan windows, see refreshRateLimits
     // Auto-continue (desktop's checkbox, see handleMessage's rate_limit_event
     // branch below): off by default, opt-in per session. rateLimitHit is set
     // the moment a 'rejected' rate_limit_event lands (the hard stop, not the
@@ -138,6 +138,13 @@ export function createSession({ cwd, resume, name, model, permissionMode, histor
       deriveTaskUpdate(row, message);
     }
   }
+  if (resume) {
+    // Codex can replay a thread/tokenUsage/updated envelope whose `total` is
+    // the whole lifetime of a resumed/forked thread. History is seeded above,
+    // but those replayed envelopes are not part of codexThreadToMessages, so
+    // the next cumulative stamp must establish a baseline for this row.
+    row.usageAcc.primeCumulativeUsageBaseline();
+  }
   for (const message of tail) appendEvent(row.eventLog, message);
   sessions.set(id, row);
 
@@ -157,6 +164,7 @@ export function createSession({ cwd, resume, name, model, permissionMode, histor
     onStateChange: (state) => setState(id, state),
     onError: (err) => handleError(id, err),
     onApprovalRequest: (request) => handleApprovalRequest(id, request),
+    onApprovalResolved: (requestId) => handleApprovalResolved(id, requestId),
     onQueueChange: (queue) => {
       row.queue = queue;
       broadcastQueue(id);
@@ -508,9 +516,12 @@ export async function setAutoContinue(id, enabled) {
 export function resolveApproval(id, requestId, decision) {
   const row = sessions.get(id);
   if (!row) return false;
-  const i = row.pendingApprovals.findIndex((r) => r.requestId === requestId);
-  if (i >= 0) row.pendingApprovals.splice(i, 1);
-  return row.handle.resolveApproval(requestId, decision);
+  const resolved = row.handle.resolveApproval(requestId, decision);
+  if (!resolved) return false;
+  // Provider callbacks and the client decision can race; clearing an already
+  // removed request must remain idempotent.
+  handleApprovalResolved(id, requestId);
+  return resolved;
 }
 
 // Refetches the full transcript and returns whatever falls before the
@@ -585,6 +596,15 @@ export async function reconnectMcpServer(id, name) {
   return queryPassthrough(id, (row) => row.handle.query.reconnectMcpServer(name));
 }
 
+export async function mcpOauthLogin(id, name) {
+  const row = sessions.get(id);
+  if (!row) throw new Error(`unknown session: ${id}`);
+  if (typeof row.handle.query.mcpOauthLogin !== 'function') {
+    throw new Error(`${row.provider} sessions do not support MCP OAuth login`);
+  }
+  return row.handle.query.mcpOauthLogin(name);
+}
+
 // Reloads plugins (and, as a side effect, commands/agents/MCP servers) from
 // disk. Passthrough - none of {commands, agents, plugins, mcpServers} is
 // tracked on the row today, so there's nothing to sync locally; the caller
@@ -629,6 +649,14 @@ function handleMessage(id, message) {
   // stale and the next Shift+Tab computes its target off the wrong value.
   if (message.type === 'system' && message.subtype === 'status' && message.permissionMode && message.permissionMode !== row.mode) {
     row.mode = message.permissionMode;
+    broadcastSummary(id);
+  }
+  // Codex reports the effective model on its system/init envelope after a
+  // default-model launch or resume. Capture it before the first token update
+  // so the header and model-specific effort validation do not temporarily use
+  // a blank or incorrect fallback model.
+  if (message.type === 'system' && message.subtype === 'init' && message.model && message.model !== row.model) {
+    row.model = message.model;
     broadcastSummary(id);
   }
   const hadModel = !!row.model;
@@ -726,12 +754,18 @@ function applyAssistantUsage(row, message) {
   // the SDK/CLI actually picked; every assistant message carries the
   // resolved model id, so grab it once. An explicit /model switch later
   // overwrites this via setModel's own patch, not this fallback.
-  if (!row.model && message.message.model) row.model = message.message.model;
+  const model = message.message.model || row.model;
+  if (!row.model && model) row.model = model;
   const toolNames = Array.isArray(message.message.content)
     ? message.message.content.filter((b) => b && b.type === 'tool_use').map((b) => b.name)
     : [];
-  row.usageAcc.addAssistantMessage(message.message, toolNames);
-  const info = costForUsage(message.message.model, message.message.usage);
+  const accountingMessage = model && !message.message.model
+    ? { ...message, message: { ...message.message, model } }
+    : message;
+  // The accumulator owns provider-specific cumulative-token bookkeeping;
+  // the registry only passes it the shared assistant-message envelope.
+  const info = row.usageAcc.addAssistantMessage(accountingMessage, toolNames);
+  if (message._contextUsage) row.contextUsage = message._contextUsage;
   // info is only null when the message has no usage at all - an unpriced
   // model still carries real token counts (info.cost === null), so
   // _usageInfo gets set either way rather than only when a price exists.
@@ -1007,28 +1041,43 @@ function clearAutoContinueTimer(row) {
   }
 }
 
-// True once the experimental usage API has thrown once. Process-wide, not
-// per-session: the method either exists on this SDK build or it doesn't,
-// so stop retrying rather than eat a doomed call every turn. Our own
-// cost/token numbers never depend on this API.
+// These optional account APIs are not part of local cost/token accounting.
+// Claude's experimental API is treated as a process capability because its
+// presence is an SDK-build question. Codex's app-server is a restartable child
+// process, so its account endpoint gets a per-query backoff instead of a
+// process-wide permanent latch.
 let rateLimitsApiBroken = false;
+const CODEX_RATE_LIMITS_RETRY_MS = 30_000;
+const codexRateLimitsRetryAt = new WeakMap();
 
-// Best-effort plan/quota display (5h/7d rate-limit windows) off the SDK's
-// experimental `/usage` control request. Isolated from refreshContextUsage/
-// usageAcc: if this API is renamed or removed, the catch below just stops
-// populating row.rateLimits rather than taking cost/token/context tracking
-// down with it.
+// Best-effort plan/quota display (5h/7d rate-limit windows). Claude uses its
+// experimental usage query; Codex uses app-server account/rateLimits/read.
+// Failures only disable this optional chip.
 async function refreshRateLimits(id) {
-  if (rateLimitsApiBroken) return;
   const row = sessions.get(id);
-  if (!row || !row.handle?.query?.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET) return;
-  try {
-    const usage = await row.handle.query.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET();
-    row.rateLimits = usage.rate_limits_available ? usage.rate_limits : null;
-  } catch (err) {
-    rateLimitsApiBroken = true;
-    console.warn('usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET failed once, not retrying this process:', String(err.message || err));
-    return;
+  const query = row?.handle?.query;
+  if (!row) return;
+  if (query?.codexRateLimits) {
+    const queryKey = (typeof query === 'object' && query !== null) || typeof query === 'function' ? query : null;
+    if (queryKey && (codexRateLimitsRetryAt.get(queryKey) || 0) > Date.now()) return;
+    try {
+      row.rateLimits = await query.codexRateLimits();
+      if (queryKey) codexRateLimitsRetryAt.delete(queryKey);
+    } catch (err) {
+      if (queryKey) codexRateLimitsRetryAt.set(queryKey, Date.now() + CODEX_RATE_LIMITS_RETRY_MS);
+      console.warn(`Codex account/rateLimits/read failed; retrying after ${CODEX_RATE_LIMITS_RETRY_MS}ms:`, String(err.message || err));
+      return;
+    }
+  } else {
+    if (rateLimitsApiBroken || !query?.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET) return;
+    try {
+      const usage = await query.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET();
+      row.rateLimits = usage.rate_limits_available ? usage.rate_limits : null;
+    } catch (err) {
+      rateLimitsApiBroken = true;
+      console.warn('usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET failed once, not retrying this process:', String(err.message || err));
+      return;
+    }
   }
   broadcastUsage(id);
 }
@@ -1073,6 +1122,16 @@ function handleApprovalRequest(id, request) {
     }
   }
   broadcast(id, { type: 'cockpit:approval-request', request });
+}
+
+function handleApprovalResolved(id, requestId) {
+  const row = sessions.get(id);
+  if (!row) return;
+  const key = String(requestId);
+  const index = row.pendingApprovals.findIndex((request) => String(request.requestId) === key);
+  if (index < 0) return;
+  row.pendingApprovals.splice(index, 1);
+  broadcast(id, { type: 'cockpit:approval-resolved', requestId: key });
 }
 
 function handleError(id, err) {

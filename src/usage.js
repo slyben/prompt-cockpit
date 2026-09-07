@@ -74,10 +74,51 @@ function stampedCostUsd(usage) {
 // pricing files so the panel can flag "cost may be understated" instead of
 // silently under-reporting.
 const NO_TOOL_BUCKET = '(no tool call)';
+const USAGE_TOKEN_FIELDS = [
+  'input_tokens', 'output_tokens', 'cache_read_input_tokens',
+  'cache_creation_input_tokens', 'reasoning_output_tokens', 'total_tokens',
+];
+
+function usageDelta(current, previous) {
+  return Object.fromEntries(USAGE_TOKEN_FIELDS.map((field) => [
+    field,
+    Math.max(0, (Number(current?.[field]) || 0) - (Number(previous?.[field]) || 0)),
+  ]));
+}
+
+function hasUsageTokens(usage) {
+  return USAGE_TOKEN_FIELDS.some((field) => (Number(usage?.[field]) || 0) > 0);
+}
+
+// Most callers have a plain shared assistant message. The live transcript
+// path also passes the full envelope when a provider stamps metadata beside
+// that message; keeping this unpacking here lets the session registry stay
+// provider-neutral.
+function unpackAssistantMessage(input) {
+  if (input?.type === 'assistant' && input.message && typeof input.message === 'object') {
+    return { envelope: input, message: input.message };
+  }
+  return { envelope: null, message: input };
+}
 
 export function createUsageAccumulator() {
   const totals = { costUsd: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
   const unpriced = new Set();
+  // Envelope `_cumulativeUsage` is a running total; convert to a delta here
+  // so the session registry never has to know a provider's wire format.
+  let previousCumulativeTotal = null;
+  // A resumed provider session may emit the thread's lifetime total before
+  // it emits any new-turn usage. The first cumulative stamp then establishes
+  // the baseline for this Cockpit row instead of charging the whole thread
+  // again. Fresh sessions leave this false, so their first cumulative stamp
+  // is real usage and is counted normally.
+  //
+  // A resumed row's total is therefore a lower bound, not an exact figure: if
+  // the provider skips the replay and its first cumulative stamp is already a
+  // new turn, that one turn is absorbed into the baseline and never counted.
+  // Every later turn is a correct delta, so the shortfall is bounded to a
+  // single turn - preferred over re-charging the whole thread's history.
+  let cumulativeBaselinePending = false;
   // name -> { costUsd, calls, inputTokens, outputTokens, cacheReadTokens,
   //   cacheWriteTokens }. The SDK reports cost/tokens per turn, not per
   // tool call, so a turn with N tool_use blocks has its cost split evenly
@@ -99,22 +140,47 @@ export function createUsageAccumulator() {
   return {
     totals,
     unpriced,
-    // Call with an SDKAssistantMessage's `.message` (a BetaMessage) - a
-    // no-op if it has no usage (shouldn't happen for a real assistant
-    // turn, but priming-sentinel/synthetic messages have none). `toolNames`
-    // is the list of tool_use block names this turn produced (duplicates
-    // included), read from that same `.message.content` by the caller.
-    addAssistantMessage(message, toolNames = []) {
-      if (!message || !message.usage) return;
-      const info = costForUsage(message.model, message.usage);
-      if (!info) return; // no usage - already ruled out above, kept as a guard
+    // Call with either an SDKAssistantMessage's `.message` (a BetaMessage)
+    // or the full shared transcript envelope. The latter lets this helper
+    // consume a provider's cumulative-usage stamp without teaching the
+    // session registry that provider's wire format. `toolNames` is the list
+    // of tool_use block names this turn produced (duplicates included), read
+    // from that same `.message` by the caller.
+    addAssistantMessage(input, toolNames = []) {
+      const { envelope, message } = unpackAssistantMessage(input);
+      if (!message || !message.usage) return null;
+      const model = message.model || envelope?.model;
+      const messageInfo = costForUsage(model, message.usage);
+      if (!messageInfo) return null; // no usage - already ruled out above, kept as a guard
+
+      const cumulativeTotal = envelope?._cumulativeUsage;
+      const hasCumulativeTotal = cumulativeTotal && typeof cumulativeTotal === 'object';
+      const isCumulativeBaseline = hasCumulativeTotal && cumulativeBaselinePending;
+      const accountingUsage = hasCumulativeTotal
+        ? isCumulativeBaseline
+          ? usageDelta(cumulativeTotal, cumulativeTotal)
+          : usageDelta(cumulativeTotal, previousCumulativeTotal)
+        : message.usage;
+      if (hasCumulativeTotal) {
+        previousCumulativeTotal = { ...cumulativeTotal };
+        cumulativeBaselinePending = false;
+      }
+      const info = costForUsage(model, accountingUsage);
+      if (isCumulativeBaseline) return null;
+      // A duplicate cumulative update has no new tokens to add, but its
+      // raw per-message info is still returned for the turn's inline/chart
+      // rendering below.
+      if (!info || (hasCumulativeTotal && !hasUsageTokens(accountingUsage))) {
+        if (messageInfo.cost == null && model) unpriced.add(model);
+        return messageInfo;
+      }
       // Tokens accumulate regardless of whether this model priced (B1) - only
       // the cost line is skipped, with the model flagged in `unpriced` so the
       // panel can show "$0.00 (understated)" instead of silently costing a
       // real turn at zero. Previously the whole message was dropped here,
       // which also zeroed its token counts - see usage.js's costForUsage.
       if (info.cost == null) {
-        if (message.model) unpriced.add(message.model);
+        if (model) unpriced.add(model);
       } else {
         totals.costUsd += info.cost;
       }
@@ -132,6 +198,14 @@ export function createUsageAccumulator() {
       } else {
         for (const name of toolNames) addToolBucket(name, bucketInfo, toolNames.length);
       }
+      if (messageInfo.cost == null && model) unpriced.add(model);
+      return messageInfo;
+    },
+    // Mark the next cumulative usage envelope as the provider's existing
+    // thread total. History seeding may already have supplied a cumulative
+    // envelope, in which case there is no unknown baseline to establish.
+    primeCumulativeUsageBaseline() {
+      if (previousCumulativeTotal == null) cumulativeBaselinePending = true;
     },
     snapshot() {
       const cacheTotal = totals.cacheReadTokens + totals.cacheWriteTokens;

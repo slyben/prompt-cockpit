@@ -1,12 +1,20 @@
 // Long-lived Grok session via `grok agent stdio` (ACP). Same handle shape
 // as session.js so the registry can treat both providers the same.
 import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { spawnGrokAgent, killGrokProcess } from './grok-acp.js';
 import { acpUpdateToMessages, turnResultMessage, pickPermissionOption, grokPermissionAction } from './grok-messages.js';
 import { createGrokExtensions } from './grok-extensions.js';
 import { createResultEpochTracker } from './result-epoch.js';
 
-const CLIENT_INFO = { name: 'claude-prompt-cockpit', version: '0.1.5' }; // keep in sync with package.json's version
+// Read at load rather than hardcoded: a "keep in sync" comment here drifted
+// silently for two releases before anyone noticed.
+const PACKAGE_VERSION = JSON.parse(
+  readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
+).version;
+// Identifies the product, not the npm package: 'claude-prompt-cockpit' predates
+// Grok and Codex and read as the wrong tool in an ACP trace.
+const CLIENT_INFO = { name: 'prompt-cockpit', version: PACKAGE_VERSION };
 
 // Fork copies the parent onto disk; the child is not loaded in the parent
 // agent process (`_x.ai/rewind/points` on the new id returns Resource not

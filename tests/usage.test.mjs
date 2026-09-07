@@ -63,6 +63,36 @@ test('costForUsage prices codex models from pricing_codex.json', () => {
   assert.equal(info.writeTokens, 1_000_000);
 });
 
+test('costForUsage covers Codex aliases and treats cached input as a separate priced subset', () => {
+  const info = costForUsage('gpt-5-codex', {
+    // Codex's normalized input_tokens is uncached input; the app-server's
+    // original inputTokens total is split before it reaches this function.
+    input_tokens: 900_000,
+    output_tokens: 1_000_000,
+    cache_read_input_tokens: 100_000,
+  });
+  assert.equal(info.cost, 0.9 * 1.25 + 1 * 10 + 0.1 * 0.125);
+  assert.equal(costForUsage('gpt-5.2-codex', { input_tokens: 1_000_000, output_tokens: 0 }).cost, 1.75);
+  assert.equal(costForUsage('codex-mini-latest', { input_tokens: 1_000_000, output_tokens: 0 }).cost, 1.5);
+  assert.equal(costForUsage('gpt-5.4', { input_tokens: 1_000_000, output_tokens: 0 }).cost, 2.5);
+  assert.equal(costForUsage('gpt-5.4-mini', { input_tokens: 1_000_000, output_tokens: 0 }).cost, 0.75);
+});
+
+test('costForUsage prices the current Codex model catalog', () => {
+  const info = costForUsage('gpt-5.6-luna', {
+    input_tokens: 1_000_000,
+    output_tokens: 1_000_000,
+    cache_read_input_tokens: 1_000_000,
+    cache_creation_input_tokens: 1_000_000,
+  });
+  // OpenAI standard short-context rates (USD/M): input 0.20, output 1.20,
+  // cache read 0.02, cache write 0.25.
+  assert.equal(info.cost, 0.2 + 1.2 + 0.02 + 0.25);
+  assert.equal(costForUsage('gpt-5.6-sol', { input_tokens: 1_000_000, output_tokens: 0 }).cost, 4);
+  assert.equal(costForUsage('gpt-5.6-terra', { input_tokens: 1_000_000, output_tokens: 0 }).cost, 2);
+  assert.equal(costForUsage('gpt-5.5', { input_tokens: 1_000_000, output_tokens: 0 }).cost, 5);
+});
+
 test('costForUsage returns real tokens with cost: null for an unpriced model, rather than guessing a price or dropping the tokens', () => {
   const info = costForUsage('some-future-model', { input_tokens: 100, output_tokens: 40 });
   assert.equal(info.cost, null);
@@ -72,6 +102,60 @@ test('costForUsage returns real tokens with cost: null for an unpriced model, ra
 
 test('costForUsage returns null when usage is missing', () => {
   assert.equal(costForUsage('claude-sonnet-5', null), null);
+});
+
+test('createUsageAccumulator applies cumulative Codex totals from transcript envelopes', () => {
+  const acc = createUsageAccumulator();
+  acc.addAssistantMessage({
+    type: 'assistant',
+    message: {
+      model: 'gpt-5.3-codex',
+      usage: { input_tokens: 600, output_tokens: 100, cache_read_input_tokens: 400 },
+    },
+    _cumulativeUsage: { input_tokens: 600, output_tokens: 100, cache_read_input_tokens: 400, total_tokens: 1100 },
+  });
+  acc.addAssistantMessage({
+    type: 'assistant',
+    message: {
+      model: 'gpt-5.3-codex',
+      usage: { input_tokens: 300, output_tokens: 80, cache_read_input_tokens: 200 },
+    },
+    _cumulativeUsage: { input_tokens: 900, output_tokens: 180, cache_read_input_tokens: 600, total_tokens: 1680 },
+  });
+
+  const usage = acc.snapshot();
+  assert.equal(usage.inputTokens, 900);
+  assert.equal(usage.outputTokens, 180);
+  assert.equal(usage.cacheReadTokens, 600);
+  assert.equal(usage.costUsd, 0.001575 + 0.000105 + 0.00252);
+});
+
+test('createUsageAccumulator can establish a resumed cumulative baseline without charging it', () => {
+  const acc = createUsageAccumulator();
+  acc.primeCumulativeUsageBaseline();
+  const baselineInfo = acc.addAssistantMessage({
+    type: 'assistant',
+    message: {
+      model: 'gpt-5.3-codex',
+      usage: { input_tokens: 600, output_tokens: 100 },
+    },
+    _cumulativeUsage: { input_tokens: 600, output_tokens: 100, total_tokens: 700 },
+  });
+  assert.equal(baselineInfo, null);
+  assert.equal(acc.snapshot().inputTokens, 0);
+  assert.equal(acc.snapshot().outputTokens, 0);
+
+  acc.addAssistantMessage({
+    type: 'assistant',
+    message: {
+      model: 'gpt-5.3-codex',
+      usage: { input_tokens: 200, output_tokens: 40 },
+    },
+    _cumulativeUsage: { input_tokens: 800, output_tokens: 140, total_tokens: 940 },
+  });
+  const usage = acc.snapshot();
+  assert.equal(usage.inputTokens, 200);
+  assert.equal(usage.outputTokens, 40);
 });
 
 test('createUsageAccumulator sums across messages and tracks unpriced models separately', () => {
