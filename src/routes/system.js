@@ -87,9 +87,10 @@ export function registerSystemRoutes(router) {
     }
   });
 
-  // All-projects usage stats (Settings > Stats tab) - re-scans transcripts
-  // itself rather than reading the CLI's own stats-cache.json. Read-only,
-  // same Origin/Host-only gating as /api/browse above.
+  // All-projects usage stats (Settings > Stats tab) - re-scans Claude/Grok
+  // transcripts and Codex rollout files plus thread/list fallbacks, rather
+  // than reading the CLI's own stats-cache.json. Read-only, same
+  // Origin/Host-only gating as /api/browse above.
   router.get('/api/stats', async (req, res, url) => {
     try {
       const range = url.searchParams.get('range') || 'all';

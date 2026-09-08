@@ -1,13 +1,18 @@
 // All-projects usage stats for cockpit's Settings > Stats tab. Deliberately
 // NOT built on `~/.claude/stats-cache.json`, which only updates once
 // `/stats` has run in the terminal and can lag real usage. Instead
-// re-derives everything from `~/.claude/projects/**/*.jsonl` directly -
-// no CLI warm-up needed, though history pruned from disk isn't visible.
+// re-derives everything from local transcripts: Claude JSONL under
+// ~/.claude/projects, Grok updates.jsonl under ~/.grok/sessions, and Codex
+// rollout JSONL under ~/.codex/sessions, with thread/list activity as a
+// fallback for records that are no longer on disk.
 import { createReadStream } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { listAllSessionFiles } from './session-launcher.js';
+import { grokSessionsRoot, listAllGrokSessionFiles } from './grok-launcher.js';
+import { scanGrokUsageFile } from './grok-history.js';
+import { scanCodexUsageSessions } from './codex-history.js';
 import { costForUsage } from './usage.js';
 
 const PROJECTS_DIR = path.join(homedir(), '.claude', 'projects');
@@ -36,6 +41,12 @@ function addDays(key, delta) {
   const dt = dayKeyToLocalDate(key);
   dt.setDate(dt.getDate() + delta);
   return dayKey(dt.getTime());
+}
+
+const STATS_PROVIDERS = ['claude', 'grok', 'codex'];
+
+function emptyProviderTotals() {
+  return { costUsd: 0, inputTokens: 0, outputTokens: 0, sessions: 0 };
 }
 
 // Reads one session transcript down to the handful of fields the aggregator
@@ -84,6 +95,8 @@ export function aggregateGlobalStats(sessionScans, { range = 'all', now = Date.n
   const cutoff = rangeDays ? now - rangeDays * 86400000 : null;
 
   const dailyCounts = new Map(); // dayKey -> assistant-message count
+  const dailyByProvider = new Map(); // dayKey -> { claude, grok, codex }
+  const perProvider = Object.fromEntries(STATS_PROVIDERS.map((id) => [id, emptyProviderTotals()]));
   const modelTokens = new Map(); // model -> input+output tokens (favorite-model ranking only)
   // model -> {inputTokens,outputTokens,cacheReadTokens,cacheWriteTokens,
   // costUsd,calls} for the per-model cost table. Built via costForUsage
@@ -99,10 +112,11 @@ export function aggregateGlobalStats(sessionScans, { range = 'all', now = Date.n
   let sessionsInRange = 0;
   let longestSessionMs = 0;
 
-  for (const { rows, firstTs, lastTs } of sessionScans) {
+  for (const { rows, firstTs, lastTs, provider } of sessionScans) {
     const inRangeRows = cutoff ? rows.filter((r) => r.ts && r.ts >= cutoff) : rows;
     if (inRangeRows.length === 0) continue;
     sessionsInRange += 1;
+    if (provider && perProvider[provider]) perProvider[provider].sessions += 1;
     // "Longest session" must be the span WITHIN the selected range, not the
     // whole file's firstTs/lastTs - otherwise one message inside a `range=7d`
     // window but a real span going back a month would report that full
@@ -117,6 +131,11 @@ export function aggregateGlobalStats(sessionScans, { range = 'all', now = Date.n
       if (row.ts) {
         const key = dayKey(row.ts);
         dailyCounts.set(key, (dailyCounts.get(key) || 0) + 1);
+        if (provider && perProvider[provider]) {
+          const byP = dailyByProvider.get(key) || {};
+          byP[provider] = (byP[provider] || 0) + 1;
+          dailyByProvider.set(key, byP);
+        }
       }
       const u = row.usage || {};
       const input = u.input_tokens || 0;
@@ -148,6 +167,11 @@ export function aggregateGlobalStats(sessionScans, { range = 'all', now = Date.n
           else m.costUsd += info.cost;
           m.calls += 1;
           perModelStats.set(row.model, m);
+          if (provider && perProvider[provider]) {
+            perProvider[provider].inputTokens += info.inputTokens;
+            perProvider[provider].outputTokens += info.outputTokens;
+            if (info.cost != null) perProvider[provider].costUsd += info.cost;
+          }
         }
       }
     }
@@ -174,6 +198,8 @@ export function aggregateGlobalStats(sessionScans, { range = 'all', now = Date.n
 
   return {
     dailyCounts: Object.fromEntries(dailyCounts),
+    dailyByProvider: Object.fromEntries(dailyByProvider),
+    perProvider,
     favoriteModel,
     totalTokens: totalInput + totalOutput + totalCacheRead + totalCacheWrite,
     inputTokens: totalInput,
@@ -219,16 +245,50 @@ function computeStreaks(sortedDayKeys, now) {
 }
 
 // /api/stats has no session token gate, only Origin/Host allowlisting,
-// and re-parses EVERY transcript under ~/.claude/projects per call. This
-// TTL lets a burst of Stats-tab opens share one scan instead of paying
-// the full re-parse each time. Only engaged when `projectsDir` is the
-// real default, so tests passing their own dir always get a fresh scan.
+// and re-parses every local transcript per call. This TTL lets a burst
+// of Stats-tab opens share one scan instead of paying the full re-parse
+// each time. Only engaged when `projectsDir` is the real default, so
+// tests passing their own dir always get a fresh scan.
 const STATS_CACHE_TTL_MS = 15_000;
 const statsCache = new Map(); // range -> { result, atMs }
 const statsInFlight = new Map(); // range -> Promise
 
-export async function computeGlobalStats(projectsDir = PROJECTS_DIR, { range = 'all', now = Date.now() } = {}) {
-  const cacheable = projectsDir === PROJECTS_DIR;
+async function scanAllProviders(projectsDir, grokSessionsDir, scanCodex) {
+  const claudeFiles = await listAllSessionFiles(projectsDir);
+  const scans = await Promise.all(claudeFiles.map(async (f) => ({
+    ...await scanSessionFile(f.filePath),
+    provider: 'claude',
+  })));
+  if (grokSessionsDir) {
+    const grokFiles = await listAllGrokSessionFiles(grokSessionsDir);
+    scans.push(...await Promise.all(grokFiles.map(async (f) => ({
+      ...await scanGrokUsageFile(f.filePath, { summaryPath: f.summaryPath }),
+      provider: 'grok',
+    }))));
+  }
+  if (scanCodex) {
+    try {
+      const codexScans = await scanCodex();
+      scans.push(...codexScans.map((scan) => ({ ...scan, provider: 'codex' })));
+    } catch {
+      // Codex missing or app-server down: keep Claude/Grok totals.
+    }
+  }
+  return scans;
+}
+
+export async function computeGlobalStats(projectsDir = PROJECTS_DIR, {
+  range = 'all', now = Date.now(), grokSessionsDir, scanCodexSessions,
+} = {}) {
+  const grokDir = grokSessionsDir === undefined
+    ? (projectsDir === PROJECTS_DIR ? grokSessionsRoot() : null)
+    : grokSessionsDir;
+  const codexScan = scanCodexSessions === undefined
+    ? (projectsDir === PROJECTS_DIR ? () => scanCodexUsageSessions() : null)
+    : scanCodexSessions;
+  const cacheable = projectsDir === PROJECTS_DIR
+    && grokSessionsDir === undefined
+    && scanCodexSessions === undefined;
   if (cacheable) {
     const hit = statsCache.get(range);
     if (hit && now - hit.atMs < STATS_CACHE_TTL_MS) return hit.result;
@@ -236,8 +296,7 @@ export async function computeGlobalStats(projectsDir = PROJECTS_DIR, { range = '
     if (pending) return pending;
   }
   const run = (async () => {
-    const files = await listAllSessionFiles(projectsDir);
-    const scans = await Promise.all(files.map((f) => scanSessionFile(f.filePath)));
+    const scans = await scanAllProviders(projectsDir, grokDir, codexScan);
     return aggregateGlobalStats(scans, { range, now });
   })();
   if (!cacheable) return run;

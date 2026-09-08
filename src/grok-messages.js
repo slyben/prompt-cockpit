@@ -52,7 +52,7 @@ function assistantMessage(sessionId, content, { model, usage } = {}) {
   };
 }
 
-function usageFromUpdate(update) {
+export function usageFromUpdate(update) {
   const u = update.usage || {};
   const input = u.input_tokens ?? u.inputTokens;
   const output = u.output_tokens ?? u.outputTokens;

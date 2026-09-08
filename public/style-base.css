@@ -6,6 +6,9 @@
     --text: #e6e6e6;
     --muted: #8a8f98;
     --accent: #5b8cff;
+    --stats-claude: #5b8cff;
+    --stats-grok: #5ec98d;
+    --stats-codex: #ff6b6b;
     --error: #ff6b6b;
     --ok: #5ec98d;
     --success: #3fb950;

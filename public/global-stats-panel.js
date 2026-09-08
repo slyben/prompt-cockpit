@@ -47,7 +47,13 @@ export function initGlobalStatsPanel({ bodyEl, rangeSelect, refreshButton }) {
     // currently fit, measured against bodyEl (already in the DOM) since the
     // heatmap itself doesn't exist yet. Never shrinks below MIN_WEEKS_SHOWN.
     const weeksShown = computeWeeksShown(bodyEl);
-    bodyEl.append(renderHeatmap(stats, weeksShown), renderOverview(stats), renderModelTable(stats), renderAccountLimitsSection());
+    bodyEl.append(
+      renderHeatmap(stats, weeksShown),
+      renderOverview(stats),
+      renderModelTable(stats),
+      renderWeekCostSection(),
+      renderAccountLimitsSection(),
+    );
     // Wider-than-panel content (still possible on a narrow window) scrolls -
     // the interesting end is the recent one, so park the scroll on the
     // right so the current week is visible on open. Has to happen here
@@ -159,9 +165,12 @@ function renderHeatmap(stats, weeksShown) {
       // Each cell = one calendar day; shade level (0-4, see LEVEL_THRESHOLDS)
       // is how many messages were sent that day, across every project.
       const count = stats.dailyCounts[key] || 0;
+      const byProvider = (stats.dailyByProvider && stats.dailyByProvider[key]) || {};
       const cell = document.createElement('div');
-      cell.className = `stats-heatmap-cell level-${levelFor(count)}`;
-      cell.title = `${date.toDateString()}: ${count} message${count === 1 ? '' : 's'}`;
+      const level = levelFor(count);
+      cell.className = `stats-heatmap-cell level-${level}`;
+      paintHeatmapCell(cell, level, byProvider);
+      cell.title = heatmapTitle(date, count, byProvider);
       col.append(cell);
     }
     grid.append(col);
@@ -174,18 +183,102 @@ function renderHeatmap(stats, weeksShown) {
 
   const legend = document.createElement('div');
   legend.className = 'stats-heatmap-legend';
-  legend.innerHTML = '<span>Less</span>' + [0, 1, 2, 3, 4].map((l) => `<div class="stats-heatmap-cell level-${l}"></div>`).join('') + '<span>More</span>';
+  const providers = document.createElement('span');
+  providers.className = 'stats-provider-legend';
+  for (const { id, label } of STATS_PROVIDERS) {
+    const item = document.createElement('span');
+    item.className = 'stats-provider-item';
+    const swatch = document.createElement('span');
+    swatch.className = `stats-swatch stats-swatch-${id}`;
+    item.append(swatch, document.createTextNode(label));
+    providers.append(item);
+  }
+  const intensity = document.createElement('span');
+  intensity.className = 'stats-heatmap-intensity';
+  intensity.innerHTML = '<span>Less</span>' + [0, 1, 2, 3, 4].map((l) => `<div class="stats-heatmap-cell level-${l}"></div>`).join('') + '<span>More</span>';
+  legend.append(providers, intensity);
   wrap.append(scroller, legend);
 
   return wrap;
 }
+
+const STATS_PROVIDERS = [
+  { id: 'claude', label: 'Claude' },
+  { id: 'grok', label: 'Grok' },
+  { id: 'codex', label: 'Codex' },
+];
+const PROVIDER_COLORS = {
+  claude: '#5b8cff',
+  grok: '#5ec98d',
+  codex: '#ff6b6b',
+};
+const LEVEL_MIX_PCT = [0, 25, 50, 75, 100];
 
 function levelFor(count) {
   if (count <= 0) return 0;
   for (let i = 0; i < LEVEL_THRESHOLDS.length; i += 1) {
     if (count <= LEVEL_THRESHOLDS[i]) return i + 1;
   }
-  return LEVEL_THRESHOLDS.length + 1;
+  return LEVEL_THRESHOLDS.length;
+}
+
+function activeProviders(byProvider) {
+  return STATS_PROVIDERS.filter(({ id }) => (byProvider[id] || 0) > 0);
+}
+
+function paintHeatmapCell(cell, level, byProvider) {
+  const providers = activeProviders(byProvider);
+  if (providers.length === 1) {
+    const id = providers[0].id;
+    cell.classList.add(`provider-${id}`);
+    cell.style.setProperty('--cell-color', PROVIDER_COLORS[id]);
+    return;
+  }
+  if (providers.length < 2 || level <= 0) return;
+  const mix = LEVEL_MIX_PCT[level] ?? 100;
+  const n = providers.length;
+  const stops = providers.map(({ id }, i) => {
+    const start = (i / n) * 100;
+    const end = ((i + 1) / n) * 100;
+    return `color-mix(in srgb, ${PROVIDER_COLORS[id]} ${mix}%, var(--panel)) ${start}% ${end}%`;
+  });
+  cell.style.background = `linear-gradient(90deg, ${stops.join(', ')})`;
+  cell.style.borderColor = 'transparent';
+}
+
+function providerIdForModel(model) {
+  const id = String(model || '').toLowerCase();
+  if (!id) return null;
+  if (id.includes('grok')) return 'grok';
+  if (id.includes('codex') || id.startsWith('gpt-')) return 'codex';
+  return 'claude';
+}
+
+function emptyProviderTotals() {
+  return { costUsd: 0, inputTokens: 0, outputTokens: 0, sessions: 0 };
+}
+
+function totalsByProvider(stats) {
+  const out = Object.fromEntries(STATS_PROVIDERS.map(({ id }) => [
+    id,
+    { ...emptyProviderTotals(), ...(stats.perProvider && stats.perProvider[id]) },
+  ]));
+  const hasCost = STATS_PROVIDERS.some(({ id }) => out[id].costUsd > 0);
+  if (hasCost) return out;
+  for (const row of stats.perModel || []) {
+    const id = providerIdForModel(row.model);
+    if (!id || !out[id]) continue;
+    out[id].costUsd += row.costUsd || 0;
+    out[id].inputTokens += row.inputTokens || 0;
+    out[id].outputTokens += row.outputTokens || 0;
+  }
+  return out;
+}
+
+function heatmapTitle(date, count, byProvider) {
+  const parts = activeProviders(byProvider).map(({ id, label }) => `${label} ${byProvider[id]}`);
+  const extra = parts.length ? ` (${parts.join(', ')})` : '';
+  return `${date.toDateString()}: ${count} message${count === 1 ? '' : 's'}${extra}`;
 }
 
 function dayKey(date) {
@@ -280,6 +373,91 @@ function renderModelTable(stats) {
     wrap.append(note);
   }
 
+  return wrap;
+}
+
+// Last-7-day spend per provider, on its own button so an All-time heatmap
+// view does not have to switch the range dropdown. Reuses /api/stats?range=7d
+// (and its 15s scan cache) rather than a second aggregator.
+function renderWeekCostSection() {
+  const wrap = document.createElement('div');
+  wrap.className = 'stats-section';
+
+  const header = document.createElement('div');
+  header.className = 'settings-section-header';
+  const title = document.createElement('strong');
+  title.textContent = 'Past week cost';
+  const computeBtn = document.createElement('button');
+  computeBtn.type = 'button';
+  computeBtn.className = 'btn';
+  computeBtn.textContent = 'Compute';
+  computeBtn.title = 'Scan local transcripts for the last 7 days and total cost per provider';
+  header.append(title, computeBtn);
+  wrap.append(header);
+
+  const body = document.createElement('div');
+  wrap.append(body);
+  const hint = document.createElement('p');
+  hint.className = 'stats-note';
+  hint.textContent = 'Click Compute for the last 7 days, split by Claude / Grok / Codex.';
+  body.append(hint);
+
+  async function load() {
+    computeBtn.disabled = true;
+    body.innerHTML = '';
+    const loading = document.createElement('p');
+    loading.className = 'stats-note';
+    loading.textContent = 'Scanning last 7 days…';
+    body.append(loading);
+    try {
+      const res = await fetch('/api/stats?range=7d');
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const stats = await res.json();
+      body.innerHTML = '';
+      const perProvider = totalsByProvider(stats);
+      const list = document.createElement('div');
+      list.className = 'stats-week-cost';
+      for (const { id, label } of STATS_PROVIDERS) {
+        const row = document.createElement('div');
+        row.className = 'settings-row';
+        const name = document.createElement('span');
+        name.className = `stats-provider-label stats-provider-${id}`;
+        name.textContent = label;
+        const value = document.createElement('strong');
+        const totals = perProvider[id] || emptyProviderTotals();
+        const sessionBit = totals.sessions ? ` · ${totals.sessions} session${totals.sessions === 1 ? '' : 's'}` : '';
+        value.textContent = `${formatUsd(totals.costUsd)}${sessionBit}`;
+        value.style.marginLeft = 'auto';
+        row.append(name, value);
+        list.append(row);
+      }
+      body.append(list);
+      const totalNote = document.createElement('p');
+      totalNote.className = 'stats-note';
+      totalNote.textContent = `Last 7 days total ${formatUsd(stats.totalCostUsd)} · ${stats.sessions || 0} session${stats.sessions === 1 ? '' : 's'} (heatmap range above can be wider).`;
+      body.append(totalNote);
+      const codex = perProvider.codex;
+      if (codex && codex.sessions > 0 && !codex.costUsd) {
+        const note = document.createElement('p');
+        note.className = 'stats-note';
+        const hasTokens = (codex.inputTokens || 0) + (codex.outputTokens || 0) > 0;
+        note.textContent = hasTokens
+          ? 'Codex usage was found, but its model is not in pricing_codex.json; the cost is therefore understated.'
+          : 'No Codex token records were found; the line reflects thread activity only.';
+        body.append(note);
+      }
+    } catch (err) {
+      body.innerHTML = '';
+      const p = document.createElement('p');
+      p.className = 'mcp-error';
+      p.textContent = `Could not compute past week cost: ${err.message || err}`;
+      body.append(p);
+    } finally {
+      computeBtn.disabled = false;
+    }
+  }
+
+  computeBtn.addEventListener('click', load);
   return wrap;
 }
 

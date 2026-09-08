@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile, rm, utimes } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { listGrokSessions } from '../src/grok-launcher.js';
+import { listAllGrokSessionFiles, listGrokSessions } from '../src/grok-launcher.js';
 
 async function writeSession(root, cwd, sessionId, { summary, updates, mtimeSec }) {
   const group = path.join(root, encodeURIComponent(cwd));
@@ -66,4 +66,23 @@ test('listGrokSessions falls back to the first user prompt when there is no titl
 
 test('listGrokSessions returns [] when the sessions dir does not exist', async () => {
   assert.deepEqual(await listGrokSessions('/nonexistent/grok/sessions'), []);
+});
+
+test('listAllGrokSessionFiles walks every updates.jsonl, not the resume-list cap', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'grok-all-sessions-'));
+  try {
+    await writeSession(root, 'D:\\proj\\a', 'sess-1', {
+      summary: { info: { id: 'sess-1' } },
+      updates: '{}\n',
+    });
+    await writeSession(root, 'D:\\proj\\b', 'sess-2', {
+      summary: { info: { id: 'sess-2' } },
+      updates: '{}\n',
+    });
+    const files = await listAllGrokSessionFiles(root);
+    assert.equal(files.length, 2);
+    assert.ok(files.every((file) => file.filePath.endsWith('updates.jsonl')));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });

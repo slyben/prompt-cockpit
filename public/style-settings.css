@@ -98,11 +98,29 @@
     background: var(--bg);
     border: 1px solid var(--border);
   }
-  .stats-heatmap-cell.level-1 { background: color-mix(in srgb, var(--accent) 25%, var(--panel)); border-color: transparent; }
-  .stats-heatmap-cell.level-2 { background: color-mix(in srgb, var(--accent) 50%, var(--panel)); border-color: transparent; }
-  .stats-heatmap-cell.level-3 { background: color-mix(in srgb, var(--accent) 75%, var(--panel)); border-color: transparent; }
-  .stats-heatmap-cell.level-4 { background: var(--accent); border-color: transparent; }
-  .stats-heatmap-legend { display: flex; align-items: center; gap: 4px; margin-top: 8px; font-size: 11px; color: var(--muted); }
+  .stats-heatmap-cell.level-1 { background: color-mix(in srgb, var(--cell-color, var(--accent)) 25%, var(--panel)); border-color: transparent; }
+  .stats-heatmap-cell.level-2 { background: color-mix(in srgb, var(--cell-color, var(--accent)) 50%, var(--panel)); border-color: transparent; }
+  .stats-heatmap-cell.level-3 { background: color-mix(in srgb, var(--cell-color, var(--accent)) 75%, var(--panel)); border-color: transparent; }
+  .stats-heatmap-cell.level-4 { background: var(--cell-color, var(--accent)); border-color: transparent; }
+  .stats-heatmap-cell.provider-claude { --cell-color: var(--stats-claude); }
+  .stats-heatmap-cell.provider-grok { --cell-color: var(--stats-grok); }
+  .stats-heatmap-cell.provider-codex { --cell-color: var(--stats-codex); }
+  .stats-heatmap-legend { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin-top: 8px; font-size: 11px; color: var(--muted); }
+  .stats-provider-legend, .stats-heatmap-intensity, .stats-provider-item { display: flex; align-items: center; gap: 4px; }
+  .stats-provider-legend { gap: 10px; }
+  .stats-swatch {
+    width: 10px;
+    height: 10px;
+    border-radius: 2px;
+    display: inline-block;
+  }
+  .stats-swatch-claude { background: var(--stats-claude); }
+  .stats-swatch-grok { background: var(--stats-grok); }
+  .stats-swatch-codex { background: var(--stats-codex); }
+  .stats-provider-claude { color: var(--stats-claude); }
+  .stats-provider-grok { color: var(--stats-grok); }
+  .stats-provider-codex { color: var(--stats-codex); }
+  .stats-week-cost { display: flex; flex-direction: column; gap: 4px; }
   .stats-overview { display: flex; flex-direction: column; gap: 4px; margin-top: 16px; }
   .stats-section { margin-top: 20px; }
   .stats-note { color: var(--muted); font-size: 12px; margin: 4px 0 0; }

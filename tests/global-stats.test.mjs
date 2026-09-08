@@ -18,6 +18,7 @@ test('aggregateGlobalStats sums tokens, picks the favorite model, and counts act
         { ts: Date.parse('2026-08-18T09:00:00Z'), model: 'claude-sonnet-5', usage: { input_tokens: 100, output_tokens: 50, cache_read_input_tokens: 10 } },
         { ts: Date.parse('2026-08-18T09:05:00Z'), model: 'claude-sonnet-5', usage: { input_tokens: 20, output_tokens: 30 } },
       ],
+      provider: 'claude',
     },
     {
       firstTs: Date.parse('2026-08-19T10:00:00Z'),
@@ -25,6 +26,7 @@ test('aggregateGlobalStats sums tokens, picks the favorite model, and counts act
       rows: [
         { ts: Date.parse('2026-08-19T10:00:00Z'), model: 'claude-haiku-4-5', usage: { input_tokens: 5, output_tokens: 5 } },
       ],
+      provider: 'claude',
     },
   ];
 
@@ -50,6 +52,48 @@ test('aggregateGlobalStats sums tokens, picks the favorite model, and counts act
   assert.ok(stats.unpricedModels.includes('claude-haiku-4-5'));
   assert.ok(stats.totalCostUsd > 0);
   assert.equal(stats.currentStreak, 2); // 08-18 and 08-19 are consecutive; 08-20 (now) has no activity yet
+  assert.equal(stats.perProvider.claude.sessions, 2);
+  assert.equal(stats.perProvider.claude.inputTokens, 125);
+  assert.equal(stats.perProvider.grok.sessions, 0);
+  assert.equal(Object.values(stats.dailyByProvider).reduce((n, day) => n + (day.claude || 0), 0), 3);
+});
+
+test('aggregateGlobalStats splits heatmap days and cost across providers', () => {
+  const scans = [
+    {
+      firstTs: Date.parse('2026-09-06T12:00:00Z'),
+      lastTs: Date.parse('2026-09-06T12:00:00Z'),
+      provider: 'claude',
+      rows: [{ ts: Date.parse('2026-09-06T12:00:00Z'), model: 'claude-sonnet-5', usage: { input_tokens: 100, output_tokens: 20 } }],
+    },
+    {
+      firstTs: Date.parse('2026-09-06T18:00:00Z'),
+      lastTs: Date.parse('2026-09-06T18:00:00Z'),
+      provider: 'grok',
+      rows: [{ ts: Date.parse('2026-09-06T18:00:00Z'), model: 'grok-4.6', usage: { input_tokens: 50, output_tokens: 8, cost_usd_ticks: 53492200 } }],
+    },
+    {
+      firstTs: Date.parse('2026-09-06T20:00:00Z'),
+      lastTs: Date.parse('2026-09-06T20:00:00Z'),
+      provider: 'codex',
+      rows: [{ ts: Date.parse('2026-09-06T20:00:00Z'), model: null, usage: null }],
+    },
+  ];
+  const stats = aggregateGlobalStats(scans, { range: 'all', now: Date.parse('2026-09-07T12:00:00Z') });
+  const mixedDay = Object.values(stats.dailyByProvider).find((day) => (day.claude || 0) + (day.grok || 0) + (day.codex || 0) === 3);
+  assert.ok(mixedDay);
+  assert.deepEqual(mixedDay, { claude: 1, grok: 1, codex: 1 });
+  assert.equal(stats.perProvider.claude.sessions, 1);
+  assert.equal(stats.perProvider.grok.sessions, 1);
+  assert.equal(stats.perProvider.codex.sessions, 1);
+  assert.ok(stats.perProvider.claude.costUsd > 0);
+  assert.equal(stats.perProvider.grok.costUsd, 53492200 / 10_000_000_000);
+  assert.equal(stats.perProvider.codex.costUsd, 0);
+
+  const week = aggregateGlobalStats(scans, { range: '7d', now: Date.parse('2026-09-07T12:00:00Z') });
+  assert.ok(week.perProvider.claude.costUsd > 0);
+  assert.equal(week.perProvider.grok.costUsd, 53492200 / 10_000_000_000);
+  assert.equal(week.perProvider.codex.sessions, 1);
 });
 
 test('computeStreaks counts consecutive days ending yesterday when today has no activity yet', () => {
@@ -159,4 +203,104 @@ test('computeGlobalStats returns zeros for a missing projects dir', async () => 
   assert.equal(stats.sessions, 0);
   assert.equal(stats.totalTokens, 0);
   assert.equal(stats.favoriteModel, null);
+});
+
+test('computeGlobalStats merges Grok turn_completed usage into the heatmap totals', async () => {
+  const claudeRoot = await mkdtemp(path.join(tmpdir(), 'cockpit-stats-claude-'));
+  const grokRoot = await mkdtemp(path.join(tmpdir(), 'cockpit-stats-grok-'));
+  try {
+    const proj = path.join(claudeRoot, '-Users-x-proj');
+    await mkdir(proj, { recursive: true });
+    await writeFile(
+      path.join(proj, 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa.jsonl'),
+      assistantLine('2026-09-06T12:00:00.000Z', 'claude-sonnet-5', { input_tokens: 10, output_tokens: 5 }) + '\n',
+    );
+
+    const grokDir = path.join(grokRoot, encodeURIComponent('D:\\proj'), 'sess-grok');
+    await mkdir(grokDir, { recursive: true });
+    await writeFile(path.join(grokDir, 'summary.json'), JSON.stringify({ current_model_id: 'grok-4.6' }));
+    await writeFile(path.join(grokDir, 'updates.jsonl'), JSON.stringify({
+      timestamp: Date.parse('2026-09-06T18:00:00.000Z') / 1000,
+      params: {
+        update: {
+          sessionUpdate: 'turn_completed',
+          usage: { inputTokens: 50, outputTokens: 8, cachedReadTokens: 20, costUsdTicks: 53492200 },
+        },
+      },
+    }) + '\n');
+
+    const stats = await computeGlobalStats(claudeRoot, {
+      range: 'all',
+      now: Date.parse('2026-09-07T12:00:00.000Z'),
+      grokSessionsDir: grokRoot,
+    });
+    assert.equal(stats.sessions, 2);
+    assert.equal(stats.inputTokens, 60);
+    assert.equal(stats.outputTokens, 13);
+    assert.equal(stats.cacheReadTokens, 20);
+    assert.equal(stats.activeDays, 1);
+    assert.ok(stats.perModel.some((row) => row.model === 'grok-4.6'));
+    assert.equal(stats.perProvider.claude.sessions, 1);
+    assert.equal(stats.perProvider.grok.sessions, 1);
+    assert.equal(stats.perProvider.claude.inputTokens, 10);
+    assert.equal(stats.perProvider.grok.inputTokens, 50);
+  } finally {
+    await rm(claudeRoot, { recursive: true, force: true });
+    await rm(grokRoot, { recursive: true, force: true });
+  }
+});
+
+test('computeGlobalStats counts Codex thread activity without adding token totals', async () => {
+  const claudeRoot = await mkdtemp(path.join(tmpdir(), 'cockpit-stats-codex-'));
+  try {
+    const proj = path.join(claudeRoot, '-Users-x-proj');
+    await mkdir(proj, { recursive: true });
+    await writeFile(
+      path.join(proj, 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa.jsonl'),
+      assistantLine('2026-09-06T12:00:00.000Z', 'claude-sonnet-5', { input_tokens: 10, output_tokens: 5 }) + '\n',
+    );
+
+    const stats = await computeGlobalStats(claudeRoot, {
+      range: 'all',
+      now: Date.parse('2026-09-07T12:00:00.000Z'),
+      grokSessionsDir: path.join(claudeRoot, 'no-grok'),
+      scanCodexSessions: async () => [{
+        firstTs: Date.parse('2026-09-06T10:00:00.000Z'),
+        lastTs: Date.parse('2026-09-06T18:00:00.000Z'),
+        rows: [{ ts: Date.parse('2026-09-06T18:00:00.000Z'), model: null, usage: null }],
+      }],
+    });
+    assert.equal(stats.sessions, 2);
+    assert.equal(stats.inputTokens, 10);
+    assert.equal(stats.outputTokens, 5);
+    assert.equal(stats.activeDays, 1);
+    assert.equal(stats.perModel.some((row) => row.model === 'codex'), false);
+    assert.equal(stats.perProvider.codex.sessions, 1);
+    assert.equal(stats.perProvider.codex.costUsd, 0);
+  } finally {
+    await rm(claudeRoot, { recursive: true, force: true });
+  }
+});
+
+test('computeGlobalStats keeps Claude totals when the Codex scan fails', async () => {
+  const claudeRoot = await mkdtemp(path.join(tmpdir(), 'cockpit-stats-codex-fail-'));
+  try {
+    const proj = path.join(claudeRoot, '-Users-x-proj');
+    await mkdir(proj, { recursive: true });
+    await writeFile(
+      path.join(proj, 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa.jsonl'),
+      assistantLine('2026-09-06T12:00:00.000Z', 'claude-sonnet-5', { input_tokens: 10, output_tokens: 5 }) + '\n',
+    );
+
+    const stats = await computeGlobalStats(claudeRoot, {
+      range: 'all',
+      now: Date.parse('2026-09-07T12:00:00.000Z'),
+      grokSessionsDir: path.join(claudeRoot, 'no-grok'),
+      scanCodexSessions: async () => { throw new Error('app-server down'); },
+    });
+    assert.equal(stats.sessions, 1);
+    assert.equal(stats.inputTokens, 10);
+  } finally {
+    await rm(claudeRoot, { recursive: true, force: true });
+  }
 });

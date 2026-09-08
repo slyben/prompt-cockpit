@@ -11,6 +11,48 @@ export function grokSessionsRoot() {
   return path.join(process.env.GROK_HOME || path.join(homedir(), '.grok'), 'sessions');
 }
 
+// Unbounded walk for Settings > Stats. listGrokSessions is newest-30 for
+// the resume picker; totals/streaks need every updates.jsonl on disk.
+export async function listAllGrokSessionFiles(sessionsDir = grokSessionsRoot()) {
+  let groups;
+  try {
+    groups = await readdir(sessionsDir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+
+  const files = [];
+  for (const group of groups) {
+    if (!group.isDirectory()) continue;
+    const groupDir = path.join(sessionsDir, group.name);
+    let sessionDirs;
+    try {
+      sessionDirs = await readdir(groupDir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of sessionDirs) {
+      if (!entry.isDirectory()) continue;
+      const sessionDir = path.join(groupDir, entry.name);
+      const filePath = path.join(sessionDir, 'updates.jsonl');
+      if (!existsSync(filePath)) continue;
+      let mtimeMs;
+      try {
+        mtimeMs = statSync(filePath).mtimeMs;
+      } catch {
+        continue;
+      }
+      files.push({
+        filePath,
+        summaryPath: path.join(sessionDir, 'summary.json'),
+        sessionId: entry.name,
+        mtimeMs,
+      });
+    }
+  }
+  return files;
+}
+
 export async function listGrokSessions(sessionsDir = grokSessionsRoot()) {
   let groups;
   try {

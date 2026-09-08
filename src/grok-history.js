@@ -1,13 +1,82 @@
 // Read a Grok session's updates.jsonl and turn it into the same sdk:message
 // list fetchSessionHistory() returns for Claude.
-import { createReadStream, existsSync, readdirSync } from 'node:fs';
+import { createReadStream, existsSync, readFileSync, readdirSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import path from 'node:path';
 import { grokSessionsRoot } from './grok-launcher.js';
-import { acpUpdateToMessages, coalesceAssistantMessages } from './grok-messages.js';
+import { acpUpdateToMessages, coalesceAssistantMessages, usageFromUpdate } from './grok-messages.js';
 import { isSafeSessionId } from './safe-id.js';
 
 const MAX_LINES = 5000;
+
+function entryTimestampMs(entry) {
+  const meta = entry?.params?._meta?.agentTimestampMs ?? entry?.params?.update?._meta?.agentTimestampMs;
+  const metaNum = Number(meta);
+  if (Number.isFinite(metaNum) && metaNum > 0) return metaNum;
+  const raw = entry?.timestamp;
+  if (typeof raw === 'string') {
+    const parsed = Date.parse(raw);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  const num = Number(raw);
+  if (!Number.isFinite(num) || num <= 0) return null;
+  return num < 1e12 ? num * 1000 : num;
+}
+
+function modelFromTurn(update, fallback) {
+  const keys = update?.usage?.modelUsage && typeof update.usage.modelUsage === 'object'
+    ? Object.keys(update.usage.modelUsage)
+    : [];
+  return keys[0] || update?._meta?.modelId || fallback || null;
+}
+
+function modelFromSummary(summaryPath) {
+  try {
+    const summary = JSON.parse(readFileSync(summaryPath, 'utf8'));
+    return summary.current_model_id || null;
+  } catch {
+    return null;
+  }
+}
+
+// One usage row per turn_completed, same shape scanSessionFile produces for
+// Claude JSONL, so Settings > Stats can merge both providers.
+export async function scanGrokUsageFile(filePath, { summaryPath } = {}) {
+  const rows = [];
+  let firstTs = null;
+  let lastTs = null;
+  const fallbackModel = summaryPath ? modelFromSummary(summaryPath) : modelFromSummary(path.join(path.dirname(filePath), 'summary.json'));
+  let rl;
+  try {
+    rl = createInterface({ input: createReadStream(filePath, { encoding: 'utf8' }) });
+  } catch {
+    return { rows, firstTs, lastTs };
+  }
+  try {
+    for await (const line of rl) {
+      if (!line) continue;
+      let entry;
+      try {
+        entry = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      const ts = entryTimestampMs(entry);
+      if (ts != null) {
+        if (firstTs == null || ts < firstTs) firstTs = ts;
+        if (lastTs == null || ts > lastTs) lastTs = ts;
+      }
+      const update = entry.params?.update;
+      if (update?.sessionUpdate !== 'turn_completed') continue;
+      const usage = usageFromUpdate(update);
+      if (!usage) continue;
+      rows.push({ ts, model: modelFromTurn(update, fallbackModel), usage });
+    }
+  } catch {
+    // Truncated/unreadable file mid-stream - keep whatever was parsed.
+  }
+  return { rows, firstTs, lastTs };
+}
 
 export async function fetchGrokSessionHistory(sessionId, cwd, sessionsDir = grokSessionsRoot()) {
   const sessionDir = findSessionDir(sessionId, cwd, sessionsDir);

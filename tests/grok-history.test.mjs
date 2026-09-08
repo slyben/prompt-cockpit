@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { fetchGrokSessionHistory, findSessionDir, isSafeSessionId } from '../src/grok-history.js';
+import { fetchGrokSessionHistory, findSessionDir, isSafeSessionId, scanGrokUsageFile } from '../src/grok-history.js';
 
 test('fetchGrokSessionHistory maps updates.jsonl into sdk messages', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'grok-hist-'));
@@ -38,6 +38,50 @@ test('fetchGrokSessionHistory maps updates.jsonl into sdk messages', async () =>
 
 test('fetchGrokSessionHistory throws when the session is missing', async () => {
   await assert.rejects(fetchGrokSessionHistory('nope', '/tmp', '/nonexistent'), /unknown grok session/);
+});
+
+test('scanGrokUsageFile counts turn_completed usage with unix-second timestamps', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'grok-stats-scan-'));
+  const dir = path.join(root, 'sess-1');
+  await mkdir(dir, { recursive: true });
+  const summaryPath = path.join(dir, 'summary.json');
+  await writeFile(summaryPath, JSON.stringify({ current_model_id: 'grok-4.6' }));
+  const filePath = path.join(dir, 'updates.jsonl');
+  await writeFile(filePath, [
+    JSON.stringify({
+      timestamp: 1788714100,
+      params: { update: { sessionUpdate: 'user_message_chunk', content: { type: 'text', text: 'hi' } } },
+    }),
+    JSON.stringify({
+      timestamp: 1788714362,
+      params: {
+        _meta: { agentTimestampMs: 1788714362042 },
+        update: {
+          sessionUpdate: 'turn_completed',
+          usage: {
+            inputTokens: 100,
+            outputTokens: 20,
+            cachedReadTokens: 40,
+            costUsdTicks: 1000,
+            modelUsage: { 'grok-4.6-build': { inputTokens: 100, outputTokens: 20 } },
+          },
+        },
+      },
+    }),
+  ].join('\n') + '\n');
+
+  try {
+    const scan = await scanGrokUsageFile(filePath, { summaryPath });
+    assert.equal(scan.rows.length, 1);
+    assert.equal(scan.rows[0].model, 'grok-4.6-build');
+    assert.equal(scan.rows[0].usage.input_tokens, 100);
+    assert.equal(scan.rows[0].usage.output_tokens, 20);
+    assert.equal(scan.rows[0].usage.cache_read_input_tokens, 40);
+    assert.equal(scan.rows[0].ts, 1788714362042);
+    assert.equal(scan.firstTs, 1788714100 * 1000);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test('findSessionDir rejects a session id that is not a single path segment', async () => {
