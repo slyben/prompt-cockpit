@@ -8,7 +8,7 @@ export function initStatsPanel({ el }) {
 
   function fmtUSD(v) {
     if (!Number.isFinite(Number(v))) return '—';
-    if (v > 0 && v < 0.01) return '$' + v.toFixed(4);
+    if (v > 0 && v < 1) return '$' + v.toFixed(4);
     return '$' + v.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   }
 

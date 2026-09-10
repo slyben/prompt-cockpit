@@ -23,6 +23,20 @@ test('costForUsage supports the legacy cache_creation_input_tokens field (no nes
   assert.equal(info.cost, 2.5); // priced as a 5m write
 });
 
+test('costForUsage prices Claude Fable 5.1 and its Bedrock alias', () => {
+  const usage = {
+    input_tokens: 1_000_000,
+    output_tokens: 1_000_000,
+    cache_read_input_tokens: 1_000_000,
+    cache_creation: { ephemeral_5m_input_tokens: 1_000_000, ephemeral_1h_input_tokens: 1_000_000 },
+  };
+  // Fable 5.1 rates (USD/M): input 10, output 50, cache read 0.25,
+  // 5m write 12.5, 1h write 20.
+  const expected = 10 + 50 + 0.25 + 12.5 + 20;
+  assert.equal(costForUsage('claude-fable-5-1', usage).cost, expected);
+  assert.equal(costForUsage('anthropic.claude-fable-5-1', usage).cost, expected);
+});
+
 test('costForUsage prefers a stamped Grok cost over the rate table', () => {
   const info = costForUsage('grok-4.6', {
     input_tokens: 1_000_000,

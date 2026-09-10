@@ -165,7 +165,16 @@ function renderSystem(container, message, timestampMs = null) {
 
 function renderAssistant(container, message, turnPointIndex = null, assistantLabel = 'Claude', timestampMs = null, toolOpts = {}) {
   const blocks = message.message && message.message.content;
-  if (!Array.isArray(blocks)) return;
+  // Grok stamps the bill on a later turn_completed with empty content.
+  // Claude puts usage on the same assistant message as the blocks. Either
+  // way, a usage-only envelope still has to land on the turn the user just
+  // watched, not disappear because there were no blocks to hang it on.
+  if (!Array.isArray(blocks) || blocks.length === 0) {
+    if (message._usageInfo) {
+      applyLateUsage(container, message._usageInfo, turnPointIndex, assistantLabel, timestampMs);
+    }
+    return;
+  }
   // One API call produced every block below - the SDK doesn't sub-divide
   // cost/tokens per tool call, so all of them (the reply text, a thinking
   // block, every tool_use) honestly share this same figure rather than
@@ -333,13 +342,62 @@ function appendOrphanResultRow(container, block, parent) {
   return wrap;
 }
 
-// "$0.0X, N in, M out". 4-decimal USD below a cent so a tiny per-call cost
-// doesn't round to "$0.00" and look free. Returns null when there's no
-// figure to show - an unpriced model, or a message with none attached.
+// "$0.0X, N in, M out". 4-decimal USD below $1 so Grok-scale per-turn
+// bills ($0.01-$0.40) don't all round to the same two-cent label. Returns
+// null when there's no figure to show - an unpriced model, or a message
+// with none attached.
 export function formatUsageInline(info) {
   if (!info) return null;
-  const usd = info.costUsd > 0 && info.costUsd < 0.01 ? `$${info.costUsd.toFixed(4)}` : `$${info.costUsd.toFixed(2)}`;
+  const usd = formatUsdAmount(info.costUsd);
   return `${usd}, ${info.inputTokens} in, ${info.outputTokens} out`;
+}
+
+function formatUsdAmount(n) {
+  if (!(n > 0)) return '$0.00';
+  return n < 1 ? `$${n.toFixed(4)}` : `$${n.toFixed(2)}`;
+}
+
+// Grok's bill arrives after the turn's text/tools. Stamp it onto the open
+// tool group or the last assistant/thinking card so the cost sits on the
+// work it paid for, instead of a blank extra bubble.
+function applyLateUsage(container, usageInfo, turnPointIndex, assistantLabel, timestampMs) {
+  const usage = formatUsageInline(usageInfo);
+  if (!usage) return;
+
+  const group = openGroupByContainer.get(container);
+  if (group) {
+    if (!group.countedUsageInfos.has(usageInfo)) {
+      group.countedUsageInfos.add(usageInfo);
+      group.usage.costUsd += usageInfo.costUsd || 0;
+      group.usage.inputTokens += usageInfo.inputTokens || 0;
+      group.usage.outputTokens += usageInfo.outputTokens || 0;
+      renderGroupSummary(group);
+    }
+    if (turnPointIndex != null) group.wrap.dataset.turnPoint = String(turnPointIndex);
+    closeGroup(container);
+    return;
+  }
+
+  const last = container.lastElementChild;
+  if (last && (last.classList.contains('assistant') || last.classList.contains('thinking'))) {
+    const roleRow = last.querySelector('.role');
+    if (roleRow) {
+      let meta = roleRow.querySelector('.usage-meta');
+      if (!meta) {
+        meta = document.createElement('span');
+        meta.className = 'usage-meta';
+        const time = roleRow.querySelector('.msg-time');
+        if (time) roleRow.insertBefore(meta, time);
+        else roleRow.append(meta);
+      }
+      meta.textContent = usage;
+    }
+    if (turnPointIndex != null) last.dataset.turnPoint = String(turnPointIndex);
+    return;
+  }
+
+  const wrap = appendBlock(container, 'assistant', assistantLabel, '', [], container, null, usage, timestampMs);
+  if (turnPointIndex != null) wrap.dataset.turnPoint = String(turnPointIndex);
 }
 
 // Which color bucket a tool's role label falls into - see index.html's

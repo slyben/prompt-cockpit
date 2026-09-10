@@ -4,7 +4,7 @@
 // called (app.js does that on the tab's first click, not on every modal
 // open - this is a real transcript scan server-side, not a cheap GET).
 import { escapeHtml } from '/escape-html.js';
-const MIN_WEEKS_SHOWN = 53; // ~a year of columns, GitHub-heatmap style - floor, not a fixed count
+const HEATMAP_MONTHS = 3; // transcripts prune; a year of empty columns is just noise
 const LEVEL_THRESHOLDS = [1, 5, 15, 40]; // message-count breakpoints for the 5 shade levels (0-4)
 // Pixel width of one grid column step: a 10px cell (border-box, so its
 // 1px border doesn't add to it) plus the grid's 3px gap = 13px. Must track
@@ -41,12 +41,7 @@ export function initGlobalStatsPanel({ bodyEl, rangeSelect, refreshButton }) {
       return;
     }
     bodyEl.innerHTML = '';
-    // A fixed 53 columns falls short of the panel's actual width on wider
-    // windows, leaving a bare gap instead of the grid running edge-to-edge
-    // like GitHub's. Grow the column count to whatever the panel can
-    // currently fit, measured against bodyEl (already in the DOM) since the
-    // heatmap itself doesn't exist yet. Never shrinks below MIN_WEEKS_SHOWN.
-    const weeksShown = computeWeeksShown(bodyEl);
+    const weeksShown = heatmapWeeksShown();
     bodyEl.append(
       renderHeatmap(stats, weeksShown),
       renderOverview(stats),
@@ -54,11 +49,10 @@ export function initGlobalStatsPanel({ bodyEl, rangeSelect, refreshButton }) {
       renderWeekCostSection(),
       renderAccountLimitsSection(),
     );
-    // Wider-than-panel content (still possible on a narrow window) scrolls -
-    // the interesting end is the recent one, so park the scroll on the
-    // right so the current week is visible on open. Has to happen here
-    // rather than in renderHeatmap: scrollLeft is a no-op on a node that
-    // isn't in the document yet.
+    // Three months still overflows a narrow settings panel. Park the
+    // scroll on the recent end. Has to happen here rather than in
+    // renderHeatmap: scrollLeft is a no-op on a node that isn't in the
+    // document yet.
     const heatmap = bodyEl.querySelector('.stats-heatmap');
     if (heatmap) heatmap.scrollLeft = heatmap.scrollWidth;
   }
@@ -77,14 +71,20 @@ export function initGlobalStatsPanel({ bodyEl, rangeSelect, refreshButton }) {
   };
 }
 
-// How many columns fit across `el`'s current width. Matches
-// .stats-heatmap-corner/-weekdays' 24px plus COL_STEP_PX per column; falls
-// back to MIN_WEEKS_SHOWN if el isn't laid out yet (width 0, e.g. panel
-// hidden behind an inactive tab).
-function computeWeeksShown(el) {
-  const available = el.clientWidth - 24;
-  if (available <= 0) return MIN_WEEKS_SHOWN;
-  return Math.max(MIN_WEEKS_SHOWN, Math.ceil(available / COL_STEP_PX));
+// Last HEATMAP_MONTHS calendar months, aligned to Monday of the week that
+// contains the start day and Sunday of the current week. Does not grow to
+// fill the panel - extra empty history is what this is trying to drop.
+function heatmapWeeksShown(now = new Date()) {
+  const today = new Date(now);
+  today.setHours(0, 0, 0, 0);
+  const endOfWeek = new Date(today);
+  endOfWeek.setDate(today.getDate() + ((7 - today.getDay()) % 7));
+  const start = new Date(today.getFullYear(), today.getMonth() - HEATMAP_MONTHS, today.getDate());
+  start.setHours(0, 0, 0, 0);
+  const mondayOffset = start.getDay() === 0 ? 6 : start.getDay() - 1;
+  start.setDate(start.getDate() - mondayOffset);
+  const days = Math.round((endOfWeek.getTime() - start.getTime()) / 86400000) + 1;
+  return Math.max(1, Math.ceil(days / 7));
 }
 
 // Mon..Sun, top-to-bottom - matches the grid's own row order (see the `d`
@@ -95,7 +95,7 @@ const WEEKDAY_LABELS = ['Mon', '', 'Wed', '', 'Fri', '', ''];
 
 function renderHeatmap(stats, weeksShown) {
   // Two boxes on purpose: `scroller` is the only thing that scrolls
-  // horizontally (a year of columns is wider than the panel), and the
+  // horizontally (three months can still overflow a narrow panel), and the
   // legend sits in `wrap` outside it - inside, it would scroll off to the
   // left along with the older weeks the moment refresh() parks the scroll
   // on the current week.

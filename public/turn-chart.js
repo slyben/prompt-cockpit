@@ -45,10 +45,9 @@ export function formatAxisTick(unit, value) {
   if (unit === 'usd') {
     if (value === 0) return '$0';
     const abs = Math.abs(value);
-    // 2.5-cent nice steps (and anything under a dime) need a third decimal
-    // or $0.025 rounds to a lying "$0.03" on a 2-decimal format.
-    if (abs < 0.01) return `$${trimFrac(value.toFixed(4))}`;
-    if (abs < 0.1) return `$${trimFrac(value.toFixed(3))}`;
+    // Grok-scale bars live under a dollar. Two decimals would collapse
+    // $0.019 / $0.025 / $0.02 into the same tick.
+    if (abs < 1) return `$${trimFrac(value.toFixed(4))}`;
     return `$${value.toFixed(2)}`;
   }
   if (value === 0) return '0';

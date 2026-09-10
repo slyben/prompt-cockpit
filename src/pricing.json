@@ -1,5 +1,5 @@
 {
-  "_comment": "USD per MILLION tokens. Verified 2026-08-06 against platform.claude.com/docs/en/about-claude/pricing. Re-check at https://www.anthropic.com/pricing if these ever look stale; the parser re-reads this file every run.",
+  "_comment": "USD per MILLION tokens. Verified 2026-09-10 against https://platform.claude.com/docs/en/about-claude/pricing. Re-check that page if these ever look stale; the parser re-reads this file every run.",
   "_rate_shape": {
     "input": "cost per 1M standard input tokens",
     "output": "cost per 1M output tokens",
@@ -10,7 +10,9 @@
   "models": {
     "anthropic.claude-opus-5":  { "input": 5,   "output": 25, "cache_write_5m": 6.25,  "cache_write_1h": 10,  "cache_read": 0.5,  "confidence": "alias for claude-opus-5 - Bedrock/Vertex-style prefixed model id seen in logs" },
     "anthropic.claude-sonnet-5":{ "input": 2,   "output": 10, "cache_write_5m": 2.5,   "cache_write_1h": 4,   "cache_read": 0.2,  "confidence": "alias for claude-sonnet-5 - Bedrock/Vertex-style prefixed model id seen in logs" },
-    "claude-fable-5":           { "input": 10,  "output": 50, "cache_write_5m": 12.5,  "cache_write_1h": 20,  "cache_read": 1.0,  "confidence": "confirmed via official pricing page 2026-08-06 - Fable is Anthropic's top tier, priced above Opus" },
+    "anthropic.claude-fable-5-1": { "input": 10, "output": 50, "cache_write_5m": 12.5, "cache_write_1h": 20, "cache_read": 0.25, "confidence": "alias for claude-fable-5-1 - Bedrock-prefixed model id; confirmed via official pricing page 2026-09-10" },
+    "claude-fable-5-1":       { "input": 10,  "output": 50, "cache_write_5m": 12.5,  "cache_write_1h": 20,  "cache_read": 0.25, "confidence": "confirmed via official pricing page 2026-09-10" },
+    "claude-fable-5":         { "input": 10,  "output": 50, "cache_write_5m": 12.5,  "cache_write_1h": 20,  "cache_read": 1.0,  "confidence": "confirmed via official pricing page 2026-08-06 - legacy Fable 5 rate" },
     "claude-haiku-4-5-20251001":{ "input": 1,   "output": 5,  "cache_write_5m": 1.25,  "cache_write_1h": 2,   "cache_read": 0.1,  "confidence": "confirmed via official pricing page 2026-08-06" },
     "claude-opus-4-8":          { "input": 5,   "output": 25, "cache_write_5m": 6.25,  "cache_write_1h": 10,  "cache_read": 0.5,  "confidence": "confirmed via official pricing page 2026-08-06" },
     "claude-opus-5":            { "input": 5,   "output": 25, "cache_write_5m": 6.25,  "cache_write_1h": 10,  "cache_read": 0.5,  "confidence": "confirmed via official pricing page 2026-08-06" },

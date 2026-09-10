@@ -36,6 +36,7 @@ test('formatAxisTick: usd compact labels', () => {
   assert.equal(formatAxisTick('usd', 0.005), '$0.005');
   assert.equal(formatAxisTick('usd', 0.02), '$0.02');
   assert.equal(formatAxisTick('usd', 0.025), '$0.025');
+  assert.equal(formatAxisTick('usd', 0.1948), '$0.1948');
   assert.equal(formatAxisTick('usd', 1), '$1.00');
   assert.equal(formatAxisTick('usd', 1.5), '$1.50');
   assert.equal(formatAxisTick('usd', 12.5), '$12.50');
