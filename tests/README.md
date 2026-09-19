@@ -106,6 +106,20 @@ clipboard. Copy reads `dataset.rawText` when the body was markdown-rendered
 (so block structure is not smashed by `textContent`), falling back to
 `textContent` for non-markdown bodies.
 
+## Tool result syntax highlighting
+
+`lang-from.test.mjs` covers `public/lang-from.js`: extension-to-Prism mapping
+(including json/js/cpp/hpp/h/sh/bat/ps1), path fields on Read-like inputs,
+shell-command inference (content filters like sed/cat/head on one language,
+not python/grep/echo or mixed-language argv), powershell `-Command` unwrap,
+JSON sniffing of result text, and `langForToolResult`'s precedence (path,
+then shell command, then JSON; Grep/Glob/WebFetch stay plain).
+
+**Not covered by unit tests, hand-verified only:** the detail pane Result
+tab actually running Prism on that `{ code, lang }` shape
+(`public/detail-pane.js` + `renderBody` in `stream-view.js`). Same
+client-side convention as the rest of `public/*.js`.
+
 ## Markdown rendering (assistant replies)
 
 `markdown.test.mjs` covers `public/markdown.js`'s `renderMarkdown` directly,

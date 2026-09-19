@@ -3,7 +3,8 @@
 // "follow the most recent call live" until a historical row is pinned.
 // Also hosts two independent tabs unrelated to tool-call selection (Tasks,
 // Agent), folded in here so there's one right-hand pane, not three.
-import { renderBody, formatUsageInline, renderMessage, resetStreamView, langFromPath } from '/stream-view.js';
+import { renderBody, formatUsageInline, renderMessage, resetStreamView } from '/stream-view.js';
+import { langForToolResult } from '/lang-from.js';
 import { getToolCallRecord, getMostRecentToolCallRecord } from '/tool-call-store.js';
 import { initResizablePanel } from '/resizable-panel.js';
 
@@ -319,13 +320,13 @@ export function initDetailPane({ panel, headerLabel, followLiveBtn, tabButtons, 
     body.append(wrap);
   }
 
-  // Read/Edit/Write/NotebookRead results are the file's own content - same
-  // Prism.js highlighting the payload side gets, keyed off the tool's own
-  // file_path input rather than sniffing the result text. Anything without
-  // a recognizable file_path/extension (Bash stdout, Grep matches, WebFetch
-  // bodies, ...) just stays plain text.
+  // File-backed tools (Read/Write/Edit) still key off an explicit path
+  // field. Shell stdout is highlighted only when the command is a content
+  // filter aimed at one known extension (sed/cat/head on foo.cpp), not when
+  // the path is just an argument to python/grep/echo. JSON-shaped results
+  // without a path get a last-ditch sniff. Grep/Glob/WebFetch stay plain.
   function resultBody(record) {
-    const lang = langFromPath(record.input && record.input.file_path);
+    const lang = langForToolResult(record);
     if (!lang) return record.resultText;
     return { code: record.resultText, lang };
   }

@@ -9,6 +9,9 @@ import { renderMarkdown } from '/markdown.js';
 import { joinStreamText, createFenceTracker } from '/stream-join.js';
 import { createDelegateView } from '/delegate-view.js';
 import { diffLines, countDiff, diffSummaryText } from '/diff-lines.js';
+import { langFromPath, langFromInput, unwrapLauncher } from '/lang-from.js';
+
+export { langFromPath };
 
 // One tracker per streamed-block body element, so joinStreamText resumes
 // its fence scan instead of rescanning the whole reply on every chunk.
@@ -421,7 +424,7 @@ function formatToolInput(name, input) {
     if (Array.isArray(input.changes)) {
       return { header: `${input.changes.length} file${input.changes.length === 1 ? '' : 's'} changed`, code: JSON.stringify(input.changes, null, 2), lang: 'json' };
     }
-    const lang = langFromPath(input.file_path);
+    const lang = langFromInput(input);
     const header = input.file_path ? [{ text: input.file_path, cls: 'diff-meta' }] : [];
     const diff = diffLines(input.old_string, input.new_string);
     const summary = [{ text: diffSummaryText(countDiff(diff)), cls: 'diff-summary' }];
@@ -429,7 +432,7 @@ function formatToolInput(name, input) {
   }
 
   if (name === 'MultiEdit' && Array.isArray(input.edits)) {
-    const lang = langFromPath(input.file_path);
+    const lang = langFromInput(input);
     const header = input.file_path ? [{ text: input.file_path, cls: 'diff-meta' }] : [];
     const editDiffs = input.edits.map((edit) => diffLines(edit.old_string, edit.new_string));
     const totals = editDiffs.reduce((acc, diff) => {
@@ -445,10 +448,11 @@ function formatToolInput(name, input) {
   }
 
   if (name === 'Write') {
-    return { header: input.file_path || null, code: input.content ?? '', lang: langFromPath(input.file_path) };
+    const path = input.file_path || input.target_file || input.path || null;
+    return { header: path, code: input.content ?? '', lang: langFromPath(path) };
   }
 
-  if (name === 'Bash') {
+  if (name === 'Bash' || name === 'run_terminal_command' || name === 'shell') {
     return { header: input.description || null, code: input.command ?? '', lang: 'bash' };
   }
 
@@ -457,30 +461,6 @@ function formatToolInput(name, input) {
   return Object.entries(input)
     .map(([k, v]) => `${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`)
     .join('\n');
-}
-
-// File extension -> Prism.js language id (public/vendor/prism/, loaded as
-// classic globals by index.html). Unmapped/unknown extensions fall back to
-// plain text rather than guessing - see highlightSource.
-const LANG_BY_EXT = {
-  js: 'javascript', mjs: 'javascript', cjs: 'javascript', jsx: 'jsx',
-  ts: 'typescript', mts: 'typescript', cts: 'typescript', tsx: 'tsx',
-  json: 'json', jsonc: 'json',
-  sh: 'bash', bash: 'bash', zsh: 'bash',
-  py: 'python', pyw: 'python',
-  c: 'c', h: 'c',
-  cpp: 'cpp', cc: 'cpp', cxx: 'cpp', hpp: 'cpp', hh: 'cpp', hxx: 'cpp',
-  go: 'go', rs: 'rust', java: 'java', sql: 'sql', cs: 'csharp',
-  yml: 'yaml', yaml: 'yaml',
-  md: 'markdown', markdown: 'markdown',
-  css: 'css',
-  html: 'markup', htm: 'markup', xml: 'markup', svg: 'markup', vue: 'markup',
-};
-
-export function langFromPath(filePath) {
-  if (typeof filePath !== 'string') return null;
-  const m = /\.([a-zA-Z0-9]+)$/.exec(filePath);
-  return m ? (LANG_BY_EXT[m[1].toLowerCase()] || null) : null;
 }
 
 // Prism.highlight() escapes the source itself before tokenizing, so the
@@ -562,8 +542,7 @@ function commandForDisplay(value) {
   // Codex on Windows often reports the launcher rather than the useful
   // command: `powershell.exe -Command <payload>`. Keep only the payload in
   // the compact row; the complete invocation remains in the tooltip.
-  const match = /^\s*(?:"[^"]+"|'[^']+'|\S+)\s+-Command\s+([\s\S]*)$/i.exec(value);
-  return match ? match[1].trim() : value;
+  return unwrapLauncher(value);
 }
 
 function renderUser(container, message, onRewindClick, hasFileCheckpointing, rewindLabel, timestampMs = null, toolOpts = {}) {
