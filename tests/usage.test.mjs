@@ -102,6 +102,12 @@ test('costForUsage prices the current Codex model catalog', () => {
   // OpenAI standard short-context rates (USD/M): input 0.20, output 1.20,
   // cache read 0.02, cache write 0.25.
   assert.equal(info.cost, 0.2 + 1.2 + 0.02 + 0.25);
+  assert.equal(costForUsage('gpt-6-astra', {
+    input_tokens: 1_000_000,
+    output_tokens: 1_000_000,
+    cache_read_input_tokens: 1_000_000,
+    cache_creation_input_tokens: 1_000_000,
+  }).cost, 10 + 50 + 1 + 12.5);
   assert.equal(costForUsage('gpt-5.6-sol', { input_tokens: 1_000_000, output_tokens: 0 }).cost, 4);
   assert.equal(costForUsage('gpt-5.6-terra', { input_tokens: 1_000_000, output_tokens: 0 }).cost, 2);
   assert.equal(costForUsage('gpt-5.5', { input_tokens: 1_000_000, output_tokens: 0 }).cost, 5);
