@@ -4,7 +4,7 @@
 // Cross-session delegation/handshake tests live in tests/delegation.test.mjs
 // now (mirrors the src/delegation.js split) - fakeWs/fakeStartSession are
 // shared with that file via test-helpers.mjs rather than duplicated.
-import { test } from 'node:test';
+import { test, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import * as registry from '../src/session-registry.js';
 import { codexNotificationToMessages } from '../src/codex-messages.js';
@@ -80,12 +80,18 @@ test('an assistant message with usage broadcasts cockpit:usage with running cost
   assert.ok(last.usage.costUsd > 0);
 });
 
-test('Codex cumulative token updates add only the new total delta and price cached input once', () => {
+test('Codex cumulative token updates add only the new total delta and price cached input once', (t) => {
   registry._reset();
   const startSessionImpl = fakeStartSession();
   const row = registry.createSession({ cwd: '/tmp', provider: 'codex', startSessionImpl });
   const ws = fakeWs();
   registry.attachClient(row.id, ws);
+
+  // scheduleUsageBroadcast (session-registry.js) throttles/coalesces
+  // cockpit:usage broadcasts that land within its window - fake the clock so
+  // this test's two updates still land as two distinct broadcasts.
+  mock.timers.enable({ apis: ['Date', 'setTimeout'] });
+  t.after(() => mock.timers.reset());
 
   const notification = (last, total) => codexNotificationToMessages('thread/tokenUsage/updated', {
     threadId: 'codex-thread', turnId: `turn-${total.totalTokens}`,
@@ -95,6 +101,7 @@ test('Codex cumulative token updates add only the new total delta and price cach
     { inputTokens: 1000, cachedInputTokens: 400, outputTokens: 100, reasoningOutputTokens: 20, totalTokens: 1100 },
     { inputTokens: 1000, cachedInputTokens: 400, outputTokens: 100, reasoningOutputTokens: 20, totalTokens: 1100 },
   ));
+  mock.timers.tick(150);
   startSessionImpl.emitMessage(notification(
     { inputTokens: 500, cachedInputTokens: 200, outputTokens: 80, reasoningOutputTokens: 10, totalTokens: 580 },
     { inputTokens: 1500, cachedInputTokens: 600, outputTokens: 180, reasoningOutputTokens: 30, totalTokens: 1680 },
@@ -108,7 +115,7 @@ test('Codex cumulative token updates add only the new total delta and price cach
   assert.equal(usage.costUsd, 0.001575 + 0.000105 + 0.00252);
 });
 
-test('resumed Codex sessions baseline the thread lifetime total before counting new usage', () => {
+test('resumed Codex sessions baseline the thread lifetime total before counting new usage', (t) => {
   registry._reset();
   const startSessionImpl = fakeStartSession();
   const row = registry.createSession({
@@ -116,6 +123,10 @@ test('resumed Codex sessions baseline the thread lifetime total before counting 
   });
   const ws = fakeWs();
   registry.attachClient(row.id, ws);
+
+  // Same throttle-bypass as the test above - see its comment.
+  mock.timers.enable({ apis: ['Date', 'setTimeout'] });
+  t.after(() => mock.timers.reset());
 
   const notification = (last, total) => codexNotificationToMessages('thread/tokenUsage/updated', {
     threadId: 'codex-thread', turnId: `turn-${total.totalTokens}`,
@@ -127,6 +138,7 @@ test('resumed Codex sessions baseline the thread lifetime total before counting 
   ));
   assert.equal(ws.sent.filter((message) => message.type === 'cockpit:usage').at(-1).usage.inputTokens, 0);
 
+  mock.timers.tick(150);
   startSessionImpl.emitMessage(notification(
     { inputTokens: 200, outputTokens: 40, totalTokens: 240 },
     { inputTokens: 800, outputTokens: 140, totalTokens: 940 },
@@ -134,6 +146,45 @@ test('resumed Codex sessions baseline the thread lifetime total before counting 
   const usage = ws.sent.filter((message) => message.type === 'cockpit:usage').at(-1).usage;
   assert.equal(usage.inputTokens, 200);
   assert.equal(usage.outputTokens, 40);
+});
+
+test('scheduleUsageBroadcast coalesces rapid assistant-message usage updates into one immediate + one trailing broadcast', (t) => {
+  registry._reset();
+  const startSessionImpl = fakeStartSession();
+  const row = registry.createSession({ cwd: '/tmp', startSessionImpl });
+  const ws = fakeWs();
+  registry.attachClient(row.id, ws);
+
+  mock.timers.enable({ apis: ['Date', 'setTimeout'] });
+  t.after(() => mock.timers.reset());
+
+  // attachClient itself sends one cockpit:usage baseline snapshot on connect
+  // - excluded from the counts below, which only care about broadcasts
+  // triggered by the chunks emitted here.
+  const baselineCount = ws.sent.filter((m) => m.type === 'cockpit:usage').length;
+
+  const chunk = (outputTokens) => ({
+    type: 'assistant',
+    message: { model: 'claude-sonnet-5', usage: { input_tokens: 100, output_tokens: outputTokens } },
+  });
+
+  startSessionImpl.emitMessage(chunk(10));
+  // Five more chunks land inside the throttle window (session-registry.js's
+  // USAGE_BROADCAST_MIN_INTERVAL_MS) - real Grok/Claude token-streaming
+  // behavior, which is exactly what scheduleUsageBroadcast exists to
+  // collapse rather than firing a cockpit:usage per chunk.
+  for (let i = 1; i <= 5; i++) startSessionImpl.emitMessage(chunk(10 + i));
+
+  const usageBroadcastsBeforeFlush = ws.sent.filter((m) => m.type === 'cockpit:usage').length - baselineCount;
+  assert.equal(usageBroadcastsBeforeFlush, 1, 'only the leading-edge broadcast should have fired synchronously');
+
+  mock.timers.tick(150); // let the trailing flush's setTimeout fire
+
+  const usageBroadcasts = ws.sent.filter((m) => m.type === 'cockpit:usage').slice(baselineCount);
+  assert.equal(usageBroadcasts.length, 2, 'exactly one trailing flush, not one broadcast per coalesced chunk');
+  // The trailing flush must reflect the accumulated total through the LAST
+  // chunk, not an intermediate one dropped mid-window.
+  assert.equal(usageBroadcasts.at(-1).usage.outputTokens, 10 + 11 + 12 + 13 + 14 + 15);
 });
 
 test('Codex token usage updates populate the context meter from the latest context size', () => {

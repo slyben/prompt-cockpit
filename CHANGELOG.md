@@ -2,6 +2,24 @@
 
 All notable changes to this project are documented here.
 
+## [0.2.0]
+- Global Stats heatmap now colors cells by provider (Claude/Grok/Codex) and
+  adds an on-demand last-7-day cost split by provider
+- Usage-stats scanning cached and bounded: mtime-keyed memoization across
+  Claude, Grok, and Codex transcripts, stale-while-revalidate, no more
+  blocking rescans
+- Streaming render performance: markdown re-renders coalesced to one rAF
+  per block, `cockpit:usage` broadcasts throttled, history prepends chunked
+  across animation frames to stop full-tab freezes on large sessions
+- Tool result syntax highlighting improved, including PowerShell and batch
+  detection
+- Turn-chart axis and cost labels switched to a nice-scale, 4-decimal
+  format for Grok-scale (sub-dollar) bars
+- New offline `codex_usage.py`: reads Codex rollout JSONL directly for a
+  cost/token report with no server or network involved
+- Pricing kept current: GPT-6 Astra/Sol/Luna, Claude Opus 5.5, Fable 5.1,
+  Mythos 5/5.1, and Grok 4.7 all added as each became available
+
 ## [0.1.7]
 - Codex reaches feature parity with Claude and Grok: rewind (forks through
   the selected completed turn, including its response), native MCP and

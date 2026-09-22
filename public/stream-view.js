@@ -19,6 +19,58 @@ export { langFromPath };
 // a new stream block (a fresh `body` per block).
 const fenceTrackerByBody = new WeakMap();
 
+// Grok streams one word (sometimes one token) at a time - re-parsing and
+// re-diffing the whole markdown body on every single chunk visibly janks a
+// long reply. Batched instead: `dataset.rawText` (the source of truth) is
+// always updated immediately, but the markdown re-render itself is
+// throttled to this interval and coalesced onto a single rAF per body, so a
+// burst of chunks between two paints costs one re-render, not N. Same
+// no-explicit-cleanup WeakMap pattern as fenceTrackerByBody above.
+const MARKDOWN_RENDER_MIN_INTERVAL_MS = 80;
+const renderStateByBody = new WeakMap(); // body -> { lastRenderMs, rafHandle }
+
+// The scroll-to-bottom pin has to happen right alongside the actual DOM
+// mutation, not at chunk-arrival time - scrollHeight doesn't grow until the
+// render lands, and by the time a deferred (rAF) render fires the user's
+// scroll position may have moved anyway, so isScrolledToBottom is (re)read
+// here rather than passed in stale from the caller.
+function flushMarkdownRender(container, body, text) {
+  const wasAtBottom = isScrolledToBottom(container);
+  renderBody(body, text, null, true);
+  if (wasAtBottom) container.scrollTop = container.scrollHeight;
+}
+
+// `forceNow` is set whenever the just-arrived chunk carries a fence
+// delimiter, so an opening/closing ``` never sits stale mid-throttle-window
+// (a fence rendering as escaped text until the next flush reads as broken,
+// not just late).
+function scheduleMarkdownRender(container, body, text, forceNow) {
+  let state = renderStateByBody.get(body);
+  if (!state) {
+    state = { lastRenderMs: 0, rafHandle: null };
+    renderStateByBody.set(body, state);
+  }
+  const now = performance.now();
+  if (forceNow || now - state.lastRenderMs >= MARKDOWN_RENDER_MIN_INTERVAL_MS) {
+    if (state.rafHandle != null) {
+      cancelAnimationFrame(state.rafHandle);
+      state.rafHandle = null;
+    }
+    state.lastRenderMs = now;
+    flushMarkdownRender(container, body, text);
+    return;
+  }
+  if (state.rafHandle != null) return; // a flush is already queued for this body
+  state.rafHandle = requestAnimationFrame(() => {
+    state.rafHandle = null;
+    state.lastRenderMs = performance.now();
+    // Re-read dataset.rawText rather than closing over `text` - later chunks
+    // may have arrived (and updated it) before this frame fires, and this
+    // way the queued flush always paints the latest buffer, not a stale one.
+    flushMarkdownRender(container, body, body.dataset.rawText ?? text);
+  });
+}
+
 const seenInitByContainer = new WeakMap();
 const groupsByContainer = new WeakMap(); // container -> group[]
 const openGroupByContainer = new WeakMap(); // container -> the currently-accumulating group, if any
@@ -60,23 +112,54 @@ export function resetStreamView(container) {
   resetToolCallStore(container);
 }
 
+// A "Load earlier history" click on a long session (tens of MB, thousands
+// of messages - confirmed on real transcripts) used to build the whole
+// fragment in one synchronous loop, freezing the tab for as long as that
+// took. Rendered in chunks of this size across successive animation frames
+// instead - big enough that the chunking overhead is negligible, small
+// enough that no single frame does more than a fraction of the total work.
+const HISTORY_RENDER_CHUNK_SIZE = 150;
+
 // Renders `messages` (oldest-first) into a detached fragment, then inserts
 // them all at once above `container`'s existing content in one DOM
 // operation, in order. Historical entries have no `turnIndex` (minted only
 // for this session's own live pushInput calls), so their rewind buttons
-// don't appear - a real limitation, not an oversight.
+// don't appear - a real limitation, not an oversight. Returns a promise
+// that resolves once the fragment has actually landed in `container` - the
+// single caller (app.js's loadEarlierHistory) awaits it so the "Loading..."
+// state doesn't clear early.
 export function prependHistory(container, messages, options = {}) {
   if (!groupsByContainer.has(container)) resetStreamView(container);
 
   const fragment = document.createDocumentFragment();
-  for (const message of messages) {
-    // Forced true regardless of what the caller passed - this whole function
-    // is by definition a batch of already-past messages rendered in one
-    // synchronous loop, so Date.now()-based tool-call timing would be
-    // meaningless here (see appendToolCallRow's historical branch).
-    renderMessage(fragment, message, { ...options, historical: true });
-  }
 
+  return new Promise((resolve) => {
+    let i = 0;
+    function renderChunk() {
+      const end = Math.min(i + HISTORY_RENDER_CHUNK_SIZE, messages.length);
+      for (; i < end; i++) {
+        // Forced true regardless of what the caller passed - this whole
+        // function is by definition a batch of already-past messages, so
+        // Date.now()-based tool-call timing would be meaningless here (see
+        // appendToolCallRow's historical branch).
+        renderMessage(fragment, messages[i], { ...options, historical: true });
+      }
+      if (i < messages.length) {
+        requestAnimationFrame(renderChunk);
+      } else {
+        finish();
+      }
+    }
+    renderChunk();
+
+    function finish() {
+      insertRenderedHistory(container, fragment);
+      resolve();
+    }
+  });
+}
+
+function insertRenderedHistory(container, fragment) {
   // Groups registered under the fragment's own WeakMap entry get merged
   // into the real container's list, with `container` re-pointed on each
   // (it was stamped `fragment` at creation). Any dangling open group (the
@@ -888,7 +971,6 @@ function appendToLastStreamBlock(container, cls, text, markdown) {
   if (!last || !last.classList.contains('msg') || !last.classList.contains(cls) || last.classList.contains('delegated-reply')) return false;
   const body = last.querySelector('.body');
   if (!body) return false;
-  const wasAtBottom = isScrolledToBottom(container);
   if (markdown) {
     const prev = Object.prototype.hasOwnProperty.call(body.dataset, 'rawText')
       ? body.dataset.rawText
@@ -896,11 +978,16 @@ function appendToLastStreamBlock(container, cls, text, markdown) {
     if (!fenceTrackerByBody.has(body)) fenceTrackerByBody.set(body, createFenceTracker());
     const next = joinStreamText(prev, text, fenceTrackerByBody.get(body));
     body.dataset.rawText = next;
-    renderBody(body, next, null, true);
-  } else {
-    if (!fenceTrackerByBody.has(body)) fenceTrackerByBody.set(body, createFenceTracker());
-    body.textContent = joinStreamText(body.textContent ?? '', text, fenceTrackerByBody.get(body));
+    // Only the just-arrived delta is checked for a fence delimiter (not the
+    // whole accumulated `next`), so this stays O(chunk) instead of O(total)
+    // per chunk on a long reply.
+    const forceNow = text.includes('```') || text.includes('~~~');
+    scheduleMarkdownRender(container, body, next, forceNow);
+    return true;
   }
+  const wasAtBottom = isScrolledToBottom(container);
+  if (!fenceTrackerByBody.has(body)) fenceTrackerByBody.set(body, createFenceTracker());
+  body.textContent = joinStreamText(body.textContent ?? '', text, fenceTrackerByBody.get(body));
   if (wasAtBottom) container.scrollTop = container.scrollHeight;
   return true;
 }

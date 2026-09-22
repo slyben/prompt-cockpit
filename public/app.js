@@ -1673,7 +1673,10 @@ async function loadEarlierHistory() {
     // live "follow most recent tool call" view to whatever the oldest
     // loaded historical call happens to be. Clicking a loaded row still
     // works via onSelectToolCall, an explicit pin.
-    prependHistory(streamEl, messages, {
+    // Chunked across animation frames for a long transcript (stream-view.js)
+    // - awaited so "Loading..." stays up, and the bar only hides, until the
+    // whole batch has actually landed in the DOM.
+    await prependHistory(streamEl, messages, {
       onRewindClick: canForkConversation ? onRewindClick : null,
       hasFileCheckpointing, turnIndexUnreliable, rewindLabel: rewindButtonLabel(),
       onSelectToolCall: selectLiveToolCall,

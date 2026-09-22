@@ -1,10 +1,11 @@
 import { getCodexAppServerManager } from './codex-app-server.js';
 import { codexThreadToMessages } from './codex-messages.js';
 import { createReadStream } from 'node:fs';
-import { readdir } from 'node:fs/promises';
+import { readdir, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { createInterface } from 'node:readline';
 import path from 'node:path';
+import { cachedScan, mapWithConcurrency, DEFAULT_SCAN_CONCURRENCY } from './scan-cache.js';
 
 function millis(value) {
   if (value == null || value === '') return null;
@@ -172,6 +173,9 @@ export async function scanCodexUsageFile(filePath) {
   return { sessionId, rows, firstTs: state.firstTs, lastTs: state.lastTs };
 }
 
+// Returns { filePath, mtimeMs } (not just paths) so scanCodexUsageSessions
+// can key its mtime-based scan cache (scan-cache.js) the same way the
+// Claude/Grok file listers already do.
 export async function listAllCodexSessionFiles(sessionsDir = codexSessionsRoot()) {
   const files = [];
   async function walk(dir) {
@@ -184,11 +188,20 @@ export async function listAllCodexSessionFiles(sessionsDir = codexSessionsRoot()
     for (const entry of entries) {
       const entryPath = path.join(dir, entry.name);
       if (entry.isDirectory()) await walk(entryPath);
-      else if (entry.isFile() && entry.name.endsWith('.jsonl')) files.push(entryPath);
+      else if (entry.isFile() && entry.name.endsWith('.jsonl')) {
+        let mtimeMs = 0;
+        try {
+          mtimeMs = (await stat(entryPath)).mtimeMs;
+        } catch {
+          continue; // gone between readdir and stat - nothing to scan
+        }
+        files.push({ filePath: entryPath, mtimeMs });
+      }
     }
   }
   await walk(sessionsDir);
-  return files.sort();
+  files.sort((a, b) => (a.filePath < b.filePath ? -1 : a.filePath > b.filePath ? 1 : 0));
+  return files;
 }
 
 function describeThread(thread) {
@@ -239,7 +252,7 @@ export async function listAllCodexThreads(manager = getCodexAppServerManager()) 
 export async function scanCodexUsageSessions(manager = getCodexAppServerManager(), options = {}) {
   const normalizedOptions = (typeof options === 'string' ? { sessionsDir: options } : options) || {};
   const files = await listAllCodexSessionFiles(normalizedOptions.sessionsDir || codexSessionsRoot());
-  const fileScans = await Promise.all(files.map((filePath) => scanCodexUsageFile(filePath)));
+  const fileScans = await mapWithConcurrency(files, DEFAULT_SCAN_CONCURRENCY, (f) => cachedScan(f.filePath, f.mtimeMs, scanCodexUsageFile));
   const scansById = new Map();
   const scans = [];
   for (const scan of fileScans) {

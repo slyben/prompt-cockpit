@@ -14,6 +14,7 @@ import { grokSessionsRoot, listAllGrokSessionFiles } from './grok-launcher.js';
 import { scanGrokUsageFile } from './grok-history.js';
 import { scanCodexUsageSessions } from './codex-history.js';
 import { costForUsage } from './usage.js';
+import { cachedScan, mapWithConcurrency, DEFAULT_SCAN_CONCURRENCY } from './scan-cache.js';
 
 const PROJECTS_DIR = path.join(homedir(), '.claude', 'projects');
 
@@ -122,9 +123,23 @@ export function aggregateGlobalStats(sessionScans, { range = 'all', now = Date.n
     // window but a real span going back a month would report that full
     // month as its duration. 'all' needs no filtering, so the whole-file
     // span (already tracked by scanSessionFile) is exact either way.
-    const inRangeTimestamps = cutoff ? inRangeRows.map((r) => r.ts).filter((ts) => ts != null) : null;
-    const rangeFirstTs = cutoff ? (inRangeTimestamps.length ? Math.min(...inRangeTimestamps) : null) : firstTs;
-    const rangeLastTs = cutoff ? (inRangeTimestamps.length ? Math.max(...inRangeTimestamps) : null) : lastTs;
+    let rangeFirstTs = firstTs;
+    let rangeLastTs = lastTs;
+    if (cutoff) {
+      // Loop instead of Math.min/max(...inRangeTimestamps) - spreading a
+      // single session's in-range rows as call arguments can exceed the
+      // engine's argument-count limit for a session with tens of thousands
+      // of usage-bearing messages (a real, if rare, shape for a long
+      // scripted/automated run).
+      rangeFirstTs = null;
+      rangeLastTs = null;
+      for (const row of inRangeRows) {
+        const ts = row.ts;
+        if (ts == null) continue;
+        if (rangeFirstTs == null || ts < rangeFirstTs) rangeFirstTs = ts;
+        if (rangeLastTs == null || ts > rangeLastTs) rangeLastTs = ts;
+      }
+    }
     if (rangeFirstTs != null && rangeLastTs != null) longestSessionMs = Math.max(longestSessionMs, rangeLastTs - rangeFirstTs);
 
     for (const row of inRangeRows) {
@@ -245,26 +260,70 @@ function computeStreaks(sortedDayKeys, now) {
 }
 
 // /api/stats has no session token gate, only Origin/Host allowlisting,
-// and re-parses every local transcript per call. This TTL lets a burst
-// of Stats-tab opens share one scan instead of paying the full re-parse
-// each time. Only engaged when `projectsDir` is the real default, so
-// tests passing their own dir always get a fresh scan.
+// and re-parses every local transcript per call. This TTL lets a burst of
+// Stats-tab opens share one scan instead of paying the full re-parse each
+// time, and a STALE hit (past the TTL) is still served immediately rather
+// than blocking the request - see getCachedStats below. Only engaged when
+// `projectsDir` is the real default, so tests passing their own dir always
+// get a fresh scan.
 const STATS_CACHE_TTL_MS = 15_000;
 const statsCache = new Map(); // range -> { result, atMs }
 const statsInFlight = new Map(); // range -> Promise
 
+// Stale-while-revalidate, split out for direct unit testing (fake cache/
+// in-flight Maps, controlled `now`) without touching the real filesystem -
+// same reasoning as aggregateGlobalStats being split from
+// computeGlobalStats. A fresh hit returns immediately with no work done. A
+// STALE hit also returns immediately (a caller never blocks on a rescan
+// once anything has been cached once) but kicks a background refresh,
+// deduped against any refresh already in flight. Only a key with no cached
+// value at all blocks on the real scan - there's nothing else to serve.
+export async function getCachedStats(cache, inFlight, key, ttlMs, scanFn, now = Date.now()) {
+  const hit = cache.get(key);
+  if (hit) {
+    if (now - hit.atMs < ttlMs) return hit.result;
+    scheduleBackgroundRefresh(cache, inFlight, key, scanFn);
+    return hit.result;
+  }
+  const pending = inFlight.get(key);
+  if (pending) return pending;
+  return trackRefresh(cache, inFlight, key, scanFn);
+}
+
+function scheduleBackgroundRefresh(cache, inFlight, key, scanFn) {
+  if (inFlight.has(key)) return; // a refresh for this key is already running
+  // Fire-and-forget: nothing is awaiting this branch, and a failed
+  // background refresh just leaves the existing stale value in place for
+  // the next request to retry, rather than surfacing an error nobody asked
+  // for right now.
+  trackRefresh(cache, inFlight, key, scanFn).catch(() => {});
+}
+
+function trackRefresh(cache, inFlight, key, scanFn) {
+  const tracked = scanFn().then((result) => {
+    cache.set(key, { result, atMs: Date.now() });
+    return result;
+  }).finally(() => inFlight.delete(key));
+  inFlight.set(key, tracked);
+  return tracked;
+}
+
 async function scanAllProviders(projectsDir, grokSessionsDir, scanCodex) {
   const claudeFiles = await listAllSessionFiles(projectsDir);
-  const scans = await Promise.all(claudeFiles.map(async (f) => ({
-    ...await scanSessionFile(f.filePath),
+  const scans = await mapWithConcurrency(claudeFiles, DEFAULT_SCAN_CONCURRENCY, async (f) => ({
+    ...await cachedScan(f.filePath, f.mtimeMs, scanSessionFile),
     provider: 'claude',
-  })));
+  }));
   if (grokSessionsDir) {
     const grokFiles = await listAllGrokSessionFiles(grokSessionsDir);
-    scans.push(...await Promise.all(grokFiles.map(async (f) => ({
-      ...await scanGrokUsageFile(f.filePath, { summaryPath: f.summaryPath }),
+    scans.push(...await mapWithConcurrency(grokFiles, DEFAULT_SCAN_CONCURRENCY, async (f) => ({
+      // summary.json (session model fallback) isn't itself mtime-tracked,
+      // only updates.jsonl is - an accepted staleness tradeoff for keeping
+      // this cache in-memory-simple (scan-cache.js), not a bug: the two
+      // files are written together in practice.
+      ...await cachedScan(f.filePath, f.mtimeMs, (filePath) => scanGrokUsageFile(filePath, { summaryPath: f.summaryPath })),
       provider: 'grok',
-    }))));
+    })));
   }
   if (scanCodex) {
     try {
@@ -289,23 +348,18 @@ export async function computeGlobalStats(projectsDir = PROJECTS_DIR, {
   const cacheable = projectsDir === PROJECTS_DIR
     && grokSessionsDir === undefined
     && scanCodexSessions === undefined;
-  if (cacheable) {
-    const hit = statsCache.get(range);
-    if (hit && now - hit.atMs < STATS_CACHE_TTL_MS) return hit.result;
-    const pending = statsInFlight.get(range);
-    if (pending) return pending;
-  }
-  const run = (async () => {
+  if (!cacheable) {
     const scans = await scanAllProviders(projectsDir, grokDir, codexScan);
     return aggregateGlobalStats(scans, { range, now });
-  })();
-  if (!cacheable) return run;
-  const tracked = run.then((result) => {
-    statsCache.set(range, { result, atMs: Date.now() });
-    return result;
-  }).finally(() => {
-    statsInFlight.delete(range);
-  });
-  statsInFlight.set(range, tracked);
-  return tracked;
+  }
+  // Aggregation uses a fresh Date.now() (not the possibly-stale `now`
+  // captured above) - correct for a background refresh that completes
+  // later, and equivalent for every real caller today, since system.js's
+  // route never passes an explicit `now` and the blocking first-ever-call
+  // path runs immediately anyway.
+  const scanFn = async () => {
+    const scans = await scanAllProviders(projectsDir, grokDir, codexScan);
+    return aggregateGlobalStats(scans, { range, now: Date.now() });
+  };
+  return getCachedStats(statsCache, statsInFlight, range, STATS_CACHE_TTL_MS, scanFn, now);
 }

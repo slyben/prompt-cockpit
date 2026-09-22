@@ -1,5 +1,5 @@
 {
-  "_comment": "USD per MILLION tokens. From https://developers.openai.com/api/docs/pricing (checked 2026-09-07, cross-verified against each model's own docs page). Codex's normalized usage does not distinguish OpenAI's cache-write windows, so cache_write_5m/cache_write_1h both use the published cache-write rate where one is available; legacy entries retain input pricing where the provider publishes no separate cache-write rate. Rates are short-context standard prices; OpenAI's long-context and service-tier premiums are not modeled. Only models with confirmed pricing are listed; an unlisted Codex model falls through to costForUsage's unpriced path (tokens still show, cost flagged unpriced) rather than guessing a rate.",
+  "_comment": "USD per MILLION tokens. From https://developers.openai.com/api/docs/pricing (checked 2026-09-22, cross-verified against each model's own docs page). Codex's normalized usage does not distinguish OpenAI's cache-write windows, so cache_write_5m/cache_write_1h both use the published cache-write rate where one is available; legacy entries retain input pricing where the provider publishes no separate cache-write rate. Rates are short-context standard prices; OpenAI's long-context and service-tier premiums are not modeled. Only models with confirmed pricing are listed; an unlisted Codex model falls through to costForUsage's unpriced path (tokens still show, cost flagged unpriced) rather than guessing a rate.",
   "_rate_shape": {
     "input": "cost per 1M uncached input tokens",
     "output": "cost per 1M output tokens",
@@ -8,7 +8,9 @@
     "cache_read": "cost per 1M cached input tokens"
   },
   "models": {
-    "gpt-6-astra":       { "input": 10,   "output": 50, "cache_write_5m": 12.5, "cache_write_1h": 12.5, "cache_read": 1,     "confidence": "developers.openai.com/api/docs/pricing 2026-09-19 - standard short context" },
+    "gpt-6-astra":       { "input": 10,   "output": 50, "cache_write_5m": 12.5, "cache_write_1h": 12.5, "cache_read": 1,     "confidence": "developers.openai.com/api/docs/models/gpt-6-astra 2026-09-22 - standard short context" },
+    "gpt-6-sol":         { "input": 2,    "output": 10, "cache_write_5m": 2.5,  "cache_write_1h": 2.5,  "cache_read": 0.2,   "confidence": "developers.openai.com/api/docs/models/gpt-6-sol 2026-09-22 - standard short context" },
+    "gpt-6-luna":        { "input": 0.1,  "output": 0.5, "cache_write_5m": 0.125, "cache_write_1h": 0.125, "cache_read": 0.01,  "confidence": "developers.openai.com/api/docs/models/gpt-6-luna 2026-09-22 - standard short context" },
     "gpt-5.6-sol":       { "input": 4,    "output": 20, "cache_write_5m": 5,    "cache_write_1h": 5,    "cache_read": 0.4,   "confidence": "developers.openai.com/api/docs/pricing 2026-09-07 - standard short context" },
     "gpt-5.6":           { "input": 4,    "output": 20, "cache_write_5m": 5,    "cache_write_1h": 5,    "cache_read": 0.4,   "confidence": "alias for gpt-5.6-sol - developers.openai.com/api/docs/pricing 2026-09-07" },
     "gpt-5.6-terra":     { "input": 2,    "output": 12, "cache_write_5m": 2.5,  "cache_write_1h": 2.5,  "cache_read": 0.2,   "confidence": "developers.openai.com/api/docs/pricing 2026-09-07 - standard short context" },

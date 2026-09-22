@@ -34,6 +34,8 @@ from typing import Any, Iterable
 # copied out of the repository. A local --pricing file overrides these rates.
 DEFAULT_RATES: dict[str, dict[str, float]] = {
     "gpt-6-astra": {"input": 10, "output": 50, "cache_write_5m": 12.5, "cache_write_1h": 12.5, "cache_read": 1},
+    "gpt-6-sol": {"input": 2, "output": 10, "cache_write_5m": 2.5, "cache_write_1h": 2.5, "cache_read": 0.2},
+    "gpt-6-luna": {"input": 0.1, "output": 0.5, "cache_write_5m": 0.125, "cache_write_1h": 0.125, "cache_read": 0.01},
     "gpt-5.6-sol": {"input": 4, "output": 20, "cache_write_5m": 5, "cache_write_1h": 5, "cache_read": 0.4},
     "gpt-5.6": {"input": 4, "output": 20, "cache_write_5m": 5, "cache_write_1h": 5, "cache_read": 0.4},
     "gpt-5.6-terra": {"input": 2, "output": 12, "cache_write_5m": 2.5, "cache_write_1h": 2.5, "cache_read": 0.2},

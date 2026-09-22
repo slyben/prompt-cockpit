@@ -39,6 +39,7 @@ const GROK_START_MODELS = [
   { value: 'grok-4.5', label: 'Grok 4.5' },
   { value: 'grok-build', label: 'Grok Build' },
   { value: 'grok-4.6', label: 'Grok 4.6' },
+  { value: 'grok-4.7', label: 'Grok 4.7' },
 ];
 
 const GROK_EFFORT_OPTIONS = [

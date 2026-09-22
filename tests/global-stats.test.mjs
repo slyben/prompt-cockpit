@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { aggregateGlobalStats, computeGlobalStats } from '../src/global-stats.js';
+import { aggregateGlobalStats, computeGlobalStats, getCachedStats } from '../src/global-stats.js';
 
 function assistantLine(ts, model, usage) {
   return JSON.stringify({ type: 'assistant', timestamp: ts, message: { model, usage } });
@@ -163,6 +163,108 @@ test('range=all still uses the whole-file span for longestSessionMs (no filterin
   ];
   const stats = aggregateGlobalStats(scans, { range: 'all', now });
   assert.equal(stats.longestSessionMs, 30 * 86400000 - 3600000);
+});
+
+// 2026-09-21 review fix: rangeFirstTs/rangeLastTs used to come from
+// Math.min(...inRangeTimestamps)/Math.max(...inRangeTimestamps) - spreading
+// a session's in-range rows as call arguments throws once the array is big
+// enough to exceed the engine's argument-count limit. Real, if rare: a
+// single long scripted/automated session can rack up tens of thousands of
+// usage-bearing messages.
+test('range filtering bounds longestSessionMs correctly for a session with 100k in-range rows, without a spread-argument crash', () => {
+  const now = Date.parse('2026-08-20T12:00:00Z');
+  const rowCount = 100_000;
+  const rows = [];
+  for (let i = 0; i < rowCount; i += 1) {
+    // All within the last ~16.6 minutes - well inside the 30d window, but
+    // still ordered oldest-first so the first/last rows define the span.
+    rows.push({ ts: now - (rowCount - i) * 10, model: 'm', usage: { input_tokens: 1, output_tokens: 1 } });
+  }
+  const scans = [{ firstTs: now - 30 * 86400000, lastTs: rows[rows.length - 1].ts, rows, provider: 'claude' }];
+
+  const stats = aggregateGlobalStats(scans, { range: '30d', now });
+  assert.equal(stats.longestSessionMs, rows[rows.length - 1].ts - rows[0].ts);
+});
+
+test('getCachedStats returns a fresh hit without rescanning', async () => {
+  const cache = new Map();
+  const inFlight = new Map();
+  cache.set('all', { result: 'cached-value', atMs: 1000 });
+  let calls = 0;
+  const scanFn = async () => { calls += 1; return 'fresh-value'; };
+
+  const result = await getCachedStats(cache, inFlight, 'all', 15000, scanFn, 6000);
+  assert.equal(result, 'cached-value');
+  assert.equal(calls, 0, 'a fresh hit must not trigger any scan at all');
+});
+
+test('getCachedStats serves a stale hit immediately and refreshes it in the background', async () => {
+  const cache = new Map();
+  const inFlight = new Map();
+  cache.set('all', { result: 'stale-value', atMs: 0 });
+  let resolveScan;
+  let calls = 0;
+  const scanFn = async () => {
+    calls += 1;
+    return new Promise((resolve) => { resolveScan = resolve; });
+  };
+
+  const result = await getCachedStats(cache, inFlight, 'all', 15000, scanFn, 20000);
+  assert.equal(result, 'stale-value', 'a stale hit must return immediately, never blocking on the rescan');
+  assert.equal(calls, 1, 'a background refresh must have started');
+  assert.ok(inFlight.has('all'), 'the refresh must be tracked so a concurrent caller can dedupe against it');
+
+  resolveScan('fresh-value');
+  await new Promise((resolve) => setImmediate(resolve)); // let the background .then/.finally chain settle
+  assert.equal(cache.get('all').result, 'fresh-value', 'the cache must update once the background refresh completes');
+  assert.equal(inFlight.has('all'), false, 'in-flight tracking must clear once the refresh settles');
+});
+
+test('getCachedStats dedupes concurrent callers hitting the same stale key onto one background refresh', async () => {
+  const cache = new Map();
+  const inFlight = new Map();
+  cache.set('all', { result: 'stale-value', atMs: 0 });
+  let calls = 0;
+  const scanFn = async () => { calls += 1; return 'fresh-value'; };
+
+  const [a, b] = await Promise.all([
+    getCachedStats(cache, inFlight, 'all', 15000, scanFn, 20000),
+    getCachedStats(cache, inFlight, 'all', 15000, scanFn, 20000),
+  ]);
+  assert.equal(calls, 1, 'two callers hitting a stale cache together must share one background refresh');
+  assert.equal(a, 'stale-value');
+  assert.equal(b, 'stale-value');
+});
+
+test('getCachedStats blocks on the real scan only when there is no cached value at all', async () => {
+  const cache = new Map();
+  const inFlight = new Map();
+  let calls = 0;
+  const scanFn = async () => { calls += 1; return 'first-value'; };
+
+  const result = await getCachedStats(cache, inFlight, 'all', 15000, scanFn, 1000);
+  assert.equal(result, 'first-value');
+  assert.equal(calls, 1);
+  assert.equal(cache.get('all').result, 'first-value');
+});
+
+test('getCachedStats dedupes concurrent callers with no cached value onto one blocking scan', async () => {
+  const cache = new Map();
+  const inFlight = new Map();
+  let calls = 0;
+  const scanFn = async () => {
+    calls += 1;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    return 'value';
+  };
+
+  const [a, b] = await Promise.all([
+    getCachedStats(cache, inFlight, 'all', 15000, scanFn, 1000),
+    getCachedStats(cache, inFlight, 'all', 15000, scanFn, 1000),
+  ]);
+  assert.equal(calls, 1);
+  assert.equal(a, 'value');
+  assert.equal(b, 'value');
 });
 
 test('computeGlobalStats reads real transcript files across multiple projects', async () => {

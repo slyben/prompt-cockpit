@@ -1,15 +1,17 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, writeFile, utimes } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
   fetchCodexSessionHistory,
+  listAllCodexSessionFiles,
   listAllCodexThreads,
   listCodexSessions,
   scanCodexUsageFile,
   scanCodexUsageSessions,
 } from '../src/codex-history.js';
+import { _resetScanCache } from '../src/scan-cache.js';
 
 test('Codex thread listing maps app-server metadata to resumable sessions', async () => {
   const calls = [];
@@ -199,6 +201,68 @@ test('scanCodexUsageSessions merges rollout usage with thread-list activity with
     assert.equal(scans[0].rows.length, 1);
     assert.equal(scans[0].rows[0].usage.input_tokens, 80);
     assert.equal(scans[0].rows[0].model, 'gpt-5.4');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('listAllCodexSessionFiles reports each file\'s mtimeMs for scan-cache.js\'s cache keying', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'codex-mtime-'));
+  try {
+    const day = path.join(root, '2026', '09', '08');
+    await mkdir(day, { recursive: true });
+    const filePath = path.join(day, 'rollout-thread-1.jsonl');
+    await writeFile(filePath, '');
+
+    const files = await listAllCodexSessionFiles(root);
+    assert.equal(files.length, 1);
+    assert.equal(files[0].filePath, filePath);
+    assert.ok(files[0].mtimeMs > 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('scanCodexUsageSessions skips a rescan while a rollout file\'s mtime is unchanged, and rescans once it moves', async () => {
+  _resetScanCache();
+  const root = await mkdtemp(path.join(tmpdir(), 'codex-mtime-cache-'));
+  try {
+    const day = path.join(root, '2026', '09', '08');
+    await mkdir(day, { recursive: true });
+    const filePath = path.join(day, 'rollout-2026-09-08T10-00-00-thread-1.jsonl');
+    const recordLine = (inputTokens) => JSON.stringify({
+      timestamp: '2026-09-08T10:00:00.000Z',
+      type: 'token_usage_record',
+      payload: { usage: { input_tokens: inputTokens, output_tokens: 10 } },
+    }) + '\n';
+    // A fixed, explicit mtime throughout (rather than round-tripping through
+    // whatever fractional-ms value a real write happens to land on) - a
+    // real write's mtime can carry sub-millisecond precision that
+    // `new Date(mtimeMs)` truncates, which would make an "unchanged" mtime
+    // fail to compare equal and silently defeat this test's own premise.
+    const fixedMtime = new Date(2026, 8, 8, 10, 0, 0, 0);
+
+    await writeFile(filePath, recordLine(100));
+    await utimes(filePath, fixedMtime, fixedMtime);
+
+    const manager = { async request() { return { data: [] }; } };
+
+    const first = await scanCodexUsageSessions(manager, { sessionsDir: root });
+    assert.equal(first[0].rows[0].usage.input_tokens, 100);
+
+    // Overwrite with DIFFERENT content but pin mtime back to the exact same
+    // value - proves the cache is keyed on mtime, not blindly rereading.
+    await writeFile(filePath, recordLine(999));
+    await utimes(filePath, fixedMtime, fixedMtime);
+
+    const second = await scanCodexUsageSessions(manager, { sessionsDir: root });
+    assert.equal(second[0].rows[0].usage.input_tokens, 100, 'an unchanged mtime must serve the cached scan, not the new content');
+
+    // Now let the mtime actually advance - the real signal a rescan reacts to.
+    const laterMtime = new Date(fixedMtime.getTime() + 5000);
+    await utimes(filePath, laterMtime, laterMtime);
+    const third = await scanCodexUsageSessions(manager, { sessionsDir: root });
+    assert.equal(third[0].rows[0].usage.input_tokens, 999, 'a changed mtime must trigger a real rescan');
   } finally {
     await rm(root, { recursive: true, force: true });
   }

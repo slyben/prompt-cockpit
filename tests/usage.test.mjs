@@ -23,6 +23,20 @@ test('costForUsage supports the legacy cache_creation_input_tokens field (no nes
   assert.equal(info.cost, 2.5); // priced as a 5m write
 });
 
+test('costForUsage prices Claude Opus 5.5 and its Bedrock alias', () => {
+  const usage = {
+    input_tokens: 1_000_000,
+    output_tokens: 1_000_000,
+    cache_read_input_tokens: 1_000_000,
+    cache_creation: { ephemeral_5m_input_tokens: 1_000_000, ephemeral_1h_input_tokens: 1_000_000 },
+  };
+  // Opus 5.5 rates (USD/M): input 4, output 20, cache read 0.2,
+  // 5m write 5, 1h write 8.
+  const expected = 4 + 20 + 0.2 + 5 + 8;
+  assert.equal(costForUsage('claude-opus-5-5', usage).cost, expected);
+  assert.equal(costForUsage('anthropic.claude-opus-5-5', usage).cost, expected);
+});
+
 test('costForUsage prices Claude Fable 5.1 and its Bedrock alias', () => {
   const usage = {
     input_tokens: 1_000_000,
@@ -60,6 +74,8 @@ test('costForUsage prices grok models from pricing_grok.json, not pricing.json',
   assert.equal(info.outputTokens, 1_000_000);
   assert.equal(info.readTokens, 1_000_000);
   assert.equal(info.writeTokens, 1_000_000);
+  // grok-4.7 launched at the same short-context rates as grok-4.6.
+  assert.equal(costForUsage('grok-4.7', { input_tokens: 1_000_000, output_tokens: 0 }).cost, 2);
 });
 
 test('costForUsage prices codex models from pricing_codex.json', () => {
@@ -111,6 +127,8 @@ test('costForUsage prices the current Codex model catalog', () => {
   assert.equal(costForUsage('gpt-5.6-sol', { input_tokens: 1_000_000, output_tokens: 0 }).cost, 4);
   assert.equal(costForUsage('gpt-5.6-terra', { input_tokens: 1_000_000, output_tokens: 0 }).cost, 2);
   assert.equal(costForUsage('gpt-5.5', { input_tokens: 1_000_000, output_tokens: 0 }).cost, 5);
+  assert.equal(costForUsage('gpt-6-sol', { input_tokens: 1_000_000, output_tokens: 1_000_000, cache_read_input_tokens: 1_000_000, cache_creation_input_tokens: 1_000_000 }).cost, 2 + 10 + 0.2 + 2.5);
+  assert.equal(costForUsage('gpt-6-luna', { input_tokens: 1_000_000, output_tokens: 0 }).cost, 0.1);
 });
 
 test('costForUsage returns real tokens with cost: null for an unpriced model, rather than guessing a price or dropping the tokens', () => {

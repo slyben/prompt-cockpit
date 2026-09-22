@@ -105,6 +105,15 @@ export function createSession({ cwd, resume, name, model, permissionMode, histor
     autoContinue: false,
     rateLimitHit: null, // { resetsAt, rateLimitType } | null
     autoContinueTimer: null,
+    // Throttling state for scheduleUsageBroadcast below - a Grok reply can
+    // land dozens of assistant-message chunks a second, each one otherwise
+    // triggering its own cockpit:usage broadcast. -Infinity (not 0) so the
+    // very first call always reads as "long enough since the last broadcast"
+    // and fires immediately, regardless of how close to epoch 0 Date.now()
+    // is (real process start is always huge, but a mocked clock in tests
+    // starts at exactly 0, which a literal-0 sentinel would collide with).
+    lastUsageBroadcastAt: -Infinity,
+    usageBroadcastTimer: null,
     handle: null,
     // Cockpit-visible task list (TaskCreate/TaskUpdate/TaskList tool calls -
     // see applyTaskOp below). id -> { id, subject, status, owner, blockedBy }.
@@ -240,6 +249,7 @@ export function closeSession(id) {
   const row = sessions.get(id);
   if (!row) return false;
   clearAutoContinueTimer(row);
+  clearUsageBroadcastTimer(row);
   // session.js's close() only interrupts the current turn; its `result`
   // still arrives asynchronously, but sessions.delete(id) below runs
   // synchronously, so handleMessage would find nothing and skip the
@@ -661,7 +671,7 @@ function handleMessage(id, message) {
   }
   const hadModel = !!row.model;
   if (applyAssistantUsage(row, message)) {
-    broadcastUsage(id); // cost/tokens only - cheap, no round trip, so this can track every message
+    scheduleUsageBroadcast(id); // cost/tokens only, throttled - see scheduleUsageBroadcast
     // A "Default model" launch leaves row.model null until this call
     // resolves it; broadcastUsage alone never reaches the header badge,
     // since applyModelBadge only runs off cockpit:state, not cockpit:usage.
@@ -1112,6 +1122,39 @@ function broadcastUsage(id) {
   const row = sessions.get(id);
   if (!row) return;
   broadcast(id, usagePayload(row));
+}
+
+// A Grok reply streams dozens of assistant-message chunks a second, each one
+// carrying its own usage envelope - broadcasting on every one floods the
+// websocket and the client's stats-panel/turn-chart re-renders for no
+// visible benefit. Leading-edge-then-trailing-edge throttle: the first hit
+// after a quiet spell broadcasts immediately, further hits inside the
+// window coalesce into one trailing flush so the final figure is never
+// dropped, only delayed by at most the window.
+const USAGE_BROADCAST_MIN_INTERVAL_MS = 120;
+
+function scheduleUsageBroadcast(id) {
+  const row = sessions.get(id);
+  if (!row) return;
+  if (row.usageBroadcastTimer) return; // a trailing flush is already queued - it will pick up whatever the latest snapshot is
+  const elapsed = Date.now() - row.lastUsageBroadcastAt;
+  if (elapsed >= USAGE_BROADCAST_MIN_INTERVAL_MS) {
+    row.lastUsageBroadcastAt = Date.now();
+    broadcastUsage(id);
+    return;
+  }
+  row.usageBroadcastTimer = setTimeout(() => {
+    row.usageBroadcastTimer = null;
+    row.lastUsageBroadcastAt = Date.now();
+    broadcastUsage(id);
+  }, USAGE_BROADCAST_MIN_INTERVAL_MS - elapsed);
+}
+
+function clearUsageBroadcastTimer(row) {
+  if (row.usageBroadcastTimer) {
+    clearTimeout(row.usageBroadcastTimer);
+    row.usageBroadcastTimer = null;
+  }
 }
 
 function handleApprovalRequest(id, request) {
