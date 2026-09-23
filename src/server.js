@@ -19,6 +19,7 @@ import { registerSessionActionRoutes } from './routes/session-actions.js';
 import { serveStatic } from './static-files.js';
 import { checkOperatorToken, getOperatorToken } from './operator-auth.js';
 import { BodyTooLargeError, MAX_BODY_BYTES } from './http-utils.js';
+import { listClaudeModels } from './claude-models.js';
 
 const HOST = '127.0.0.1';
 const PORT = Number(process.env.PORT) || 4317;
@@ -232,6 +233,16 @@ function copyToClipboard(text) {
 }
 
 if (isMain) {
+  // Warms listClaudeModels()'s in-memory cache at process start instead of
+  // on the first browser tab's launcher open - it spawns a throwaway CLI
+  // process (see claude-models.js), so this moves that one-time latency to
+  // `npm start` instead of the first person who opens the launcher. Errors
+  // are swallowed: the /api/providers/claude/models route retries the same
+  // call lazily, so a failure here just means no warm cache yet.
+  listClaudeModels().catch((err) => {
+    console.error(`Claude model catalog warm-up failed (will retry on first request): ${err.message || err}`);
+  });
+
   server.listen(PORT, HOST, () => {
     const op = getOperatorToken();
     const url = `http://${HOST}:${PORT}/?op=${op}`;

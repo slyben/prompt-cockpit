@@ -70,6 +70,13 @@ test('descriptors own launch, history, and capability metadata', () => {
 
   // Codex advertises live model discovery instead of a static catalog.
   assert.deepEqual(providerDetails('codex').launch, { efforts: codex.efforts, dynamicModels: true });
+
+  // Claude is also dynamic now (listClaudeModels) - no static models array.
+  assert.deepEqual(providerDetails('claude').launch, {
+    efforts: claude.efforts,
+    dynamicModels: true,
+    effortOptions: claude.effortOptions,
+  });
 });
 
 test('codex.resolveEfforts narrows to the current model\'s supported values, falling back to the static list', async () => {

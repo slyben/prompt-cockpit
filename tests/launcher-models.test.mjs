@@ -72,8 +72,8 @@ test('launcher exposes discovered Codex model values for selection', async () =>
   });
   await ui.fill();
   assert.equal(ui.select.disabled, false);
-  assert.equal(ui.select.children[1].value, 'available-model');
-  assert.equal(ui.select.children[1].textContent, 'Available model');
+  assert.equal(ui.select.children[0].value, 'available-model');
+  assert.equal(ui.select.children[0].textContent, 'Available model');
 });
 
 test('launcher narrows Codex effort choices to the selected discovered model', async () => {
@@ -113,7 +113,7 @@ test('failed discovery shows the error and permits retry', async () => {
   assert.match(ui.select.title, /app-server unavailable/);
   fails = false;
   await ui.fill();
-  assert.equal(ui.select.children[1].value, 'recovered');
+  assert.equal(ui.select.children[0].value, 'recovered');
 });
 
 test('settings narrows Codex effort choices to the current discovered model', () => {

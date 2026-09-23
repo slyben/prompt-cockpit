@@ -10,6 +10,7 @@ import { fetchSessionHistory } from './session-history.js';
 import { fetchGrokSessionHistory } from './grok-history.js';
 import { isGrokAvailable } from './grok-cli.js';
 import { listCodexModels } from './codex-models.js';
+import { listClaudeModels } from './claude-models.js';
 import { startCodexSession } from './codex-session.js';
 import { listCodexSessions, fetchCodexSessionHistory } from './codex-history.js';
 import { isCodexAvailable } from './codex-app-server.js';
@@ -21,19 +22,11 @@ export const GROK_EFFORTS = ['low', 'medium', 'high', 'xhigh'];
 export const CODEX_EFFORTS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
 
 // Static launch-time catalogs - what the launcher's model/effort
-// dropdowns show before a session exists. Codex discovers its models
-// dynamically through app-server. This is the one place a new static model or
-// effort tier gets added; providerDetails() below is the one place it
-// rides to the browser.
-const CLAUDE_START_MODELS = [
-  { value: '', label: 'Default model' },
-  // Marked default (same convention as CLAUDE_EFFORT_OPTIONS below): Sonnet
-  // is what the CLI actually resolves '' to today, not just "a reasonable
-  // pick".
-  { value: 'sonnet', label: 'Sonnet *' },
-  { value: 'opus', label: 'Opus' },
-  { value: 'haiku', label: 'Haiku' },
-];
+// dropdowns show before a session exists. Codex and Claude both discover
+// their models dynamically (see listClaudeModels/listCodexModels); Grok is
+// the only provider still on a hand-maintained list here. This is the one
+// place a new static model or effort tier gets added; providerDetails()
+// below is the one place it rides to the browser.
 const GROK_START_MODELS = [
   { value: '', label: 'Default model' },
   { value: 'grok-4.5', label: 'Grok 4.5' },
@@ -71,7 +64,7 @@ const PROVIDERS = Object.freeze({
     listResumableSessions,
     fetchHistory: fetchSessionHistory,
     efforts: CLAUDE_EFFORTS,
-    models: CLAUDE_START_MODELS,
+    listModels: listClaudeModels,
     effortOptions: CLAUDE_EFFORT_OPTIONS,
     // Rewind lives on the descriptor so a new provider cannot silently fall
     // through to Claude's fork implementation.

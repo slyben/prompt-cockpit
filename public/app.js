@@ -1834,6 +1834,7 @@ async function loadResumable() {
 // GROK_START_MODELS here) now live in provider-registry.js and ride down on
 // /api/providers' launch.models / launch.effortOptions - see this file's
 // launchConfig()/launchModels() below and fillSettingsEffortSelect() above.
+// Claude is dynamic (launch.dynamicModels) like Codex now, not static.
 
 function launchConfig(provider) {
   return providerCatalog.get(provider)?.launch || {};
@@ -1870,9 +1871,10 @@ async function fillStartModels() {
       if (!Array.isArray(models)) throw new Error('Model list was not an array');
       if (request !== startModelsRequest) return;
       startModelCatalog = models;
-      list = [{ value: '', label: 'Default model' }, ...models.map((model) => ({
+      const mapped = models.map((model) => ({
         value: model.value, label: model.displayName || model.value,
-      }))];
+      }));
+      list = mapped;
     } catch (err) {
       list = [{ value: '', label: 'Default model (model list unavailable)' }];
       if (request === startModelsRequest) startModelSelect.title = String(err.message || err);
