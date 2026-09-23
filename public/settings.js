@@ -31,6 +31,11 @@ const DEFAULTS = {
   // Same drag-resized/patchSettings-only persistence as detailPaneWidth
   // above - session-list-pane.js's own resize handle.
   sessionListPaneWidth: 380,
+  // One-time nag (app.js's checkPromptSuggestionNag) pointing out that the
+  // CLI's own promptSuggestionEnabled feature costs a server-side call per
+  // turn cockpit never uses - compose.js implements its own ghost-text
+  // suggestion client-side instead. Set true once the user dismisses it.
+  promptSuggestionNagDismissed: false,
 };
 
 function makeFolderId() {

@@ -1,6 +1,9 @@
 // Miscellaneous host-level routes with no session/history concept of their
 // own. Split out of server.js unchanged (behavior-wise) into its own route
 // module.
+import os from 'node:os';
+import path from 'node:path';
+import { readFile } from 'node:fs/promises';
 import { defaultScreenshotDir } from '../os-defaults.js';
 import { listDirectory } from '../session-launcher.js';
 import { respondJson } from '../http-utils.js';
@@ -104,6 +107,24 @@ export function registerSystemRoutes(router) {
   // than reading anything local, since this is tracked server-side across
   // every device on the account. On-demand only (its own button), not part
   // of computeGlobalStats' load - a real subprocess spawn, not a free read.
+  // Whether the CLI's own promptSuggestionEnabled feature is still on in the
+  // user's global settings.json. cockpit's compose box computes its own
+  // ghost-text suggestion client-side (see app.js's computePromptSuggestion),
+  // so this SDK feature costs a server-side call per turn cockpit never
+  // reads - the client uses this to nag the user once to turn it off.
+  // Read-only, no session token, same Origin/Host-only gating as /api/browse.
+  router.get('/api/prompt-suggestion-status', async (req, res) => {
+    const configDir = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
+    let settings = {};
+    try {
+      settings = JSON.parse(await readFile(path.join(configDir, 'settings.json'), 'utf-8'));
+    } catch {
+      // missing/unreadable/corrupt file - fall through, absent means the SDK
+      // default (enabled) applies same as if the key were simply unset
+    }
+    return respondJson(res, 200, { enabled: settings.promptSuggestionEnabled !== false });
+  });
+
   router.get('/api/account-limits', async (req, res) => {
     try {
       return respondJson(res, 200, await fetchAccountLimits());

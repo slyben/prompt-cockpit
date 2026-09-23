@@ -259,6 +259,20 @@
     </div>
   </dialog>
 
+  <dialog id="promptSuggestionNagModal" class="modal" aria-labelledby="promptSuggestionNagTitle">
+    <div class="modal-box">
+      <header class="modal-header"><strong id="promptSuggestionNagTitle">Turn off Claude Code's prompt suggestions</strong></header>
+      <div class="modal-body">
+        <p>Your Claude Code settings still have <code>promptSuggestionEnabled</code> on. That feature makes an extra server-side call every turn to suggest your next prompt - but Cockpit already shows its own suggestion in the compose box, so that call is wasted here.</p>
+        <p>Add this to <code>~/.claude/settings.json</code> to turn it off:</p>
+        <pre><code>"promptSuggestionEnabled": false</code></pre>
+      </div>
+      <footer>
+        <button type="button" id="promptSuggestionNagDismissBtn" class="btn" title="Don't show this again">Got it, don't show again</button>
+      </footer>
+    </div>
+  </dialog>
+
   <dialog id="settingsModal" class="modal" aria-labelledby="settingsTitle">
     <div class="modal-box">
       <header class="modal-header"><strong id="settingsTitle">Settings</strong></header>

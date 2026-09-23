@@ -2001,6 +2001,29 @@ async function applyAvailableProviders() {
 applyAvailableProviders();
 fillStartEffort();
 
+// One-time nag: the CLI's own promptSuggestionEnabled feature makes a
+// server-side call every turn to suggest the next prompt, but cockpit's
+// compose box already computes its own (computePromptSuggestion below), so
+// that call is wasted when driven through here. Checked once at launch;
+// silenced for good via patchSettings once the user dismisses it.
+async function checkPromptSuggestionNag() {
+  if (loadSettings().promptSuggestionNagDismissed) return;
+  try {
+    const res = await fetch('/api/prompt-suggestion-status');
+    if (!res.ok) return;
+    const { enabled } = await res.json();
+    if (enabled) promptSuggestionNagModal.showModal();
+  } catch {
+    // best-effort - not worth surfacing a network hiccup for a nag dialog
+  }
+}
+const promptSuggestionNagModal = document.getElementById('promptSuggestionNagModal');
+document.getElementById('promptSuggestionNagDismissBtn').addEventListener('click', () => {
+  patchSettings({ promptSuggestionNagDismissed: true });
+  promptSuggestionNagModal.close();
+});
+checkPromptSuggestionNag();
+
 let cwdMissingTimer = 0;
 document.getElementById('launcherForm').addEventListener('submit', (event) => {
   event.preventDefault();
