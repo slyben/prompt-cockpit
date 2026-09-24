@@ -54,7 +54,7 @@ export function createSession({ cwd, resume, name, model, permissionMode, histor
     provider: resolvedProvider,
     model: model || null,
     effort: effort || null,
-    maxThinkingTokens: null, // set via setMaxThinkingTokens - null means "off" (SDK default, no forced budget)
+    maxThinkingTokens: null, // set via setMaxThinkingTokens - null means "no forced budget" (SDK default), which resolves to adaptive thinking ON for Opus5/Sonnet5/Fable5, not off; 0 is the real "Off"
     thinkingDisplay: null, // 'summarized' | 'omitted' | null (SDK default when thinking is on)
     state: 'starting', // starting | idle | running | error | closed
     mode: permissionMode || 'default',
@@ -488,9 +488,11 @@ export async function setSessionName(id, name) {
 
 // Same shape as setModel above: one Query method (setMaxThinkingTokens),
 // two row fields to keep in sync, one broadcast so every connected tab sees
-// the new budget/display. `maxThinkingTokens: null` clears the budget back
-// to the SDK default (thinking off unless the session was started with it
-// on); `thinkingDisplay` is only meaningful while thinking is actually on.
+// the new budget/display. `maxThinkingTokens: null` clears the forced budget
+// back to the SDK default, which is adaptive thinking ON for Opus5/Sonnet5/
+// Fable5 (not off - only literal 0 disables it; see .claude/memory/
+// sdk-streaming-input-gotchas.md item 3); `thinkingDisplay` is only
+// meaningful while thinking is actually on.
 export async function setMaxThinkingTokens(id, maxThinkingTokens, thinkingDisplay) {
   return queryPassthrough(
     id,

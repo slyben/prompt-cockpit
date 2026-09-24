@@ -299,7 +299,7 @@ function renderAssistant(container, message, turnPointIndex = null, assistantLab
       // Date.now() is the real fired-at moment live; message.timestampMs is
       // the coarser fallback for a historical batch render.
       const groupFiredAtMs = toolOpts.historical ? timestampMs : Date.now();
-      const parent = addToolCallToGroup(container, block.name, message._usageInfo, groupFiredAtMs);
+      const parent = addToolCallToGroup(container, block, message._usageInfo, groupFiredAtMs);
       appendToolCallRow(container, block, message._usageInfo, parent, turnPointIndex, toolOpts, timestampMs);
     }
   }
@@ -402,6 +402,34 @@ function updateToolCallRow(record) {
   record.rowEl.querySelector('.tool-row-status').textContent = record.status === 'error' ? '✗' : '✓';
   record.rowEl.classList.toggle('tool-row-error', record.status === 'error');
   record.rowEl.classList.remove('tool-row-pending');
+
+  const group = record.rowEl.closest('.group')?._group;
+  const call = group?.callsById.get(record.id);
+  if (call) {
+    call.hint = resultHint(record);
+    renderGroupSummary(group);
+  }
+}
+
+// Folded-group detail is shown up to this many calls; past it the header
+// switches to per-tool counts.
+const GROUP_DETAIL_MAX_CALLS = 3;
+
+// summarizeToolInput without the "key: " prefix and quotes, for the header.
+function briefForHeader(name, input) {
+  return summarizeToolInput(name, input).replace(/^[a-z_]+: /, '').replace(/^"(.*)"$/, '$1');
+}
+
+// Short outcome for the header: "N lines" for a read, "N matches" for a
+// search, "failed" on error. Empty when there's nothing worth saying.
+function resultHint(record) {
+  if (record.status === 'error') return 'failed';
+  const text = typeof record.resultText === 'string' ? record.resultText : '';
+  if (!text.trim()) return '';
+  const lines = text.replace(/\n$/, '').split('\n').length;
+  if (record.kind === 'read') return `${lines} line${lines === 1 ? '' : 's'}`;
+  if (record.kind === 'search') return `${lines} match${lines === 1 ? '' : 'es'}`;
+  return '';
 }
 
 // A tool_result with no matching tool_use record - real case, not a bug: a
@@ -756,12 +784,13 @@ function openGroup(container, firedAtMs = null) {
   // several tool_use blocks sharing a single usage figure, and counting it
   // per block would inflate the sum by however many calls it made.
   const group = {
-    wrap, inner, roleText, usageMetaText, timeText, toolNames: [], expanded: true,
+    wrap, inner, roleText, usageMetaText, timeText, calls: [], callsById: new Map(), expanded: true,
     usage: { costUsd: 0, inputTokens: 0, outputTokens: 0 },
     countedUsageInfos: new Set(),
     container, firedAtMs, // when the run started - set once at creation, never touched by later calls joining the same group
   };
   wrap.classList.add('expanded'); // groups open by default
+  wrap._group = group; // lets updateToolCallRow reach the group from a row
   wrap.addEventListener('click', () => setGroupExpanded(group, !group.expanded));
 
   openGroupByContainer.set(container, group);
@@ -779,9 +808,11 @@ function closeGroup(container) {
 // its row should render into instead of the top-level container. firedAtMs
 // only takes effect for a *new* group - joining an already-open one never
 // overwrites its start time.
-function addToolCallToGroup(container, name, usageInfo, firedAtMs) {
+function addToolCallToGroup(container, block, usageInfo, firedAtMs) {
   const group = getOrOpenGroup(container, firedAtMs);
-  group.toolNames.push(name);
+  const call = { id: block.id, name: block.name, brief: briefForHeader(block.name, block.input), hint: '' };
+  group.calls.push(call);
+  group.callsById.set(block.id, call);
   if (usageInfo && !group.countedUsageInfos.has(usageInfo)) {
     group.countedUsageInfos.add(usageInfo);
     group.usage.costUsd += usageInfo.costUsd;
@@ -798,14 +829,32 @@ function addToolCallToGroup(container, name, usageInfo, firedAtMs) {
 // color for the whole row can't carry that.
 function renderGroupSummary(group) {
   group.roleText.textContent = '';
-  group.toolNames.forEach((name, i) => {
-    if (i > 0) group.roleText.append(document.createTextNode(' → '));
+  const appendName = (name) => {
     const span = document.createElement('span');
     span.className = 'group-tool-name';
     span.dataset.toolKind = classifyTool(name);
     span.textContent = name;
     group.roleText.append(span);
-  });
+  };
+  if (group.calls.length <= GROUP_DETAIL_MAX_CALLS) {
+    // Few calls: spell out each one (name, target, result hint) so the
+    // folded row already says what was done.
+    group.calls.forEach((call, i) => {
+      if (i > 0) group.roleText.append(document.createTextNode(' → '));
+      appendName(call.name);
+      const detail = [call.brief, call.hint && `(${call.hint})`].filter(Boolean).join(' ');
+      if (detail) group.roleText.append(document.createTextNode(` ${detail}`));
+    });
+  } else {
+    // Many calls: per-tool counts, in first-seen order.
+    const counts = new Map();
+    for (const call of group.calls) counts.set(call.name, (counts.get(call.name) || 0) + 1);
+    [...counts].forEach(([name, n], i) => {
+      if (i > 0) group.roleText.append(document.createTextNode(' · '));
+      appendName(name);
+      group.roleText.append(document.createTextNode(` ×${n}`));
+    });
+  }
   // Blank until the first priced tool call lands (most groups' first call
   // is a real API turn, but nothing guarantees it) - showing "$0.00, 0 in,
   // 0 out" in that gap would read as a real (if boring) number rather than
