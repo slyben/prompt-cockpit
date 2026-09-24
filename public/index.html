@@ -285,6 +285,7 @@
           <button type="button" class="settings-tab" data-settings-tab="stats" role="tab" aria-selected="false" title="Local usage stats across Claude, Grok, and Codex sessions">Stats</button>
         </div>
 
+        <div class="settings-tab-content">
         <div class="settings-tab-panel" data-settings-tab-panel="project" role="tabpanel">
           <div class="settings-section">
             <div class="settings-section-header">
@@ -428,6 +429,7 @@
             <p class="mcp-note">Computed live from local session transcripts: Claude (<code>~/.claude/projects</code>), Grok (<code>~/.grok/sessions</code>), and Codex (<code>~/.codex/sessions</code>). Not the CLI's own <code>/stats</code> cache - always fresh, but only as deep as whatever files have not been pruned. Codex's thread list remains a fallback for activity whose rollout file is unavailable.</p>
             <div id="statsBody"></div>
           </div>
+        </div>
         </div>
       </div>
       <footer>

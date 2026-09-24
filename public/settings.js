@@ -273,9 +273,9 @@ export function initSettings({
   };
 }
 
-// Lets the modal be repositioned by dragging its header - at min(760px,
-// 85vh) tall it covers most of the window. Position isn't persisted, so it
-// re-centers on the next fresh open after a reload.
+// Lets the modal be repositioned by dragging its header. Settings has a
+// resize grip as well, so its larger sections can be given more room.
+// Position isn't persisted, so it re-centers after a reload.
 function enableModalDrag(modal) {
   const box = modal.querySelector('.modal-box');
   const header = modal.querySelector('header');

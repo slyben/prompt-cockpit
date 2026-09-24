@@ -1,6 +1,6 @@
 
-  .settings-body { display: flex; flex-direction: column; gap: 16px; }
-  .settings-tabs { display: flex; gap: 6px; border-bottom: 1px solid var(--border); padding-bottom: 10px; }
+  .settings-body { display: flex; flex-direction: column; gap: 16px; overflow: hidden; }
+  .settings-tabs { display: flex; flex: 0 0 auto; gap: 6px; border-bottom: 1px solid var(--border); padding-bottom: 10px; }
   .settings-tab {
     background: none;
     border: 1px solid transparent;
@@ -13,6 +13,7 @@
   }
   .settings-tab:hover { color: var(--text); }
   .settings-tab.active { color: var(--text); background: var(--panel); border-color: var(--border); }
+  .settings-tab-content { flex: 1; min-height: 0; overflow-y: auto; }
   .settings-tab-panel { display: flex; flex-direction: column; gap: 16px; }
   .settings-row { display: flex; align-items: center; gap: 10px; font-size: 13px; }
   .hint {

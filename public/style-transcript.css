@@ -143,7 +143,6 @@
     }
   }
 
-  #settingsModal .modal-box { height: min(760px, 85vh); }
   #historyModal .modal-box { width: min(1040px, 92vw); }
   #historyModal .modal-body-row { display: flex; flex: 1; min-height: 0; overflow: hidden; }
   #historyBody {
