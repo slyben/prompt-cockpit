@@ -75,7 +75,9 @@ export function registerSessionRoutes(router) {
       ? await provider.fetchHistory(body.resume, cwd).catch(() => null)
       : null;
     const model = typeof body.model === 'string' && body.model ? body.model : undefined;
-    if (model && !isSafeGrokArg(model)) {
+    // isSafeGrokArg guards against shell/CLI-arg injection when a model
+    // string gets spawned as a literal `grok` CLI flag (grok-acp.js)
+    if (provider.id === 'grok' && model && !isSafeGrokArg(model)) {
       return respondJson(res, 400, { error: `invalid model: ${model}` });
     }
     // A resume carries forward whatever durable title (session-titles.js)
