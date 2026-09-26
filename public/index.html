@@ -209,6 +209,21 @@
     </div>
   </form>
 
+  <dialog id="gitPushApprovalModal" class="modal" aria-labelledby="gitPushApprovalTitle">
+    <div class="modal-box">
+      <header class="modal-header"><strong id="gitPushApprovalTitle">Confirm Git push</strong></header>
+      <div class="modal-body">
+        <p>The AI wants to send commits to a remote repository. Review the command, then choose whether to allow this push.</p>
+        <pre id="gitPushCommand"></pre>
+        <p id="gitPushApprovalError" class="mcp-error" hidden></p>
+      </div>
+      <footer>
+        <button type="button" id="gitPushAllowBtn" class="btn btn-primary">Allow this push</button>
+        <button type="button" id="gitPushBlockBtn" class="btn" autofocus>Block this push</button>
+      </footer>
+    </div>
+  </dialog>
+
   <dialog id="dirBrowserModal" class="modal" aria-labelledby="dirBrowserTitle">
     <div class="modal-box">
       <header class="modal-header" id="dirBrowserTitle"><span id="dirPath"></span></header>
@@ -273,12 +288,28 @@
     </div>
   </dialog>
 
+  <dialog id="codexGitGuardSetupModal" class="modal" aria-labelledby="codexGitGuardSetupTitle">
+    <div class="modal-box">
+      <header class="modal-header"><strong id="codexGitGuardSetupTitle">Set up Git checks for AI sessions</strong></header>
+      <div class="modal-body">
+        <p>Codex can create commits and pull requests. Cockpit can stop those changes from adding an AI credit line, such as <code>Co-authored-by: Claude</code>, <code>Generated with Claude Code</code>, <code>Generated with Codex</code>, or <code>Generated with Grok</code>. It can also require commit messages to start with a short label, like <code>ui: fix spacing</code>.</p>
+        <p>Your choice is saved on this Cockpit server and applies to all projects and AI tools. Codex may run some commands without asking Cockpit first, so those commands may not be checked.</p>
+        <p>You can change this later in Settings &gt; Server.</p>
+      </div>
+      <footer>
+        <button type="button" id="codexGitGuardEnableBtn" class="btn btn-primary">Turn checks on</button>
+        <button type="button" id="codexGitGuardDisableBtn" class="btn">Leave them off</button>
+      </footer>
+    </div>
+  </dialog>
+
   <dialog id="settingsModal" class="modal" aria-labelledby="settingsTitle">
     <div class="modal-box">
       <header class="modal-header"><strong id="settingsTitle">Settings</strong></header>
       <div class="modal-body settings-body">
         <div class="settings-tabs" role="tablist">
           <button type="button" class="settings-tab active" data-settings-tab="project" role="tab" aria-selected="true" title="Project and session settings">Project</button>
+          <button type="button" class="settings-tab" data-settings-tab="server" role="tab" aria-selected="false" title="Cockpit server settings">Server</button>
           <button type="button" class="settings-tab" data-settings-tab="display" role="tab" aria-selected="false" title="Display and thinking settings">Display</button>
           <button type="button" class="settings-tab" data-settings-tab="mcp" role="tab" aria-selected="false" title="MCP server settings">MCP</button>
           <button type="button" class="settings-tab" data-settings-tab="plugins" role="tab" aria-selected="false" title="Plugin settings">Plugins</button>
@@ -286,6 +317,25 @@
         </div>
 
         <div class="settings-tab-content">
+        <div class="settings-tab-panel" data-settings-tab-panel="server" role="tabpanel" hidden>
+          <div class="settings-section-header"><strong>Git commit guard</strong></div>
+          <label class="settings-row">
+            <span>Attribution guard</span>
+            <select id="gitGuardModeBtn">
+              <option value="commit">Block AI attribution on git commit / gh pr</option>
+              <option value="all">Block AI attribution anywhere</option>
+              <option value="off">Off</option>
+            </select>
+            <span class="hint" title="Cockpit stores this setting on the server for all projects and providers. It recognizes Co-Authored-By lines and common generated/created/written attribution for Claude, Codex, Grok, and other AI providers. 'git commit / gh pr' checks those command forms; 'anywhere' checks every shell command. Codex commands are checked when Codex asks Cockpit to approve them.">?</span>
+          </label>
+          <label class="settings-row">
+            <span>Validate scoped commit messages</span>
+            <input type="checkbox" id="gitCommitMessageValidationBtn" />
+            <span class="hint" title="When enabled, Cockpit checks git commit messages for scope: description format with optional short bullet lines. It inspects -m and -F messages and rejects editor or stdin messages it cannot inspect. Codex commands are checked when its app-server sends a command approval request.">?</span>
+          </label>
+          <div id="gitGuardError" class="mcp-error" hidden></div>
+        </div>
+
         <div class="settings-tab-panel" data-settings-tab-panel="project" role="tabpanel">
           <div class="settings-section">
             <div class="settings-section-header">
@@ -294,21 +344,6 @@
             </div>
             <ul id="customFoldersList" class="settings-list"></ul>
           </div>
-          <label class="settings-row">
-            <span>Git commit guard</span>
-            <select id="gitGuardModeBtn">
-              <option value="commit">Block AI attribution on git commit / gh pr</option>
-              <option value="all">Block AI attribution anywhere</option>
-              <option value="off">Off</option>
-            </select>
-            <span class="hint" title="Two protections: blocks AI attribution text (Co-Authored-By or 'Generated with Claude Code') in matching Bash commands, and the checkbox below validates git commit messages against the /commit skill's scoped format (scope: description with an optional bullet body). 'git commit / gh pr' only checks git commit and gh pr create/edit invocations; 'anywhere' checks every Bash command for attribution text. Project-scoped (settings.local.json), takes effect on this session's next matching Bash call.">?</span>
-          </label>
-          <label class="settings-row">
-            <span>Validate scoped commit messages</span>
-            <input type="checkbox" id="gitCommitMessageValidationBtn" />
-            <span class="hint" title="When enabled, Claude's git commit messages must follow the /commit skill's scoped format: scope: description, with optional short bullet lines. Cockpit validates -m and -F messages and rejects editor or stdin messages it cannot inspect. This applies to Claude sessions only.">?</span>
-          </label>
-          <div id="gitGuardError" class="mcp-error" hidden></div>
           <div class="settings-row">
             <span>Delegation handshake</span>
             <span id="handshakeStatus"></span>

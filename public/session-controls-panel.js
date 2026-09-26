@@ -1,7 +1,6 @@
-// Poll-on-open, no pushed events: git-guard/permission-rules are project-
-// scoped settings.local.json values another tab/session may have changed
-// since this modal was last open, and handshake trust is this tab's own
-// session token, so both need a fresh check each time the modal opens.
+// Poll-on-open, no pushed events: the server-wide git guard and per-project
+// permission rules may have changed in another tab/session, while handshake
+// trust is this tab's own session token.
 export function initSessionControlsPanel({
   gitGuardModeEl,
   gitCommitMessageValidationEl,

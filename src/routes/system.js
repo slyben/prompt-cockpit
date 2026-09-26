@@ -6,14 +6,42 @@ import path from 'node:path';
 import { readFile } from 'node:fs/promises';
 import { defaultScreenshotDir } from '../os-defaults.js';
 import { listDirectory } from '../session-launcher.js';
-import { respondJson } from '../http-utils.js';
+import { readJsonBody, respondJson } from '../http-utils.js';
 import { availableProviders } from '../provider-availability.js';
 import { providerDetails, getProvider } from '../provider-registry.js';
 import { getHandshakeSecret, regenerateHandshakeSecret, memorySnapshot } from '../session-registry.js';
 import { computeGlobalStats } from '../global-stats.js';
 import { fetchAccountLimits } from '../account-limits.js';
+import { readGitGuardSettings, readGitGuardSettingsState, setGitGuardSettings, GIT_GUARD_MODES } from '../git-commit-guard.js';
 
 export function registerSystemRoutes(router) {
+  router.get('/api/git-guard', async (req, res, url) => {
+    try {
+      const state = await readGitGuardSettingsState(url?.searchParams.get('cwd') || undefined);
+      return respondJson(res, 200, state);
+    } catch (err) {
+      return respondJson(res, 500, { error: String(err.message || err) });
+    }
+  });
+
+  router.post('/api/git-guard', async (req, res) => {
+    try {
+      const body = await readJsonBody(req);
+      const current = await readGitGuardSettings();
+      const mode = body.mode ?? current.mode;
+      const validateCommitMessage = body.validateCommitMessage ?? current.validateCommitMessage;
+      if (!GIT_GUARD_MODES.includes(mode)) {
+        return respondJson(res, 400, { error: `mode must be one of ${GIT_GUARD_MODES.join(', ')}` });
+      }
+      if (typeof validateCommitMessage !== 'boolean') {
+        return respondJson(res, 400, { error: 'validateCommitMessage must be a boolean' });
+      }
+      return respondJson(res, 200, await setGitGuardSettings(null, { mode, validateCommitMessage }));
+    } catch (err) {
+      return respondJson(res, 500, { error: String(err.message || err) });
+    }
+  });
+
   // Liveness only - deliberately outside /api/* so server.js's operator-token
   // check never applies here: a health check has to work before anyone's
   // obtained a token. Origin/Host spoof checking still applies, so this

@@ -360,6 +360,11 @@ const approvalPanel = initApprovalPanel({
   planNoteText: document.getElementById('planNoteText'),
   questionForm: document.getElementById('questionForm'),
   approvalQueueCountEl: document.getElementById('approvalQueueCount'),
+  gitPushModal: document.getElementById('gitPushApprovalModal'),
+  gitPushCommandEl: document.getElementById('gitPushCommand'),
+  gitPushErrorEl: document.getElementById('gitPushApprovalError'),
+  gitPushAllowBtn: document.getElementById('gitPushAllowBtn'),
+  gitPushBlockBtn: document.getElementById('gitPushBlockBtn'),
   detailPane,
   tabChrome,
   postDecision: (payload) => fetch(`/api/sessions/${sessionId}/approval-decision`, {
@@ -933,10 +938,10 @@ const settings = initSettings({
   },
   onCloseSession: closeSession,
   onResetSession: resetSession,
-  // No session yet (modal shouldn't really be reachable pre-session, but
-  // guard anyway) - both panels' fetchers throw on a null sessionId, so skip
-  // the round trip rather than surface a confusing error on open.
+  // Git guard is server-wide and can be opened without a session. The other
+  // controls still need the live row.
   onOpen: () => {
+    refreshGitGuardMode();
     if (!sessionId) return;
     refreshSettingsEffortCatalog();
     mcpPanel.refresh(); // read-only status GET, safe to re-run every open
@@ -948,33 +953,30 @@ const settings = initSettings({
       pluginPanel.refresh();
     }
     refreshPermissionRulesList();
-    refreshGitGuardMode();
     refreshHandshakeStatus();
   },
 });
 
-// Git-commit-guard select, delegation-handshake trust status/paste-in, and
-// always-allow permission-rules list - scoped to THIS session/cwd or this
-// tab's own session token (handshake, distinct from the read-only
-// server-wide copy in session-list-pane.js). Rendering lives in
-// session-controls-panel.js; this supplies the sessionId-bound fetchers.
+// Git commit guard is server-wide. Handshake and permission-rule controls
+// remain session/project scoped. Rendering lives in session-controls-panel.js.
 const sessionControlsPanel = initSessionControlsPanel({
   gitGuardModeEl: document.getElementById('gitGuardModeBtn'),
   gitCommitMessageValidationEl: document.getElementById('gitCommitMessageValidationBtn'),
   gitGuardErrorEl: document.getElementById('gitGuardError'),
   getGitGuardMode: async () => {
-    if (!sessionId) return null;
     try {
-      const res = await fetch(`/api/sessions/${sessionId}/git-guard`, { headers: authHeaders() });
+      const res = sessionId
+        ? await fetch(`/api/sessions/${sessionId}/git-guard`, { headers: authHeaders() })
+        : await fetch('/api/git-guard');
       return res.ok ? res.json() : null;
     } catch {
       return null; // offline/blocked - select just keeps showing its last-known value
     }
   },
   setGitGuardMode: async ({ mode, validateCommitMessage }) => {
-    const res = await fetch(`/api/sessions/${sessionId}/git-guard`, {
+    const res = await fetch('/api/git-guard', {
       method: 'POST',
-      headers: { 'content-type': 'application/json', ...authHeaders() },
+      headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ mode, validateCommitMessage }),
     });
     if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || 'save failed');
@@ -2032,6 +2034,42 @@ document.getElementById('promptSuggestionNagDismissBtn').addEventListener('click
   patchSettings({ promptSuggestionNagDismissed: true });
   promptSuggestionNagModal.close();
 });
+const codexGitGuardSetupModal = document.getElementById('codexGitGuardSetupModal');
+document.getElementById('codexGitGuardEnableBtn').addEventListener('click', () => codexGitGuardSetupModal.close('enable'));
+document.getElementById('codexGitGuardDisableBtn').addEventListener('click', () => codexGitGuardSetupModal.close('disable'));
+
+function askCodexGitGuardSetup() {
+  codexGitGuardSetupModal.returnValue = '';
+  return new Promise((resolve) => {
+    codexGitGuardSetupModal.addEventListener('close', () => resolve(codexGitGuardSetupModal.returnValue), { once: true });
+    codexGitGuardSetupModal.showModal();
+  });
+}
+
+async function ensureCodexGitGuardConfigured(cwd) {
+  try {
+    const statusUrl = new URL('/api/git-guard', location.origin);
+    if (cwd) statusUrl.searchParams.set('cwd', cwd);
+    const statusResponse = await fetch(statusUrl.toString());
+    if (!statusResponse.ok) throw new Error((await statusResponse.json().catch(() => ({}))).error || 'could not read the saved choice');
+    const status = await statusResponse.json();
+    if (status.configured) return true;
+
+    const choice = await askCodexGitGuardSetup();
+    if (choice !== 'enable' && choice !== 'disable') return false;
+    const enabled = choice === 'enable';
+    const saveResponse = await fetch('/api/git-guard', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ mode: enabled ? 'commit' : 'off', validateCommitMessage: enabled }),
+    });
+    if (!saveResponse.ok) throw new Error((await saveResponse.json().catch(() => ({}))).error || 'could not save the choice');
+    return true;
+  } catch (err) {
+    alert(`could not set up Git checks: ${err.message || err}`);
+    return false;
+  }
+}
 checkPromptSuggestionNag();
 
 let cwdMissingTimer = 0;
@@ -2084,6 +2122,7 @@ document.getElementById('launcherForm').addEventListener('submit', (event) => {
 });
 
 async function startSession({ cwd, resume, model, provider, name, effort, thinkingBudget }) {
+  if (provider === 'codex' && !(await ensureCodexGitGuardConfigured(cwd))) return;
   const res = await fetch('/api/sessions', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },

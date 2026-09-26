@@ -7,6 +7,7 @@ import { randomUUID } from 'node:crypto';
 import { getCodexAppServerManager } from './codex-app-server.js';
 import { codexNotificationToMessages } from './codex-messages.js';
 import { createResultEpochTracker } from './result-epoch.js';
+import { commandHasGitPush, evaluateGitGuardCommand, shellCommandFromToolInput } from './git-commit-guard.js';
 
 function unsupported(name) {
   return async () => { throw new Error(`${name} is not supported on Codex sessions yet`); };
@@ -319,6 +320,63 @@ export function startCodexSession({
       });
     }
     const legacyApproval = method === 'execCommandApproval' || method === 'applyPatchApproval';
+    const commandApproval = method === 'item/commandExecution/requestApproval' || method === 'execCommandApproval';
+    if (commandApproval) {
+      const command = shellCommandFromToolInput(params);
+      if (command) {
+        let gitPushApproved = false;
+        if (commandHasGitPush(command)) {
+          if (!onApprovalRequest) {
+            return {
+              handled: true,
+              result: legacyApproval ? { decision: 'denied' } : { decision: 'decline' },
+            };
+          }
+          const approved = await new Promise((resolve) => {
+            const id = String(requestId);
+            pendingApprovals.set(id, {
+              resolve,
+              kind: legacyApproval ? 'legacyDecision' : 'gitPush',
+              toolName: 'GitPush',
+            });
+            onApprovalRequest({
+              requestId: id,
+              approvalKind: 'git-push',
+              toolName: 'GitPush',
+              displayName: 'Git push',
+              title: 'Review this Git push',
+              input: { command, cwd: typeof params.cwd === 'string' ? params.cwd : cwd },
+            });
+          });
+          if (!approved) {
+            return {
+              handled: true,
+              result: legacyApproval ? { decision: 'denied' } : { decision: 'decline' },
+            };
+          }
+          gitPushApproved = true;
+        }
+        let guardResult;
+        try {
+          const commandCwd = typeof params.cwd === 'string' ? params.cwd : cwd;
+          guardResult = await evaluateGitGuardCommand(command, commandCwd);
+        } catch (err) {
+          guardResult = { blocked: true, reason: `Cockpit could not read its git guard settings: ${err.message || err}` };
+        }
+        if (guardResult.blocked) {
+          return {
+            handled: true,
+            result: legacyApproval ? { decision: 'denied' } : { decision: 'decline' },
+          };
+        }
+        if (gitPushApproved) {
+          return {
+            handled: true,
+            result: legacyApproval ? { decision: 'approved' } : { decision: 'accept' },
+          };
+        }
+      }
+    }
     if (legacyApproval) {
       const approvalMethod = method === 'applyPatchApproval'
         ? 'item/fileChange/requestApproval'

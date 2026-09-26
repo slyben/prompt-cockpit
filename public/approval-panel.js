@@ -1,7 +1,6 @@
-// Approval banner (plain tool-call allow/deny, ExitPlanMode's plan review,
-// and AskUserQuestion's pill-form) - the one gate every tool call routes
-// through (session.js's canUseTool). Owns all queue/pending-request state;
-// nothing outside this module should read it directly.
+// Approval UI for plain tool calls, Git pushes, ExitPlanMode review, and
+// AskUserQuestion. Owns all queue/pending-request state; nothing outside
+// this module should read it directly.
 export function initApprovalPanel({
   approvalBanner,
   approvalPlain,
@@ -16,6 +15,11 @@ export function initApprovalPanel({
   planNoteText,
   questionForm,
   approvalQueueCountEl,
+  gitPushModal,
+  gitPushCommandEl,
+  gitPushErrorEl,
+  gitPushAllowBtn,
+  gitPushBlockBtn,
   detailPane,
   tabChrome,
   postDecision, // async ({ requestId, decision, updatedInput, alwaysAllow, message }) => void
@@ -23,6 +27,7 @@ export function initApprovalPanel({
 }) {
   let pendingApprovalRequestId = null;
   let pendingApprovalToolName = null; // gates planReviewControls/rejectBtn's label - only ExitPlanMode gets the plan-review treatment
+  let pendingApprovalKind = null;
   const approvalQueue = [];
 
   function updateApprovalQueueCount() {
@@ -46,6 +51,25 @@ export function initApprovalPanel({
 
   function renderBanner(request) {
     pendingApprovalRequestId = request.requestId;
+    pendingApprovalKind = request.approvalKind || null;
+
+    if (pendingApprovalKind === 'git-push' && gitPushModal) {
+      approvalBanner.hidden = true;
+      questionForm.hidden = true;
+      const lines = [request.input?.command || 'git push'];
+      if (request.input?.cwd) lines.push(`folder: ${request.input.cwd}`);
+      if (gitPushCommandEl) gitPushCommandEl.textContent = lines.join('\n');
+      if (gitPushErrorEl) {
+        gitPushErrorEl.hidden = true;
+        gitPushErrorEl.textContent = '';
+      }
+      if (!gitPushModal.open) gitPushModal.showModal();
+      tabChrome.setNeedsAttention(true);
+      updateApprovalQueueCount();
+      gitPushBlockBtn?.focus();
+      return;
+    }
+    if (gitPushModal?.open) gitPushModal.close();
 
     // Re-measure right before the banner needs the offset, rather than
     // trusting an earlier lifecycle event (connect/resize/drag): #streamWrap
@@ -204,7 +228,30 @@ export function initApprovalPanel({
   async function sendDecision(decision, updatedInput, alwaysAllow, message) {
     if (!pendingApprovalRequestId) return;
     const requestId = pendingApprovalRequestId;
-    await postDecision({ requestId, decision, updatedInput, alwaysAllow, message });
+    const isGitPush = pendingApprovalKind === 'git-push';
+    if (isGitPush) {
+      if (gitPushAllowBtn) gitPushAllowBtn.disabled = true;
+      if (gitPushBlockBtn) gitPushBlockBtn.disabled = true;
+    }
+    try {
+      const response = await postDecision({ requestId, decision, updatedInput, alwaysAllow, message });
+      if (isGitPush && response?.ok === false) {
+        const body = await response.json().catch(() => ({}));
+        throw new Error(body.error || `server returned ${response.status}`);
+      }
+    } catch (err) {
+      if (!isGitPush) throw err;
+      if (gitPushErrorEl) {
+        gitPushErrorEl.textContent = `Couldn't send your choice: ${err.message || err}`;
+        gitPushErrorEl.hidden = false;
+      }
+      return;
+    } finally {
+      if (isGitPush) {
+        if (gitPushAllowBtn) gitPushAllowBtn.disabled = false;
+        if (gitPushBlockBtn) gitPushBlockBtn.disabled = false;
+      }
+    }
     remove(requestId);
   }
 
@@ -237,12 +284,14 @@ export function initApprovalPanel({
       return;
     }
     approvalBanner.hidden = true;
+    if (pendingApprovalKind === 'git-push' && gitPushModal?.open) gitPushModal.close();
     questionForm.hidden = true;
     questionForm.innerHTML = '';
     alwaysAllowScope.value = '';
     planReviewControls.hidden = true;
     pendingApprovalRequestId = null;
     pendingApprovalToolName = null;
+    pendingApprovalKind = null;
     if (approvalQueue.length) renderBanner(approvalQueue[0]);
     else updateApprovalQueueCount();
   }
@@ -271,6 +320,16 @@ export function initApprovalPanel({
     sendDecision('deny', undefined, false, feedback || undefined);
   });
 
+  gitPushAllowBtn?.addEventListener('click', () => sendDecision('allow'));
+  gitPushBlockBtn?.addEventListener('click', () => sendDecision('deny'));
+  gitPushModal?.addEventListener('cancel', (event) => {
+    event.preventDefault();
+    sendDecision('deny');
+  });
+  gitPushModal?.addEventListener('click', (event) => {
+    if (event.target === gitPushModal) sendDecision('deny');
+  });
+
   // Drop any in-banner request - attachClient replays the full pending
   // list. Called on every connect(), reconnect included: a second
   // overlapping prompt resolved while the socket was down would otherwise
@@ -279,7 +338,9 @@ export function initApprovalPanel({
     approvalQueue.length = 0;
     pendingApprovalRequestId = null;
     pendingApprovalToolName = null;
+    pendingApprovalKind = null;
     approvalBanner.hidden = true;
+    if (gitPushModal?.open) gitPushModal.close();
     questionForm.hidden = true;
     questionForm.innerHTML = '';
     updateApprovalQueueCount();

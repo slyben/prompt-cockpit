@@ -5,6 +5,7 @@ import { readFileSync } from 'node:fs';
 import { spawnGrokAgent, killGrokProcess } from './grok-acp.js';
 import { acpUpdateToMessages, turnResultMessage, pickPermissionOption, grokPermissionAction } from './grok-messages.js';
 import { createGrokExtensions } from './grok-extensions.js';
+import { commandHasGitPush, evaluateGitGuardCommand, shellCommandFromToolInput } from './git-commit-guard.js';
 import { createResultEpochTracker } from './result-epoch.js';
 
 // Read at load rather than hardcoded: a "keep in sync" comment here drifted
@@ -231,6 +232,39 @@ export function startGrokSession({
   async function handlePermission(params) {
     const toolCall = params.toolCall || {};
     const options = params.options || [];
+    const command = shellCommandFromToolInput(toolCall.rawInput) || shellCommandFromToolInput(toolCall);
+    const commandTool = toolCall.kind === 'execute'
+      || /^(bash|shell|exec|command|terminal)$/i.test(toolCall.toolName || '')
+      || Boolean(command);
+    if (commandTool && command && commandHasGitPush(command)) {
+      if (!onApprovalRequest) return { outcome: { outcome: 'cancelled' } };
+      return new Promise((resolve) => {
+        approvalSeq += 1;
+        const requestId = toolCall.toolCallId || `git-push-${approvalSeq}`;
+        pendingApprovals.set(requestId, { resolve, options });
+        onApprovalRequest({
+          requestId,
+          approvalKind: 'git-push',
+          toolName: 'GitPush',
+          displayName: 'Git push',
+          title: 'Review this Git push',
+          input: { command, cwd: toolCall.rawInput?.cwd || cwd },
+        });
+      });
+    }
+    if (commandTool && command) {
+      let guardResult;
+      try {
+        const commandCwd = typeof toolCall.rawInput?.cwd === 'string' ? toolCall.rawInput.cwd : cwd;
+        guardResult = await evaluateGitGuardCommand(command, commandCwd);
+      } catch (err) {
+        guardResult = { blocked: true, reason: `Cockpit could not read its git guard settings: ${err.message || err}` };
+      }
+      if (guardResult.blocked) {
+        const optionId = pickPermissionOption(options, false);
+        return { outcome: optionId ? { outcome: 'selected', optionId } : { outcome: 'cancelled' } };
+      }
+    }
     const action = grokPermissionAction(currentMode, toolCall);
     if (action === 'allow' || action === 'deny') {
       const optionId = pickPermissionOption(options, action === 'allow');

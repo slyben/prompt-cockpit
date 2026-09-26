@@ -1,26 +1,49 @@
-// Project-scoped commit-message guard - reads/writes the `gitCommitGuard`
-// key in `.claude/settings.local.json`. Enforcement is a
-// PreToolUse hook, not canUseTool, since canUseTool is skipped in some
-// permission modes and would silently stop applying there.
+// Cockpit-wide commit guard. The setting lives under ~/.prompt-cockpit so
+// every provider and project reads the same policy. The legacy per-project
+// Claude setting is imported once when no server setting exists.
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
-import { readSettingsFile, updateSettingsFile } from './settings-file.js';
+import { readSettingsFile } from './settings-file.js';
+import { readServerSettings, updateServerSettings } from './server-settings.js';
 
 // 'commit': only deny a `git commit`/`gh pr create`/`gh pr edit` invocation
-//   whose text also contains a guarded phrase - avoids blocking unrelated
-//   commands that merely mention the phrase (grepping, editing a doc).
-// 'all': deny any Bash command containing a guarded phrase (catches
-//   variants 'commit' can't, e.g. `-F file` forms). 'off': no check.
+//   whose command text also contains a guarded phrase - avoids blocking
+//   unrelated commands that merely mention the phrase (grepping, editing a doc).
+// 'all': deny any shell command whose text contains a guarded phrase.
+// 'off': no attribution or commit-message check.
 export const GIT_GUARD_MODES = ['commit', 'all', 'off'];
 const DEFAULT_MODE = 'all';
 
-export async function readGitGuardSettings(cwd) {
-  const settings = await readSettingsFile(cwd);
-  const guard = settings.gitCommitGuard || {};
+function normalizeGitGuardSettings(guard = {}) {
   return {
     mode: GIT_GUARD_MODES.includes(guard.mode) ? guard.mode : DEFAULT_MODE,
     validateCommitMessage: guard.validateCommitMessage === true,
   };
+}
+
+export async function readGitGuardSettingsState(cwd) {
+  const settings = await readServerSettings();
+  if (settings.gitCommitGuard) {
+    return { ...normalizeGitGuardSettings(settings.gitCommitGuard), configured: true };
+  }
+
+  if (cwd) {
+    const legacySettings = await readSettingsFile(cwd);
+    if (legacySettings.gitCommitGuard) {
+      const migrated = normalizeGitGuardSettings(legacySettings.gitCommitGuard);
+      const saved = await updateServerSettings((current) => {
+        current.gitCommitGuard ||= migrated;
+        return current.gitCommitGuard;
+      });
+      return { ...normalizeGitGuardSettings(saved), configured: true };
+    }
+  }
+  return { ...normalizeGitGuardSettings(), configured: false };
+}
+
+export async function readGitGuardSettings(cwd) {
+  const { mode, validateCommitMessage } = await readGitGuardSettingsState(cwd);
+  return { mode, validateCommitMessage };
 }
 
 export async function readGitGuardMode(cwd) {
@@ -29,7 +52,7 @@ export async function readGitGuardMode(cwd) {
 
 export async function setGitGuardMode(cwd, mode) {
   if (!GIT_GUARD_MODES.includes(mode)) throw new Error(`invalid gitCommitGuard mode: ${mode}`);
-  return updateSettingsFile(cwd, (settings) => {
+  return updateServerSettings((settings) => {
     settings.gitCommitGuard = { ...(settings.gitCommitGuard || {}), mode };
     return settings.gitCommitGuard;
   });
@@ -38,7 +61,7 @@ export async function setGitGuardMode(cwd, mode) {
 export async function setGitGuardSettings(cwd, { mode, validateCommitMessage }) {
   if (!GIT_GUARD_MODES.includes(mode)) throw new Error(`invalid gitCommitGuard mode: ${mode}`);
   if (typeof validateCommitMessage !== 'boolean') throw new Error('validateCommitMessage must be a boolean');
-  return updateSettingsFile(cwd, (settings) => {
+  return updateServerSettings((settings) => {
     settings.gitCommitGuard = {
       ...(settings.gitCommitGuard || {}),
       mode,
@@ -52,12 +75,22 @@ export async function setGitGuardSettings(cwd, { mode, validateCommitMessage }) 
 // a `gh pr create`/`gh pr edit` (PR body line) - the two places these
 // attribution phrases actually end up in this project's workflow.
 const COMMIT_SHAPE_RE = /\bgit(?:\.exe)?(?:\s+(?:-[^\s]+)(?:\s+(?:"[^"]*"|'[^']*'|\S+))?)*\s+commit\b|\bgh\s+pr\s+(create|edit)\b/i;
-const CO_AUTHORED_RE = /co-authored-by/i;
-const GENERATED_WITH_RE = /generated\s+with\s+claude\s+code/i;
+const CO_AUTHORED_RE = /\bco-authored[-\s]+by\b/i;
+// Keep Claude Code's existing footer verbatim and recognize common attribution
+// wording for current providers plus provider-level labels that survive a
+// product-name change (e.g. Anthropic instead of Claude Code).
+const GENERATED_WITH_CLAUDE_CODE_RE = /generated\s+with\s+claude\s+code/i;
+const AI_PROVIDER_ATTRIBUTION_RE = /\b(?:generated|created|written|authored)\s+(?:with|by)\s+(?:(?:the\s+)?(?:claude|anthropic|codex|openai|grok|xai|gemini|google|copilot|microsoft|mistral|deepseek|llama|meta)(?:\s+(?:claude|code|cli|assistant|ai))?|(?:an?\s+)?(?:ai|assistant|language\s+model))\b/i;
 
-// This is intentionally a command-text check, not a shell parser. The Bash
-// hook receives the command string, so matching common git global options and
-// git.exe keeps ordinary direct, -C, and PowerShell invocations covered.
+function hasAiAttribution(text) {
+  return CO_AUTHORED_RE.test(text)
+    || GENERATED_WITH_CLAUDE_CODE_RE.test(text)
+    || AI_PROVIDER_ATTRIBUTION_RE.test(text);
+}
+
+// This is intentionally a command-text check, not a shell parser. Matching
+// common git global options and git.exe keeps ordinary direct, -C, and
+// PowerShell invocations covered.
 const GIT_COMMIT_RE = /\bgit(?:\.exe)?(?:\s+(?:-[^\s]+)(?:\s+(?:"[^"]*"|'[^']*'|\S+))?)*\s+commit\b/i;
 const GIT_COMMIT_GLOBAL_RE = new RegExp(GIT_COMMIT_RE.source, 'gi');
 
@@ -78,7 +111,7 @@ function shellWords(text) {
     }
     if (quote === 'double') {
       if (ch === '"') quote = null;
-      else if (ch === '\\' && i + 1 < text.length) word += text[++i];
+      else if (ch === '\\' && i + 1 < text.length && /["\\$`]/.test(text[i + 1])) word += text[++i];
       else word += ch;
       continue;
     }
@@ -86,6 +119,13 @@ function shellWords(text) {
       quote = ch === "'" ? 'single' : 'double';
     } else if (ch === '\\' && i + 1 < text.length) {
       word += text[++i];
+    } else if (ch === '\n' || ch === '\r') {
+      if (word) {
+        words.push(word);
+        word = '';
+      }
+      if (words[words.length - 1] !== ';') words.push(';');
+      if (ch === '\r' && text[i + 1] === '\n') i += 1;
     } else if (/\s/.test(ch)) {
       if (word) {
         words.push(word);
@@ -105,6 +145,94 @@ function shellWords(text) {
   if (quote) return null;
   if (word) words.push(word);
   return words;
+}
+
+export function commandHasGitPush(command, depth = 0) {
+  if (typeof command !== 'string' || depth > 3) return false;
+  const words = shellWords(command);
+  if (!words) return false;
+  const boundaries = new Set(['&', '|', ';']);
+  const valueOptions = new Set(['-c', '-C', '--config-env', '--exec-path', '--git-dir', '--namespace', '--work-tree']);
+  let atCommandStart = true;
+
+  for (let i = 0; i < words.length; i += 1) {
+    const word = words[i];
+    if (boundaries.has(word)) {
+      atCommandStart = true;
+      continue;
+    }
+    if (!atCommandStart) continue;
+
+    let executableIndex = i;
+    while (executableIndex < words.length) {
+      const prefix = String(words[executableIndex]).toLowerCase();
+      if (/^(?:command|exec|nohup)$/.test(prefix)) {
+        executableIndex += 1;
+        continue;
+      }
+      if (prefix === 'sudo') {
+        executableIndex += 1;
+        while (executableIndex < words.length && words[executableIndex].startsWith('-')) {
+          const option = words[executableIndex++].toLowerCase();
+          if (['-u', '--user', '-g', '--group', '-h', '--host', '-p', '--prompt', '-c', '--close-from', '-r', '--role', '-t', '--type', '-d', '--chdir'].includes(option)) executableIndex += 1;
+          else if (option === '--') break;
+        }
+        continue;
+      }
+      if (prefix === 'env') {
+        executableIndex += 1;
+        while (executableIndex < words.length) {
+          const option = String(words[executableIndex]).toLowerCase();
+          if (/^[a-z_][a-z0-9_]*=/.test(option)) executableIndex += 1;
+          else if (['-u', '--unset', '-c', '--chdir'].includes(option)) executableIndex += 2;
+          else if (option.startsWith('-')) executableIndex += 1;
+          else break;
+        }
+        continue;
+      }
+      if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(words[executableIndex])) {
+        executableIndex += 1;
+        continue;
+      }
+      break;
+    }
+
+    const executable = String(words[executableIndex] || '').split(/[\\/]/).pop().toLowerCase();
+    if (['bash', 'cmd', 'dash', 'fish', 'powershell', 'pwsh', 'sh', 'zsh'].includes(executable)) {
+      const commandFlags = new Set(['-c', '-command', '-commandwithargs', '/c', '/k']);
+      for (let j = executableIndex + 1; j < words.length && !boundaries.has(words[j]); j += 1) {
+        if (commandFlags.has(String(words[j]).toLowerCase()) && words[j + 1]) {
+          let end = j + 1;
+          while (end < words.length && !boundaries.has(words[end])) end += 1;
+          const shellCommand = ['cmd', 'powershell', 'pwsh'].includes(executable)
+            ? words.slice(j + 1, end).join(' ')
+            : words[j + 1];
+          if (commandHasGitPush(shellCommand, depth + 1)) return true;
+          break;
+        }
+      }
+    }
+    if (executable !== 'git' && executable !== 'git.exe') {
+      atCommandStart = false;
+      continue;
+    }
+
+    for (let j = executableIndex + 1; j < words.length && !boundaries.has(words[j]); j += 1) {
+      const arg = words[j];
+      if (valueOptions.has(arg)) {
+        j += 1;
+        continue;
+      }
+      if (arg.startsWith('--git-dir=') || arg.startsWith('--work-tree=')
+        || arg.startsWith('--namespace=') || arg.startsWith('--exec-path=')
+        || arg.startsWith('--config-env=')) continue;
+      if (arg.startsWith('-')) continue;
+      if (arg.toLowerCase() === 'push') return true;
+      break;
+    }
+    atCommandStart = false;
+  }
+  return false;
 }
 
 function commitArgs(command) {
@@ -160,7 +288,7 @@ export function validateScopedCommitMessage(message) {
   if (typeof message !== 'string' || !message.trim()) return { valid: false, reason: 'the commit message is empty' };
   const normalized = message.replace(/\r\n?/g, '\n').replace(/\n+$/, '');
   if (normalized.includes('—')) return { valid: false, reason: 'em dashes are not allowed' };
-  if (CO_AUTHORED_RE.test(normalized) || GENERATED_WITH_RE.test(normalized)) {
+  if (hasAiAttribution(normalized)) {
     return { valid: false, reason: 'AI attribution text is not allowed' };
   }
   const lines = normalized.split('\n');
@@ -199,13 +327,37 @@ export async function validateCommitCommand(command, cwd) {
   return { checked: true, ...result };
 }
 
+export function shellCommandFromToolInput(input, depth = 0) {
+  if (typeof input === 'string') return input;
+  if (!input || typeof input !== 'object' || depth > 2) return null;
+  for (const key of ['command', 'cmd', 'commandLine', 'shellCommand', 'script']) {
+    if (typeof input[key] === 'string') return input[key];
+  }
+  for (const key of ['input', 'arguments', 'parameters', 'rawInput']) {
+    const nested = shellCommandFromToolInput(input[key], depth + 1);
+    if (nested) return nested;
+  }
+  return null;
+}
+
+export async function evaluateGitGuardCommand(command, cwd) {
+  const guard = await readGitGuardSettings(cwd);
+  if (commandTripsGuard(command, guard.mode)) {
+    return { blocked: true, reason: 'the command contains AI attribution text' };
+  }
+  if (guard.mode === 'off' || !guard.validateCommitMessage) return { blocked: false };
+  const result = await validateCommitCommand(command, cwd);
+  return result.checked && !result.valid
+    ? { blocked: true, reason: result.reason }
+    : { blocked: false };
+}
+
 // Pure text check, deliberately not shell-aware: doesn't matter whether the
-// command text came from bash quoting, PowerShell here-strings, or cmd.exe
-// - as long as the literal phrase text is somewhere in the string Claude
-// sent to the Bash tool, this matches regardless of platform/shell.
+// command text came from bash quoting, PowerShell here-strings, or cmd.exe -
+// as long as the literal phrase is in the command string, this matches.
 export function commandTripsGuard(command, mode) {
   if (mode === 'off' || typeof command !== 'string') return false;
-  const hasGuardedPhrase = CO_AUTHORED_RE.test(command) || GENERATED_WITH_RE.test(command);
+  const hasGuardedPhrase = hasAiAttribution(command);
   if (!hasGuardedPhrase) return false;
   if (mode === 'all') return true;
   return COMMIT_SHAPE_RE.test(command); // mode === 'commit'

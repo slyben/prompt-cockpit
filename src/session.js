@@ -5,6 +5,7 @@ import { query } from '@anthropic-ai/claude-agent-sdk';
 import { AUTO_ALLOW_MODES } from './permissions.js';
 import {
   readGitGuardSettings,
+  commandHasGitPush,
   commandTripsGuard,
   validateCommitCommand,
 } from './git-commit-guard.js';
@@ -165,6 +166,7 @@ export function startSession({ cwd, resume, model, effort, maxThinkingTokens, pe
   let currentMode = permissionMode || 'default';
   const resultEpoch = createResultEpochTracker();
   const pendingApprovals = new Map(); // requestId -> { resolve(PermissionResult), toolName }
+  const pendingGitPushApprovals = new Map(); // requestId -> resolve(allow: boolean)
   // MCP "needs-auth" badge - serverName -> { url, message, elicitationId }.
   // Populated by onElicitation when a server asks for URL-mode auth,
   // drained on `elicitation_complete`. Exposed via getMcpAuthPending() so
@@ -254,19 +256,51 @@ export function startSession({ cwd, resume, model, effort, maxThinkingTokens, pe
         onMcpAuthRequest?.({ serverName: request.serverName, url: request.url, message: request.message });
         return { action: 'accept' };
       },
-      // Deliberately a PreToolUse hook, not another canUseTool check: the
-      // SDK skips canUseTool in acceptEdits/bypassPermissions/dontAsk/auto
-      // modes, so a guard there would stop applying on mode cycling. Reads
-      // gitCommitGuard fresh from settings.local.json on every Bash call
-      // so a settings change takes effect immediately, not on restart.
+      // Keep the guard in Cockpit's SDK callback rather than user-managed
+      // Claude settings. Read the server-wide value on every Bash call so a
+      // settings change takes effect immediately, not on restart.
       hooks: {
         PreToolUse: [
           {
             matcher: 'Bash',
             hooks: [
               async (hookInput) => {
-                const guard = await readGitGuardSettingsImpl(cwd).catch(() => ({ mode: 'all', validateCommitMessage: false }));
                 const command = hookInput.tool_input?.command;
+                if (commandHasGitPush(command)) {
+                  const requestId = randomUUID();
+                  const allowPush = await new Promise((resolve) => {
+                    if (!onApprovalRequest) {
+                      resolve(false);
+                      return;
+                    }
+                    pendingGitPushApprovals.set(requestId, resolve);
+                    try {
+                      onApprovalRequest({
+                        requestId,
+                        approvalKind: 'git-push',
+                        toolName: 'GitPush',
+                        displayName: 'Git push',
+                        title: 'Review this Git push',
+                        input: { command, cwd },
+                      });
+                    } catch {
+                      pendingGitPushApprovals.delete(requestId);
+                      resolve(false);
+                    }
+                  });
+                  if (!allowPush) {
+                    return {
+                      continue: true,
+                      hookSpecificOutput: {
+                        hookEventName: 'PreToolUse',
+                        permissionDecision: 'deny',
+                        permissionDecisionReason: 'The Git push was blocked in Cockpit.',
+                      },
+                    };
+                  }
+                }
+
+                const guard = await readGitGuardSettingsImpl(cwd).catch(() => ({ mode: 'all', validateCommitMessage: false }));
                 const tripsAttributionGuard = commandTripsGuard(command, guard.mode);
                 const commitValidation = guard.mode !== 'off' && guard.validateCommitMessage
                   ? await validateCommitCommandImpl(command, cwd).catch((err) => ({
@@ -282,7 +316,7 @@ export function startSession({ cwd, resume, model, effort, maxThinkingTokens, pe
                     hookSpecificOutput: {
                       hookEventName: 'PreToolUse',
                       permissionDecision: 'deny',
-                      permissionDecisionReason: `Blocked by this project's git commit guard: ${commitValidation.reason}. Follow the /commit skill's scoped format and retry.`,
+                      permissionDecisionReason: `Blocked by Cockpit's git commit guard: ${commitValidation.reason}. Follow the scoped format and retry.`,
                     },
                   };
                 }
@@ -292,8 +326,8 @@ export function startSession({ cwd, resume, model, effort, maxThinkingTokens, pe
                     hookEventName: 'PreToolUse',
                     permissionDecision: 'deny',
                     permissionDecisionReason: guard.mode === 'all'
-                      ? 'Blocked by this project\'s git commit guard: this command contains a Co-Authored-By trailer or a "Generated with Claude Code" line. Retry without it - do not try to route around this (e.g. writing the message to a file first). This is a project policy set by the human user; only they can change or disable it, in Settings > General > Git commit guard.'
-                      : 'Blocked by this project\'s git commit guard: this commit/PR includes a Co-Authored-By trailer or a "Generated with Claude Code" line. Retry without it - do not try to route around this (e.g. writing the message to a file first). This is a project policy set by the human user; only they can change or disable it, in Settings > General > Git commit guard.',
+                      ? 'Blocked by Cockpit\'s git commit guard: this command contains AI attribution text. Retry without the attribution.'
+                      : 'Blocked by Cockpit\'s git commit guard: this commit or PR includes AI attribution text. Retry without the attribution.',
                   },
                 };
               },
@@ -489,6 +523,8 @@ export function startSession({ cwd, resume, model, effort, maxThinkingTokens, pe
     // queue-panel update if close() runs from a path that doesn't
     // immediately tear down the registry row.
     drainLocalQueue();
+    for (const resolve of pendingGitPushApprovals.values()) resolve(false);
+    pendingGitPushApprovals.clear();
     inputQueue.close();
     handle.interrupt?.().catch(() => {});
   }
@@ -525,6 +561,12 @@ export function startSession({ cwd, resume, model, effort, maxThinkingTokens, pe
   // tells the caller (via the returned `scope`) to persist it, since this
   // module has no filesystem knowledge of its own.
   function resolveApproval(requestId, decision) {
+    const gitPushResolve = pendingGitPushApprovals.get(requestId);
+    if (gitPushResolve) {
+      pendingGitPushApprovals.delete(requestId);
+      gitPushResolve(decision?.behavior === 'allow');
+      return { resolved: true, toolName: 'GitPush', scope: null };
+    }
     const entry = pendingApprovals.get(requestId);
     if (!entry) return false;
     pendingApprovals.delete(requestId);
