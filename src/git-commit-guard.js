@@ -147,6 +147,29 @@ function shellWords(text) {
   return words;
 }
 
+function hereDocumentMessage(text) {
+  const declaration = /(?<!<)<<(-?)(?!<)\s*(?:'([^'\r\n]+)'|"([^"\r\n]+)"|([^\s;|&()<>]+))/g;
+  let match;
+  while ((match = declaration.exec(text))) {
+    const delimiter = match[2] || match[3] || match[4];
+    const bodyStart = text.indexOf('\n', declaration.lastIndex);
+    if (!delimiter || bodyStart < 0) return null;
+
+    const lines = text.slice(bodyStart + 1).split(/\r?\n/);
+    const stripTabs = Boolean(match[1]);
+    const end = lines.findIndex((line) => (stripTabs ? line.replace(/^\t+/, '') : line) === delimiter);
+    if (end < 0) return null;
+
+    const bodyLines = lines.slice(0, end)
+      .map((line) => (stripTabs ? line.replace(/^\t+/, '') : line));
+    const body = bodyLines.join('\n');
+    const quotedDelimiter = Boolean(match[2] || match[3]);
+    if (!quotedDelimiter && /[$`\\]/.test(body)) return null;
+    return body;
+  }
+  return null;
+}
+
 export function commandHasGitPush(command, depth = 0) {
   if (typeof command !== 'string' || depth > 3) return false;
   const words = shellWords(command);
@@ -314,14 +337,25 @@ export async function validateCommitCommand(command, cwd) {
   if (matches.length > 1) return { checked: true, valid: false, reason: 'multiple git commit commands must be run separately' };
   const args = commitArgs(command);
   if (args.error) return { checked: true, valid: false, reason: args.error };
+  const commitMatch = matches[0];
+  const commitTail = command.slice(commitMatch.index + commitMatch[0].length);
+  const heredoc = hereDocumentMessage(commitTail);
   let message = args.message;
   if (args.messageFile) {
-    if (args.messageFile === '-') return { checked: true, valid: false, reason: 'stdin commit messages cannot be inspected' };
-    try {
-      message = await readFile(path.resolve(cwd || process.cwd(), args.messageFile), 'utf8');
-    } catch {
-      return { checked: true, valid: false, reason: `cannot read commit message file ${args.messageFile}` };
+    if (args.messageFile === '-' || /^<\(\s*cat\b/i.test(args.messageFile)) {
+      if (heredoc === null) return { checked: true, valid: false, reason: 'stdin commit messages cannot be inspected' };
+      message = heredoc;
+    } else {
+      try {
+        message = await readFile(path.resolve(cwd || process.cwd(), args.messageFile), 'utf8');
+      } catch {
+        return { checked: true, valid: false, reason: `cannot read commit message file ${args.messageFile}` };
+      }
     }
+  } else if (message && /(?:^|\s)(?:-m|--message)(?:\s+|=)?"?\$\(\s*cat\b/i.test(commitTail) && heredoc !== null) {
+    // Inspect the body used by a common `-m "$(cat <<'EOF' ... EOF)"` form
+    // instead of validating the literal shell substitution as the title.
+    message = heredoc;
   }
   const result = validateScopedCommitMessage(message);
   return { checked: true, ...result };
