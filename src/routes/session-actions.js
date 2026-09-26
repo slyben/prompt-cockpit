@@ -31,6 +31,26 @@ class RouteError extends Error {
 // value (JSON-responded as 200) or throws - a RouteError for a specific
 // status/body, or anything else for the generic 500 { error } shape.
 const ACTIONS = {
+  'POST reset': async ({ id, row }) => {
+    // Capture the live row, not the cwd-level defaults file: another tab may
+    // have changed that shared file since this session last changed its own
+    // settings. The replacement is created before the old row is closed so a
+    // failed provider spawn leaves the current session usable.
+    const replacement = registry.resetSession(id);
+    try {
+      await seedSessionDefaults(replacement, {
+        maxThinkingTokens: row.maxThinkingTokens,
+        thinkingDisplay: row.thinkingDisplay,
+        autoContinue: row.autoContinue,
+      });
+    } catch (err) {
+      registry.closeSession(replacement.id);
+      throw err;
+    }
+    registry.closeSession(id);
+    return { id: replacement.id, token: replacement.token };
+  },
+
   'POST mode': async ({ id, req }) => {
     const body = await readJsonBody(req);
     if (!PERMISSION_MODES.includes(body.mode)) {

@@ -147,6 +147,11 @@ test('startSession appends the /ask system-prompt anchor to the claude_code pres
   assert.match(systemPrompt.append, /\/ask/);
 });
 
+test('startSession passes an explicit thinking budget to query creation', () => {
+  const { getOptions } = startFakeSession({ maxThinkingTokens: 10000 });
+  assert.equal(getOptions().maxThinkingTokens, 10000);
+});
+
 test('a conversation_reset message (/clear) resets turnIndex back to 1, not the pre-clear offset', async () => {
   // Regression test for the residual rewind edge: /clear starts a fresh
   // conversation, so turnCounter has to restart with it or every rewind

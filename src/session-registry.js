@@ -25,7 +25,7 @@ export const setSessionHandshake = delegation.setSessionHandshake;
 export const isSessionTrusted = delegation.isSessionTrusted;
 export const delegateTask = delegation.delegateTask;
 
-export function createSession({ cwd, resume, name, model, permissionMode, history, provider, effort, startSessionImpl }) {
+export function createSession({ cwd, resume, name, model, permissionMode, history, provider, effort, maxThinkingTokens, thinkingDisplay, autoContinue, startSessionImpl }) {
   // Authoritative uniqueness check for delegation names - this function has
   // no `await` before it and none until sessions.set() below, closing the
   // TOCTOU window server.js's own pre-check has (that check runs after
@@ -54,8 +54,8 @@ export function createSession({ cwd, resume, name, model, permissionMode, histor
     provider: resolvedProvider,
     model: model || null,
     effort: effort || null,
-    maxThinkingTokens: null, // set via setMaxThinkingTokens - null means "no forced budget" (SDK default), which resolves to adaptive thinking ON for Opus5/Sonnet5/Fable5, not off; 0 is the real "Off"
-    thinkingDisplay: null, // 'summarized' | 'omitted' | null (SDK default when thinking is on)
+    maxThinkingTokens: maxThinkingTokens ?? null, // set via setMaxThinkingTokens - null means "no forced budget" (SDK default), which resolves to adaptive thinking ON for Opus5/Sonnet5/Fable5, not off; 0 is the real "Off"
+    thinkingDisplay: thinkingDisplay ?? null, // 'summarized' | 'omitted' | null (SDK default when thinking is on)
     state: 'starting', // starting | idle | running | error | closed
     mode: permissionMode || 'default',
     // Native conversation id reported by the active provider. toSummary()
@@ -102,7 +102,7 @@ export function createSession({ cwd, resume, name, model, permissionMode, histor
     // the moment a 'rejected' rate_limit_event lands (the hard stop, not the
     // proactive 5h/7d utilization display above) and cleared once the limit
     // allows again or auto-continue actually fires.
-    autoContinue: false,
+    autoContinue: Boolean(autoContinue),
     rateLimitHit: null, // { resetsAt, rateLimitType } | null
     autoContinueTimer: null,
     // Throttling state for scheduleUsageBroadcast below - a Grok reply can
@@ -162,6 +162,7 @@ export function createSession({ cwd, resume, name, model, permissionMode, histor
     resume,
     model,
     effort: row.effort,
+    maxThinkingTokens: row.maxThinkingTokens,
     permissionMode: row.mode,
     // Live turnIndex (session.js's turnCounter) must continue where the
     // resumed transcript's real user turns leave off, not restart at 0 -
@@ -187,6 +188,27 @@ export function createSession({ cwd, resume, name, model, permissionMode, histor
   });
 
   return row;
+}
+
+// Build a fresh, non-resumed session with the live configuration of an
+// existing row. The caller closes the old row after the replacement is ready,
+// so a failed spawn does not destroy the session the user was trying to reset.
+// `startSessionImpl` remains injectable for registry tests; production callers
+// leave it unset and createSession selects the provider's real starter.
+export function resetSession(id, { startSessionImpl } = {}) {
+  const row = sessions.get(id);
+  if (!row) throw new Error(`unknown session: ${id}`);
+  return createSession({
+    cwd: row.cwd,
+    model: row.model,
+    provider: row.provider,
+    effort: row.effort,
+    maxThinkingTokens: row.maxThinkingTokens,
+    thinkingDisplay: row.thinkingDisplay,
+    autoContinue: row.autoContinue,
+    permissionMode: row.mode,
+    startSessionImpl,
+  });
 }
 
 export function get(id) {

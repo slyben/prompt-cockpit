@@ -866,15 +866,24 @@ async function closeSession() {
 async function resetSession() {
   if (!sessionId) return;
   if (!confirm('Reset this session? Ends the current live process and starts a new one in the same folder with the same settings. The old transcript stays on disk (resumable later).')) return;
-  const cwd = currentCwd;
-  const model = currentModel;
-  const provider = currentProvider;
-  const effort = effortBtn.value || undefined;
-  const thinkingBudget = thinkingBudgetBtn.value || undefined;
   intentionalClose = true;
-  await fetch(`/api/sessions/${sessionId}`, { method: 'DELETE', headers: authHeaders() });
-  sessionListPane.refreshCount();
-  await startSession({ cwd, model, provider, effort, thinkingBudget });
+  try {
+    const res = await fetch(`/api/sessions/${sessionId}/reset`, {
+      method: 'POST',
+      headers: authHeaders(),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      intentionalClose = false;
+      alert(`could not reset session: ${err.error || res.statusText}`);
+      return;
+    }
+    const { id, token } = await res.json();
+    connect(id, token);
+  } catch (err) {
+    intentionalClose = false;
+    alert(`could not reset session: ${err.message || err}`);
+  }
 }
 
 // Cog button opens the modal instead of Close session sitting directly in

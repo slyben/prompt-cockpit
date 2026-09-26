@@ -156,7 +156,7 @@ function createInputQueue() {
  * setMode/resolveApproval and queue-pane ops (listQueue/removeQueued/
  * reorderQueue/sendNow). `onApprovalRequest` fires for any gated tool.
  */
-export function startSession({ cwd, resume, model, effort, permissionMode, turnIndexOffset = 0, onMessage, onStateChange, onError, onApprovalRequest, onQueueChange, onMcpAuthRequest, onMcpAuthResolved, queryImpl = query }) {
+export function startSession({ cwd, resume, model, effort, maxThinkingTokens, permissionMode, turnIndexOffset = 0, onMessage, onStateChange, onError, onApprovalRequest, onQueueChange, onMcpAuthRequest, onMcpAuthResolved, queryImpl = query }) {
   const inputQueue = createInputQueue();
   let currentMode = permissionMode || 'default';
   const resultEpoch = createResultEpochTracker();
@@ -201,6 +201,10 @@ export function startSession({ cwd, resume, model, effort, permissionMode, turnI
       // overall response thoroughness, thinking controls whether/how
       // reasoning happens at all. Undefined leaves the SDK/model default.
       effort: effort || undefined,
+      // Supplying this at query creation matters for reset: unlike the
+      // post-start control request, it cannot be lost while the new query is
+      // still initializing. null means the SDK/model default, so omit it.
+      ...(maxThinkingTokens != null ? { maxThinkingTokens } : {}),
       permissionMode: currentMode,
       systemPrompt: { type: 'preset', preset: 'claude_code', append: ASK_SYSTEM_PROMPT_APPEND },
       enableFileCheckpointing: true,

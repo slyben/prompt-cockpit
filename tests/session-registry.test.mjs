@@ -18,6 +18,35 @@ test('createSession issues a token that checkToken accepts, and only that token'
   assert.equal(registry.checkToken('unknown-id', row.token), false);
 });
 
+test('resetSession creates a fresh row with the old live model, effort, thinking, and mode', () => {
+  registry._reset();
+  const oldImpl = fakeStartSession();
+  const old = registry.createSession({
+    cwd: '/tmp',
+    provider: 'claude',
+    model: 'claude-sonnet-5',
+    effort: 'xhigh',
+    permissionMode: 'plan',
+    maxThinkingTokens: 10000,
+    thinkingDisplay: 'summarized',
+    autoContinue: true,
+    startSessionImpl: oldImpl,
+  });
+  const replacementImpl = fakeStartSession();
+  const replacement = registry.resetSession(old.id, { startSessionImpl: replacementImpl });
+
+  assert.notEqual(replacement.id, old.id);
+  assert.equal(replacement.model, 'claude-sonnet-5');
+  assert.equal(replacement.effort, 'xhigh');
+  assert.equal(replacement.maxThinkingTokens, 10000);
+  assert.equal(replacement.thinkingDisplay, 'summarized');
+  assert.equal(replacement.autoContinue, true);
+  assert.equal(replacement.mode, 'plan');
+  assert.equal(replacementImpl.lastOpts.model, 'claude-sonnet-5');
+  assert.equal(replacementImpl.lastOpts.effort, 'xhigh');
+  assert.equal(replacementImpl.lastOpts.maxThinkingTokens, 10000);
+});
+
 test('attachClient sends hello then replays buffered messages', () => {
   registry._reset();
   const startSessionImpl = fakeStartSession();
