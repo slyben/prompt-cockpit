@@ -152,6 +152,22 @@ test('startSession passes an explicit thinking budget to query creation', () => 
   assert.equal(getOptions().maxThinkingTokens, 10000);
 });
 
+test('Claude commit guard rejects a commit message outside the scoped format', async () => {
+  const { getOptions } = startFakeSession({
+    readGitGuardSettingsImpl: async () => ({ mode: 'all', validateCommitMessage: true }),
+    validateCommitCommandImpl: async () => ({
+      checked: true,
+      valid: false,
+      reason: 'the title must use "scope: description" format',
+    }),
+  });
+  const options = getOptions();
+  const bashHook = options.hooks.PreToolUse.find((entry) => entry.matcher === 'Bash').hooks[0];
+  const direct = await bashHook({ tool_input: { command: 'git commit -m "fix"' } });
+  assert.equal(direct.hookSpecificOutput.permissionDecision, 'deny');
+  assert.match(direct.hookSpecificOutput.permissionDecisionReason, /scoped format/);
+});
+
 test('a conversation_reset message (/clear) resets turnIndex back to 1, not the pre-clear offset', async () => {
   // Regression test for the residual rewind edge: /clear starts a fresh
   // conversation, so turnCounter has to restart with it or every rewind

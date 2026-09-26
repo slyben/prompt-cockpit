@@ -3,7 +3,11 @@
 import { randomUUID } from 'node:crypto';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { AUTO_ALLOW_MODES } from './permissions.js';
-import { readGitGuardMode, commandTripsGuard } from './git-commit-guard.js';
+import {
+  readGitGuardSettings,
+  commandTripsGuard,
+  validateCommitCommand,
+} from './git-commit-guard.js';
 import { createResultEpochTracker } from './result-epoch.js';
 
 // System-prompt anchor for the /ask cross-session delegation feature -
@@ -156,7 +160,7 @@ function createInputQueue() {
  * setMode/resolveApproval and queue-pane ops (listQueue/removeQueued/
  * reorderQueue/sendNow). `onApprovalRequest` fires for any gated tool.
  */
-export function startSession({ cwd, resume, model, effort, maxThinkingTokens, permissionMode, turnIndexOffset = 0, onMessage, onStateChange, onError, onApprovalRequest, onQueueChange, onMcpAuthRequest, onMcpAuthResolved, queryImpl = query }) {
+export function startSession({ cwd, resume, model, effort, maxThinkingTokens, permissionMode, turnIndexOffset = 0, onMessage, onStateChange, onError, onApprovalRequest, onQueueChange, onMcpAuthRequest, onMcpAuthResolved, queryImpl = query, readGitGuardSettingsImpl = readGitGuardSettings, validateCommitCommandImpl = validateCommitCommand }) {
   const inputQueue = createInputQueue();
   let currentMode = permissionMode || 'default';
   const resultEpoch = createResultEpochTracker();
@@ -261,15 +265,33 @@ export function startSession({ cwd, resume, model, effort, maxThinkingTokens, pe
             matcher: 'Bash',
             hooks: [
               async (hookInput) => {
-                const mode = await readGitGuardMode(cwd).catch(() => 'all');
+                const guard = await readGitGuardSettingsImpl(cwd).catch(() => ({ mode: 'all', validateCommitMessage: false }));
                 const command = hookInput.tool_input?.command;
-                if (!commandTripsGuard(command, mode)) return { continue: true };
+                const tripsAttributionGuard = commandTripsGuard(command, guard.mode);
+                const commitValidation = guard.mode !== 'off' && guard.validateCommitMessage
+                  ? await validateCommitCommandImpl(command, cwd).catch((err) => ({
+                    checked: true,
+                    valid: false,
+                    reason: `could not validate the commit message: ${err.message || err}`,
+                  }))
+                  : { checked: false, valid: true };
+                if (!tripsAttributionGuard && (!commitValidation.checked || commitValidation.valid)) return { continue: true };
+                if (!commitValidation.valid) {
+                  return {
+                    continue: true,
+                    hookSpecificOutput: {
+                      hookEventName: 'PreToolUse',
+                      permissionDecision: 'deny',
+                      permissionDecisionReason: `Blocked by this project's git commit guard: ${commitValidation.reason}. Follow the /commit skill's scoped format and retry.`,
+                    },
+                  };
+                }
                 return {
                   continue: true,
                   hookSpecificOutput: {
                     hookEventName: 'PreToolUse',
                     permissionDecision: 'deny',
-                    permissionDecisionReason: mode === 'all'
+                    permissionDecisionReason: guard.mode === 'all'
                       ? 'Blocked by this project\'s git commit guard: this command contains a Co-Authored-By trailer or a "Generated with Claude Code" line. Retry without it - do not try to route around this (e.g. writing the message to a file first). This is a project policy set by the human user; only they can change or disable it, in Settings > General > Git commit guard.'
                       : 'Blocked by this project\'s git commit guard: this commit/PR includes a Co-Authored-By trailer or a "Generated with Claude Code" line. Retry without it - do not try to route around this (e.g. writing the message to a file first). This is a project policy set by the human user; only they can change or disable it, in Settings > General > Git commit guard.',
                   },

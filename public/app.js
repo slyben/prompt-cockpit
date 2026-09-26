@@ -960,6 +960,7 @@ const settings = initSettings({
 // session-controls-panel.js; this supplies the sessionId-bound fetchers.
 const sessionControlsPanel = initSessionControlsPanel({
   gitGuardModeEl: document.getElementById('gitGuardModeBtn'),
+  gitCommitMessageValidationEl: document.getElementById('gitCommitMessageValidationBtn'),
   gitGuardErrorEl: document.getElementById('gitGuardError'),
   getGitGuardMode: async () => {
     if (!sessionId) return null;
@@ -970,11 +971,11 @@ const sessionControlsPanel = initSessionControlsPanel({
       return null; // offline/blocked - select just keeps showing its last-known value
     }
   },
-  setGitGuardMode: async (mode) => {
+  setGitGuardMode: async ({ mode, validateCommitMessage }) => {
     const res = await fetch(`/api/sessions/${sessionId}/git-guard`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', ...authHeaders() },
-      body: JSON.stringify({ mode }),
+      body: JSON.stringify({ mode, validateCommitMessage }),
     });
     if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || 'save failed');
   },

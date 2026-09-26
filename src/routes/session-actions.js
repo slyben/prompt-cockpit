@@ -8,7 +8,7 @@ import { PERMISSION_MODES } from '../permissions.js';
 import { readAllowRules, addAllowRule, removeAllowRule, formatRule } from '../permission-rules.js';
 import { setSessionTitle } from '../session-titles.js';
 import { setPluginEnabled, readEnabledPlugins } from '../plugin-settings.js';
-import { readGitGuardMode, setGitGuardMode, GIT_GUARD_MODES } from '../git-commit-guard.js';
+import { readGitGuardSettings, setGitGuardSettings, GIT_GUARD_MODES } from '../git-commit-guard.js';
 import { setSessionDefaults } from '../session-defaults.js';
 import { fileSuggestions, workspaceDiff } from '../sdk-adapter.js';
 import { respondJson, readJsonBody, extractToken } from '../http-utils.js';
@@ -152,15 +152,21 @@ const ACTIONS = {
     return { enabled: Boolean(body.enabled) };
   },
 
-  'GET git-guard': async ({ row }) => ({ mode: await readGitGuardMode(row.cwd) }),
+  'GET git-guard': async ({ row }) => readGitGuardSettings(row.cwd),
 
   'POST git-guard': async ({ row, req }) => {
     const body = await readJsonBody(req);
-    if (!GIT_GUARD_MODES.includes(body.mode)) {
+    const current = await readGitGuardSettings(row.cwd);
+    const mode = body.mode ?? current.mode;
+    const validateCommitMessage = body.validateCommitMessage ?? current.validateCommitMessage;
+    if (!GIT_GUARD_MODES.includes(mode)) {
       throw new RouteError(400, { error: `mode must be one of ${GIT_GUARD_MODES.join(', ')}` });
     }
-    await setGitGuardMode(row.cwd, body.mode);
-    return { mode: body.mode };
+    if (typeof validateCommitMessage !== 'boolean') {
+      throw new RouteError(400, { error: 'validateCommitMessage must be a boolean' });
+    }
+    await setGitGuardSettings(row.cwd, { mode, validateCommitMessage });
+    return { mode, validateCommitMessage };
   },
 
   // Pastes a handshake value onto THIS row -

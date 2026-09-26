@@ -4,6 +4,7 @@
 // session token, so both need a fresh check each time the modal opens.
 export function initSessionControlsPanel({
   gitGuardModeEl,
+  gitCommitMessageValidationEl,
   gitGuardErrorEl,
   getGitGuardMode,
   setGitGuardMode,
@@ -22,18 +23,24 @@ export function initSessionControlsPanel({
     const result = await getGitGuardMode();
     if (!result) return; // no session, or offline/blocked - select just keeps showing its last-known value
     gitGuardModeEl.value = result.mode;
+    gitCommitMessageValidationEl.checked = Boolean(result.validateCommitMessage);
   }
 
-  gitGuardModeEl.addEventListener('change', async () => {
-    const mode = gitGuardModeEl.value;
+  async function saveGitGuardSettings() {
     try {
-      await setGitGuardMode(mode);
+      await setGitGuardMode({
+        mode: gitGuardModeEl.value,
+        validateCommitMessage: gitCommitMessageValidationEl.checked,
+      });
       gitGuardErrorEl.hidden = true;
     } catch (err) {
       gitGuardErrorEl.textContent = `Couldn't save git commit guard setting: ${err.message || err}`;
       gitGuardErrorEl.hidden = false;
     }
-  });
+  }
+
+  gitGuardModeEl.addEventListener('change', saveGitGuardSettings);
+  gitCommitMessageValidationEl.addEventListener('change', saveGitGuardSettings);
 
   async function refreshHandshakeStatus() {
     handshakeErrorEl.hidden = true;

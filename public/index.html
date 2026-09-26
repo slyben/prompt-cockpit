@@ -301,7 +301,12 @@
               <option value="all">Block AI attribution anywhere</option>
               <option value="off">Off</option>
             </select>
-            <span class="hint" title="Auto-denies Bash tool calls containing a Co-Authored-By trailer or a 'Generated with Claude Code' line. 'git commit / gh pr' only checks git commit and gh pr create/edit invocations; 'anywhere' checks every Bash command for either phrase. Project-scoped (settings.local.json), takes effect on this session's next matching Bash call.">?</span>
+            <span class="hint" title="Two protections: blocks AI attribution text (Co-Authored-By or 'Generated with Claude Code') in matching Bash commands, and the checkbox below validates git commit messages against the /commit skill's scoped format (scope: description with an optional bullet body). 'git commit / gh pr' only checks git commit and gh pr create/edit invocations; 'anywhere' checks every Bash command for attribution text. Project-scoped (settings.local.json), takes effect on this session's next matching Bash call.">?</span>
+          </label>
+          <label class="settings-row">
+            <span>Validate scoped commit messages</span>
+            <input type="checkbox" id="gitCommitMessageValidationBtn" />
+            <span class="hint" title="When enabled, Claude's git commit messages must follow the /commit skill's scoped format: scope: description, with optional short bullet lines. Cockpit validates -m and -F messages and rejects editor or stdin messages it cannot inspect. This applies to Claude sessions only.">?</span>
           </label>
           <div id="gitGuardError" class="mcp-error" hidden></div>
           <div class="settings-row">
