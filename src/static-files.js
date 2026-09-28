@@ -9,8 +9,10 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 // No Node-specific imports; shared verbatim with the browser rather than
 // duplicated into public/. permissions.js is mode-cycle order;
-// stream-join.js is Grok token-join whitespace (also used by grok-messages.js).
-const SHARED_SRC_FILES = new Set(['permissions.js', 'stream-join.js']);
+// stream-join.js is Grok token-join whitespace (also used by grok-messages.js);
+// thinking-rules.js is the per-model Off/budget rules (also used by the
+// thinking/effort routes).
+const SHARED_SRC_FILES = new Set(['permissions.js', 'stream-join.js', 'thinking-rules.js']);
 
 const CONTENT_TYPES = {
   '.html': 'text/html; charset=utf-8',

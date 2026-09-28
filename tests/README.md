@@ -323,3 +323,24 @@ when `query()` is fed an `AsyncIterable` prompt, and the session hangs
 forever. It also checks the compose box's most interesting failure mode
 per the plan's Verification section - sending a second message while the
 first turn is still running queues it rather than dropping or interleaving it.
+
+## Model-aware thinking controls
+
+`src/thinking-rules.js` (shared verbatim with the browser) decides, per
+model, whether Off works (always / only at low-high effort / never) and
+whether the 4k/10k/32k presets mean anything. Unit-tested in
+`thinking-rules.test.mjs`. The `thinking` and `effort` routes reject an Off
+or effort choice the rules block; the routes and the dropdown wiring in
+`public/app.js` (`applyThinkingRules`, the "thinking on (off ignored)" badge)
+are hand-verified only - no jsdom, and the route handlers have no test
+harness.
+
+Three manual probes back the rules; none run in `npm test`, each costs a few
+cents, and from WSL they need Windows node (`node_modules` only holds the
+win32 native binary):
+
+- `thinking-default-probe.manual.mjs` - unset thinking is adaptive-on (Opus 5).
+- `thinking-off-sonnet55-probe.manual.mjs [effort]` - Off on Sonnet 5.5: works
+  at high, silently ignored at xhigh, never a 400.
+- `thinking-updates-display-probe.manual.mjs` - the SDK rejects the `updates`
+  display at runtime, so the display dropdown stays summarized/omitted.

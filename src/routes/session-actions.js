@@ -14,6 +14,7 @@ import { fileSuggestions, workspaceDiff } from '../sdk-adapter.js';
 import { respondJson, readJsonBody, extractToken } from '../http-utils.js';
 import { seedSessionDefaults } from './sessions.js';
 import { getProvider } from '../provider-registry.js';
+import { offBlockedReason, effortBlockedByOffReason } from '../thinking-rules.js';
 
 // Thrown by a handler to answer with a specific status code/body instead of
 // the dispatcher's generic 500 catch-all (see below) - the couple-dozen
@@ -260,6 +261,8 @@ const ACTIONS = {
     if (!validEfforts.includes(body.effort)) {
       throw new RouteError(400, { error: `invalid effort: ${body.effort}` });
     }
+    const offConflict = effortBlockedByOffReason(row.model, body.effort, row.maxThinkingTokens);
+    if (offConflict) throw new RouteError(400, { error: offConflict });
     await registry.setEffort(id, body.effort);
     // Persisted so the next brand-new session in this cwd inherits it - a
     // forked session already inherits effort a different way (the rewind
@@ -289,6 +292,10 @@ const ACTIONS = {
     }
     if (thinkingDisplay !== null && !['summarized', 'omitted'].includes(thinkingDisplay)) {
       throw new RouteError(400, { error: `invalid thinkingDisplay: ${thinkingDisplay}` });
+    }
+    if (maxThinkingTokens === 0) {
+      const offReason = offBlockedReason(row.model, row.effort);
+      if (offReason) throw new RouteError(400, { error: offReason });
     }
     await registry.setMaxThinkingTokens(id, maxThinkingTokens, thinkingDisplay);
     // Best-effort but awaited: persisted so the next session started or

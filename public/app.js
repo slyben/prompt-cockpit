@@ -27,6 +27,7 @@ import { initQueuePanel } from '/queue-panel.js';
 import { createPromptHistoryStore, fuzzyScore } from '/prompt-history.js';
 import { initHistorySearch } from '/history-search.js';
 import { PERMISSION_MODES } from '/permissions.js';
+import { thinkingRulesFor, offBlockedReason, effortBlockedByOffReason } from '/thinking-rules.js';
 import { createProviderCatalog, supportedEffortsForModel } from '/provider-catalog.js';
 import { createAgentLivenessTracker } from '/agent-liveness.js';
 
@@ -1079,8 +1080,13 @@ function applyModelBadge(session) {
     // Sonnet5/Fable5, off on older models). Unset effort isn't "no effort"
     // either - the SDK still picks a real tier ('high'), shown instead.
     parts.push(`${effortLabel('claude', session.effort || 'high')} effort`);
+    // Off can be stored yet not honored (e.g. Sonnet 5.5 at xhigh, or a model
+    // that always thinks) - say so instead of claiming it's off.
+    const offIgnored = session.maxThinkingTokens === 0 && offBlockedReason(currentModel, session.effort) != null;
     parts.push(
-      session.maxThinkingTokens === 0
+      offIgnored
+        ? 'thinking on (off ignored)'
+        : session.maxThinkingTokens === 0
         ? 'thinking off'
         : session.maxThinkingTokens
           ? `thinking ${formatThinkingTokens(session.maxThinkingTokens)}`
@@ -1222,6 +1228,31 @@ for (const opt of THINKING_DISPLAY_OPTIONS) {
   thinkingDisplayBtn.append(option);
 }
 
+// Per-model control state, re-applied from the last session summary whenever
+// the summary, the effort list, or the model changes (thinking-rules.js):
+// hides 4k/10k/32k where any nonzero value just means "on", disables Off where
+// it can't be honored, and disables the effort tiers that would break Off.
+let lastThinkingState = { model: null, effort: null, maxThinkingTokens: null };
+function applyThinkingRules() {
+  const { model, effort, maxThinkingTokens } = lastThinkingState;
+  const rules = thinkingRulesFor(model);
+  const offReason = offBlockedReason(model, effort);
+  for (const option of thinkingBudgetBtn.options) {
+    if (option.value === '0') {
+      // Stay enabled while it is the stored value so the select can show it.
+      option.disabled = offReason != null && thinkingBudgetBtn.value !== '0';
+      option.title = offReason || '';
+    } else if (option.value !== '') {
+      option.hidden = !rules.sizedBudgets && option.value !== thinkingBudgetBtn.value;
+    }
+  }
+  for (const option of effortBtn.options) {
+    const reason = option.value ? effortBlockedByOffReason(model, option.value, maxThinkingTokens) : null;
+    option.disabled = reason != null;
+    option.title = reason || '';
+  }
+}
+
 thinkingBudgetBtn.addEventListener('change', () => selectThinking());
 thinkingDisplayBtn.addEventListener('change', () => selectThinking());
 
@@ -1319,6 +1350,7 @@ async function refreshSettingsEffortCatalog() {
   settingsEffortModelsPending = false;
   fillSettingsEffortSelect(provider);
   if (selectedValue) effortBtn.value = selectedValue;
+  applyThinkingRules();
 }
 
 fillSettingsEffortSelect('grok'); // placeholder population before any session summary arrives
@@ -2458,6 +2490,8 @@ function applySession(session) {
   // `session.maxThinkingTokens ? ... : ''` here would render Off as Default.
   thinkingBudgetBtn.value = session.maxThinkingTokens != null ? String(session.maxThinkingTokens) : '';
   thinkingDisplayBtn.value = session.thinkingDisplay || '';
+  lastThinkingState = { model: session.model, effort: session.effort || null, maxThinkingTokens: session.maxThinkingTokens ?? null };
+  applyThinkingRules();
   applyModelBadge(session);
   // Server is the source of truth (registry.js flips this false once
   // loadEarlierHistory has nothing left) - reflects it on every summary,
