@@ -17,8 +17,8 @@ All notable changes to this project are documented here.
   format for Grok-scale (sub-dollar) bars
 - New offline `codex_usage.py`: reads Codex rollout JSONL directly for a
   cost/token report with no server or network involved
-- Pricing kept current: GPT-6 Astra/Sol/Luna, Claude Opus 5.5, Fable 5.1,
-  Mythos 5/5.1, and Grok 4.7 all added as each became available
+- Pricing kept current: GPT-6 Astra/Sol/Luna, GPT-6.1 Sol, Claude Opus 5.5,
+  Fable 5.1, Mythos 5/5.1, and Grok 4.7 all added as each became available
 
 ## [0.1.7]
 - Codex reaches feature parity with Claude and Grok: rewind (forks through
