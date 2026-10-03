@@ -2,14 +2,18 @@
 
 All notable changes to this project are documented here.
 
-## [Unreleased]
-- Claude subscription selector in the launcher: the default login folder
-  is detected from `CLAUDE_CONFIG_DIR` or `~/.claude`. Extra accounts come
-  from `claudeSubscriptions` in Cockpit's server config; the selector is
-  hidden until another account is configured. Choices are remembered per
-  browser and isolated per session.
-  Resume, history, exports, subagents, model discovery, reset, and rewind
-  keep the selected account.
+## [0.2.1]
+- Multiple Claude accounts: pick a subscription in the launcher (extra
+  accounts via `claudeSubscriptions`); sessions keep it through resume,
+  history, reset, and rewind
+- Claude and Codex 5h/7d quota in the launcher and live sessions
+- Thinking Off and token budgets gated by model
+- Reset keeps model, effort, and thinking settings
+- Folded tool groups summarize each call; settings modal is resizable
+- Optional git guard for scoped commit messages and push confirmation
+- Fixed `[]` in non-Grok model names and a storage worker exit race
+- Pricing: claude-sonnet-5-5, gpt-6.1-sol
+- Claude Agent SDK 0.3.288, ws 8.22.0
 
 ## [0.2.0]
 - Global Stats heatmap now colors cells by provider (Claude/Grok/Codex) and

@@ -92,7 +92,7 @@ Settings (gear) covers MCP servers, plugins, permission rules, and UI prefs. On 
 
 ## Status
 
-MVP1-MVP5 shipped (session in a browser, plan/rewind/`@`/diffs, reconnect, live stats, Grok backend, cross-session `/ask`). Codex is a full third provider as of 0.1.7: rewind, native MCP and plugin controls, live model discovery, and plan quota all work, and its remaining gaps (thinking budget, auto-continue, project-scoped always-allow) are ones the CLI itself does not offer. MVP6-MVP7 (Windows-hosted sessions over SSH, phone approvals) are not started.
+MVP1-MVP5 shipped (session in a browser, plan/rewind/`@`/diffs, reconnect, live stats, Grok backend, cross-session `/ask`). Codex is a full third provider as of 0.1.7: rewind, native MCP and plugin controls, live model discovery, and plan quota all work, and its remaining gaps (thinking budget, auto-continue, project-scoped always-allow) are ones the CLI itself does not offer. 0.2.1 adds multiple Claude accounts and Claude/Codex quota in the launcher. MVP6-MVP7 (Windows-hosted sessions over SSH, phone approvals) are not started.
 
 See `tests/README.md` for automated vs hand-verified coverage, and `backlog.md` for open follow-ups.
 
