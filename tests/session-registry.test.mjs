@@ -10,6 +10,7 @@ import * as registry from '../src/session-registry.js';
 import { codexNotificationToMessages } from '../src/codex-messages.js';
 import { fakeWs, fakeStartSession, pendingTurnCount, frontDelegationTag } from './test-helpers.mjs';
 import { useTestSubscriptionSettings } from './helpers/subscription-settings.mjs';
+import { getProvider } from '../src/provider-registry.js';
 
 useTestSubscriptionSettings([{ id: 'gmail', label: 'Gmail', configDir: '~/.claudegmail' }]);
 
@@ -269,7 +270,7 @@ test('a Codex turn fetches native account rate limits and broadcasts the shared 
   assert.equal(startSessionImpl.codexRateLimitsCalls, 1);
 });
 
-test('a Codex rate-limit failure backs off one query without blocking a replacement handle', async () => {
+test('a Codex rate-limit failure backs off the account, then a replacement handle can refresh it', async () => {
   registry._reset();
   const failing = fakeStartSession({
     codexRateLimits: async () => { throw new Error('temporary app-server failure'); },
@@ -290,7 +291,15 @@ test('a Codex rate-limit failure backs off one query without blocking a replacem
   registry.attachClient(second.id, ws);
   replacement.emitMessage({ type: 'result', num_turns: 1 });
   await new Promise((resolve) => setTimeout(resolve, 0));
-  assert.equal(replacement.codexRateLimitsCalls, 1, 'a replacement handle can retry after an app-server restart');
+  assert.equal(replacement.codexRateLimitsCalls || 0, 0, 'new sessions share the account backoff');
+  const now = Date.now;
+  const future = now() + 60_001;
+  Date.now = () => future;
+  try {
+    replacement.emitMessage({ type: 'result', num_turns: 1 });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  } finally { Date.now = now; }
+  assert.equal(replacement.codexRateLimitsCalls, 1, 'a replacement handle retries after the account backoff');
   assert.equal(ws.sent.filter((message) => message.type === 'cockpit:usage').at(-1).rateLimits.five_hour.utilization, 5);
 });
 
@@ -327,13 +336,61 @@ test('a finished turn fetches plan rate limits via the experimental usage API an
   assert.equal(startSessionImpl.usageExperimentalCalls, 1);
 });
 
-// This one must run after the success case above and not be followed by
-// another test relying on a fresh rate-limits fetch - the "broken" flag it
-// trips is process-wide (module-level in session-registry.js, not reset by
-// registry._reset()), same as the real thing: the experimental method
-// either exists on this SDK build or it doesn't, so one failure means every
-// session's calls fail identically for the rest of this process's life.
-test('a rejected rate-limits call is flagged broken permanently, and does not affect cost/token tracking', async () => {
+for (const provider of ['claude', 'codex']) {
+  test(`${provider} sessions share account quotas and completed turns respect the 60-second cache`, async (t) => {
+    registry._reset();
+    let reads = 0;
+    const limits = () => ({ five_hour: { utilization: 40 + ++reads } });
+    const makeSession = () => fakeStartSession(provider === 'claude'
+      ? { usageExperimental: async () => ({ rate_limits_available: true, rate_limits: limits() }) }
+      : { codexRateLimits: async () => limits() });
+    const firstImpl = makeSession();
+    const secondImpl = makeSession();
+    const first = registry.createSession({ cwd: '/tmp', provider, startSessionImpl: firstImpl });
+    const second = registry.createSession({ cwd: '/tmp/other', provider, startSessionImpl: secondImpl });
+    const firstWs = fakeWs();
+    const secondWs = fakeWs();
+    registry.attachClient(first.id, firstWs);
+    registry.attachClient(second.id, secondWs);
+    firstImpl.emitMessage({ type: 'result', num_turns: 1 });
+    secondImpl.emitMessage({ type: 'result', num_turns: 1 });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(reads, 1);
+    assert.equal(first.rateLimits.five_hour.utilization, 41);
+    assert.equal(second.rateLimits, first.rateLimits);
+    assert.deepEqual(secondWs.sent.filter((message) => message.type === 'cockpit:usage').at(-1).rateLimits, first.rateLimits);
+    const snapshot = await getProvider(provider).accountLimits();
+    assert.deepEqual(snapshot.rateLimits, first.rateLimits, 'launcher reads the same snapshot without querying');
+    const joined = registry.createSession({ cwd: '/tmp/joined', provider, startSessionImpl: fakeStartSession() });
+    assert.equal(joined.rateLimits, first.rateLimits, 'new sessions inherit cached quota immediately');
+    secondImpl.emitMessage({ type: 'result', num_turns: 1 });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(reads, 1, 'another session completing a turn reuses the fresh value');
+    const originalNow = Date.now;
+    Date.now = () => snapshot.fetchedAtMs + 60_000;
+    t.after(() => { Date.now = originalNow; });
+    secondImpl.emitMessage({ type: 'result', num_turns: 1 });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(reads, 2);
+    assert.equal(first.rateLimits.five_hour.utilization, 42);
+    assert.equal(joined.rateLimits, first.rateLimits);
+  });
+}
+
+test('Claude account quota updates never overwrite another subscription', async () => {
+  registry._reset();
+  const defaults = fakeStartSession({ usageExperimental: async () => ({ rate_limits_available: true, rate_limits: { five_hour: { utilization: 12 } } }) });
+  const gmail = fakeStartSession({ usageExperimental: async () => ({ rate_limits_available: true, rate_limits: { five_hour: { utilization: 84 } } }) });
+  const defaultRow = registry.createSession({ cwd: '/tmp', subscription: 'default', startSessionImpl: defaults });
+  const gmailRow = registry.createSession({ cwd: '/tmp', subscription: 'gmail', startSessionImpl: gmail });
+  defaults.emitMessage({ type: 'result', num_turns: 1 });
+  gmail.emitMessage({ type: 'result', num_turns: 1 });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(defaultRow.rateLimits.five_hour.utilization, 12);
+  assert.equal(gmailRow.rateLimits.five_hour.utilization, 84);
+});
+
+test('a rejected rate-limits call backs off its account without affecting cost/token tracking', async () => {
   registry._reset();
   const startSessionImpl = fakeStartSession({
     usageExperimental: async () => {
@@ -349,10 +406,10 @@ test('a rejected rate-limits call is flagged broken permanently, and does not af
   assert.equal(startSessionImpl.usageExperimentalCalls, 1);
   assert.equal(ws.sent.filter((m) => m.type === 'cockpit:usage').at(-1).rateLimits, null);
 
-  // A second finished turn must not retry the now-known-broken API.
+  // A second finished turn shares the account's brief failure backoff.
   startSessionImpl.emitMessage({ type: 'result', num_turns: 1 });
   await new Promise((resolve) => setTimeout(resolve, 0));
-  assert.equal(startSessionImpl.usageExperimentalCalls, 1); // still 1 - short-circuited, not retried
+  assert.equal(startSessionImpl.usageExperimentalCalls, 1);
 
   // Cost/token tracking is a separate code path (usage.js's accumulator,
   // fed directly off the message stream) and keeps working regardless.

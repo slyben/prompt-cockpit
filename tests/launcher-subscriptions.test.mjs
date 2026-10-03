@@ -26,8 +26,8 @@ function setup(remembered = 'gmail', subscriptions = [{ id: 'default', label: 'D
     startModelSelect: model, startEffortSelect: selectStub(), startClaudeEffortSelect: selectStub(),
     THINKING_BUDGET_PRESETS: [],
     providerCatalog: createProviderCatalog({ providers: [
-      { id: 'claude', launch: { dynamicModels: true, subscriptions, subscriptionsError } },
-      { id: 'codex' },
+      { id: 'claude', launch: { dynamicModels: true, accountLimits: true, subscriptions, subscriptionsError } },
+      { id: 'codex', launch: { accountLimits: true } },
     ] }),
     localStorage: { getItem: () => remembered },
     document: { createElement: () => ({}) },
@@ -46,17 +46,18 @@ test('launcher restores the remembered account and only shows subscriptions for 
   assert.deepEqual(ui.subscription.children.map((option) => option.textContent), ['Default', 'Gmail']);
   ui.provider.value = 'codex';
   ui.context.fillStartSubscriptions();
-  assert.equal(ui.control.hidden, true);
+  assert.equal(ui.control.hidden, false);
+  assert.deepEqual(ui.subscription.children.map((option) => option.textContent), ['Codex']);
   assert.equal(ui.context.selectedSubscription(), undefined);
   ui.provider.value = 'claude';
   ui.context.fillStartSubscriptions();
   assert.equal(ui.context.selectedSubscription(), 'gmail');
 });
 
-test('only the default account hides the selector and ignores a remembered extra account', () => {
+test('a sole default account keeps the quota dropdown visible and ignores a remembered extra account', () => {
   const ui = setup('gmail', [{ id: 'default', label: 'Default' }]);
   ui.context.fillStartSubscriptions();
-  assert.equal(ui.control.hidden, true);
+  assert.equal(ui.control.hidden, false);
   assert.equal(ui.context.selectedSubscription(), 'default');
 });
 

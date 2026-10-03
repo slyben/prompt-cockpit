@@ -11,6 +11,8 @@ import { fetchGrokSessionHistory } from './grok-history.js';
 import { isGrokAvailable } from './grok-cli.js';
 import { listCodexModels } from './codex-models.js';
 import { listClaudeModels } from './claude-models.js';
+import { fetchClaudeRateLimits, claudeAccountUsageKey, readClaudeAccountLimits } from './claude-rate-limits.js';
+import { fetchCodexRateLimits, codexAccountUsageKey } from './codex-rate-limits.js';
 import { startCodexSession } from './codex-session.js';
 import { listCodexSessions, fetchCodexSessionHistory } from './codex-history.js';
 import { isCodexAvailable } from './codex-app-server.js';
@@ -69,6 +71,10 @@ const PROVIDERS = Object.freeze({
     fetchHistory: fetchSessionHistory,
     efforts: CLAUDE_EFFORTS,
     listModels: listClaudeModels,
+    accountLimits: fetchClaudeRateLimits,
+    accountLimitsKey: claudeAccountUsageKey,
+    readAccountLimits: readClaudeAccountLimits,
+    supportsLiveAccountLimits: (query) => typeof query?.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET === 'function',
     effortOptions: CLAUDE_EFFORT_OPTIONS,
     // Rewind lives on the descriptor so a new provider cannot silently fall
     // through to Claude's fork implementation.
@@ -148,6 +154,10 @@ const PROVIDERS = Object.freeze({
     fetchHistory: (id, cwd) => fetchCodexSessionHistory(id, cwd),
     efforts: CODEX_EFFORTS,
     listModels: () => listCodexModels(),
+    accountLimits: fetchCodexRateLimits,
+    accountLimitsKey: codexAccountUsageKey,
+    readAccountLimits: (query) => query.codexRateLimits(),
+    supportsLiveAccountLimits: (query) => typeof query?.codexRateLimits === 'function',
     rewind: (row, turnIndex, options) => row.handle.rewindConversation(turnIndex, options),
     // CODEX_EFFORTS is the advertised superset - not every model supports
     // every value. session-actions.js's effort route calls this to
@@ -228,6 +238,7 @@ export function providerDetails(provider) {
       efforts: [...descriptor.efforts],
       ...(descriptor.listSubscriptions ? (({ subscriptions, error }) => ({ subscriptions, ...(error ? { subscriptionsError: error } : {}) }))(descriptor.listSubscriptions()) : {}),
       ...(descriptor.listModels ? { dynamicModels: true } : {}),
+      ...(descriptor.accountLimits ? { accountLimits: true } : {}),
       // Static launch-time catalogs are omitted entirely for a provider
       // that doesn't define one (e.g. Codex today) rather than serialized
       // as an empty array, so the client's generic fallback

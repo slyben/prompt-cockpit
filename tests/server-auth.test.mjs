@@ -13,6 +13,8 @@ import { setSessionDefaults } from '../src/session-defaults.js';
 import { settingsPath } from '../src/settings-file.js';
 import { readAllowRules, addAllowRule } from '../src/permission-rules.js';
 import { useTestSubscriptionSettings } from './helpers/subscription-settings.mjs';
+import { getProvider } from '../src/provider-registry.js';
+import { accountUsageCache } from '../src/account-usage-cache.js';
 
 useTestSubscriptionSettings();
 
@@ -46,6 +48,10 @@ test('subscription routes reject unknown IDs and selections for unsupported prov
   for (const endpoint of [
     '/api/resumable?subscription=unknown',
     '/api/providers/claude/models?subscription=unknown',
+    '/api/providers/claude/limits?subscription=unknown',
+    '/api/providers/claude/limits?subscription=../.claudegmail',
+    '/api/providers/unknown/limits',
+    '/api/providers/codex/limits?subscription=gmail',
     '/api/history/test-session?subscription=unknown',
     '/api/history/test-session/markdown?subscription=unknown',
     '/api/history/test-session/agent/tool-1?subscription=unknown',
@@ -128,6 +134,47 @@ function fakeStartSession() {
 let lastPluginEnabled = null;
 let lastMcpAuthName = null;
 let lastInterruptCalled = false;
+
+test('launcher quota endpoints require the operator token and fetch missing or expired usage through the shared cache', async (t) => {
+  registry._reset();
+  const originalNow = Date.now;
+  let time = originalNow();
+  Date.now = () => time;
+  t.after(() => { Date.now = originalNow; });
+  try {
+    for (const provider of ['claude', 'codex']) {
+      const endpoint = `${ORIGIN}/api/providers/${provider}/limits`;
+      const denied = await fetch(endpoint, { headers: { 'x-cockpit-operator': '' } });
+      assert.equal(denied.status, 401);
+      let reads = 0;
+      let fail = false;
+      const rateLimits = { five_hour: { utilization: 42 } };
+      // A live session's reader stands in for the provider CLI.
+      accountUsageCache.subscribe(getProvider(provider).accountLimitsKey(), () => {}, async () => {
+        reads++;
+        if (fail) throw new Error('quota lookup failed');
+        return rateLimits;
+      });
+      const first = await fetch(endpoint);
+      assert.equal(first.status, 200);
+      const snapshot = await first.json();
+      assert.deepEqual(snapshot.rateLimits, rateLimits);
+      assert.equal(reads, 1, 'an empty cache triggers one lookup');
+      const cached = await fetch(endpoint);
+      assert.deepEqual(await cached.json(), snapshot);
+      assert.equal(reads, 1, 'a fresh snapshot is served without a lookup');
+      time += 120_000;
+      fail = true;
+      const failed = await fetch(endpoint);
+      assert.equal(failed.status, 200);
+      assert.deepEqual(await failed.json(), snapshot, 'a failed refresh keeps the last good snapshot');
+      assert.equal(reads, 2, 'an expired snapshot triggers one lookup');
+    }
+    const grok = await fetch(`${ORIGIN}/api/providers/grok/limits`);
+    assert.equal(grok.status, 200);
+    assert.deepEqual(await grok.json(), { rateLimits: null });
+  } finally { registry._reset(); }
+});
 
 test('GET / serves the launcher page', async () => {
   const res = await fetch(`${ORIGIN}/`);

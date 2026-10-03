@@ -23,6 +23,22 @@ provider switching, and stale model responses
 with a DOM stub. Server route tests reject unknown or unsupported selections.
 These tests do not launch Claude or use either account's credentials.
 
+`account-usage-cache.test.mjs` checks shared quota snapshots, concurrent
+request deduplication, the 60-second minimum refresh interval across turns,
+account isolation, failure backoff, stale-value preservation, timeouts,
+subscribers and reuse of live account readers. Claude and
+Codex rate-limit tests verify that live turns and launcher reads share this
+cache. Claude's fallback lookup also checks zero model turns, account
+credentials and CLI cleanup. Registry tests verify quota broadcasts across
+sessions, cached snapshots for newly joined sessions, and account isolation.
+Server route tests verify that the launcher fetches quota once when the
+snapshot is missing or older than 60 seconds, serves a fresh snapshot without
+a lookup, and keeps the last good value when a refresh fails.
+`subscription-limits.test.mjs` covers the compact dropdown labels, local
+reset formatting, minute polling, hidden-screen suppression, partial failures,
+selection preservation and stale responses. Grok exposes no quota endpoint
+in the current adapter, so its token/cost tracking stays separate.
+
 `codex-live.manual.mjs` is deliberately outside that glob. Run it by hand
 after changing Codex wiring: `node tests/codex-live.manual.mjs`. It uses the
 signed-in Codex account, so its approval and rewind probes are opt-in via

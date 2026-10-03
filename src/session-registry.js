@@ -11,6 +11,7 @@ import { createUsageAccumulator } from './usage.js';
 import { contextPayload } from './context-usage.js';
 import { getProvider, parseProvider } from './provider-registry.js';
 import { createDelegation } from './delegation.js';
+import { accountUsageCache } from './account-usage-cache.js';
 const sessions = new Map();
 
 // Cross-session delegation (handshake trust + `/ask`) lives in delegation.js,
@@ -100,7 +101,8 @@ export function createSession({ cwd, resume, name, model, permissionMode, histor
     // CLI, not free on every message) - see refreshContextUsage below.
     usageAcc: createUsageAccumulator(),
     contextUsage: null,
-    rateLimits: null, // best-effort provider-normalized plan windows, see refreshRateLimits
+    rateLimits: null, // shared account quota, independent of this session's cost/tokens
+    unsubscribeAccountLimits: null,
     // Auto-continue (desktop's checkbox, see handleMessage's rate_limit_event
     // branch below): off by default, opt-in per session. rateLimitHit is set
     // the moment a 'rejected' rate_limit_event lands (the hard stop, not the
@@ -192,6 +194,16 @@ export function createSession({ cwd, resume, name, model, permissionMode, histor
     onMcpAuthResolved: () => broadcastMcpAuth(id),
   });
 
+  if (providerDescriptor.accountLimitsKey) {
+    const query = row.handle?.query;
+    const read = providerDescriptor.supportsLiveAccountLimits?.(query)
+      ? () => providerDescriptor.readAccountLimits(query) : undefined;
+    row.unsubscribeAccountLimits = accountUsageCache.subscribe(providerDescriptor.accountLimitsKey({ subscription: row.subscription }), ({ rateLimits }) => {
+      if (sessions.get(id) !== row) return;
+      row.rateLimits = rateLimits;
+      broadcastUsage(id);
+    }, read);
+  }
   return row;
 }
 
@@ -278,6 +290,7 @@ export function closeSession(id) {
   if (!row) return false;
   clearAutoContinueTimer(row);
   clearUsageBroadcastTimer(row);
+  row.unsubscribeAccountLimits?.();
   // session.js's close() only interrupts the current turn; its `result`
   // still arrives asynchronously, but sessions.delete(id) below runs
   // synchronously, so handleMessage would find nothing and skip the
@@ -292,7 +305,9 @@ export function closeSession(id) {
 // Test-only: drop all rows so test files don't leak state into each other
 // via this module's singleton map.
 export function _reset() {
+  for (const row of sessions.values()) row.unsubscribeAccountLimits?.();
   sessions.clear();
+  accountUsageCache.clear();
 }
 
 export function list() {
@@ -681,7 +696,10 @@ function setState(id, state) {
   // excluded: every provider follows it with onError, which does its own
   // cleanup and delete - reaping here first would leave handleError's row
   // lookup empty and silently skip that cleanup.
-  if (state === 'closed') sessions.delete(id);
+  if (state === 'closed') {
+    row.unsubscribeAccountLimits?.();
+    sessions.delete(id);
+  }
 }
 
 function handleMessage(id, message) {
@@ -1086,45 +1104,19 @@ function clearAutoContinueTimer(row) {
   }
 }
 
-// These optional account APIs are not part of local cost/token accounting.
-// Claude's experimental API is treated as a process capability because its
-// presence is an SDK-build question. Codex's app-server is a restartable child
-// process, so its account endpoint gets a per-query backoff instead of a
-// process-wide permanent latch.
-let rateLimitsApiBroken = false;
-const CODEX_RATE_LIMITS_RETRY_MS = 30_000;
-const codexRateLimitsRetryAt = new WeakMap();
-
-// Best-effort plan/quota display (5h/7d rate-limit windows). Claude uses its
-// experimental usage query; Codex uses app-server account/rateLimits/read.
-// Failures only disable this optional chip.
+// A completed turn checks the shared account snapshot, refreshing only when
+// it is at least one minute old. Updates reach every session on that account;
+// concurrent turn completions share one request. Failed lookups preserve the last value
+// and back off for a minute without disabling other accounts or providers.
 async function refreshRateLimits(id) {
   const row = sessions.get(id);
   const query = row?.handle?.query;
   if (!row) return;
-  if (query?.codexRateLimits) {
-    const queryKey = (typeof query === 'object' && query !== null) || typeof query === 'function' ? query : null;
-    if (queryKey && (codexRateLimitsRetryAt.get(queryKey) || 0) > Date.now()) return;
-    try {
-      row.rateLimits = await query.codexRateLimits();
-      if (queryKey) codexRateLimitsRetryAt.delete(queryKey);
-    } catch (err) {
-      if (queryKey) codexRateLimitsRetryAt.set(queryKey, Date.now() + CODEX_RATE_LIMITS_RETRY_MS);
-      console.warn(`Codex account/rateLimits/read failed; retrying after ${CODEX_RATE_LIMITS_RETRY_MS}ms:`, String(err.message || err));
-      return;
-    }
-  } else {
-    if (rateLimitsApiBroken || !query?.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET) return;
-    try {
-      const usage = await query.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET();
-      row.rateLimits = usage.rate_limits_available ? usage.rate_limits : null;
-    } catch (err) {
-      rateLimitsApiBroken = true;
-      console.warn('usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET failed once, not retrying this process:', String(err.message || err));
-      return;
-    }
-  }
-  broadcastUsage(id);
+  const provider = getProvider(row.provider);
+  if (!provider.supportsLiveAccountLimits?.(query)) return;
+  try {
+    await provider.accountLimits({ subscription: row.subscription, queryHandle: query, refresh: true });
+  } catch { /* Optional quota lookup; cost/token accounting continues. */ }
 }
 
 // getContextUsage() is a Query-handle round trip (unlike usage.js's
@@ -1220,6 +1212,7 @@ function handleError(id, err) {
   // and broadcast a ghost 'running' state.
   clearAutoContinueTimer(row);
   row.state = 'error';
+  row.unsubscribeAccountLimits?.();
   // A crashing row's for-await loop exits without ever emitting the
   // 'result' message the delegation branch waits for, so pending tags
   // would otherwise strand their origin session forever.

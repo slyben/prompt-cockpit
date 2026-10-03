@@ -29,7 +29,7 @@ Open the URL printed in the console - `http://localhost:4317/?op=<KEYSTRING>` - 
 ## First session
 
 1. Choose **Claude**, **Grok**, or **Codex** in the launcher.
-   Claude uses its default login folder automatically (`CLAUDE_CONFIG_DIR` when set, otherwise `~/.claude`). A **Subscription** selector appears only if you configure additional accounts; Cockpit remembers the last choice in this browser.
+   Claude uses its default login folder automatically (`CLAUDE_CONFIG_DIR` when set, otherwise `~/.claude`). Its **Subscription** dropdown shows account usage when available and remembers the last choice in this browser. Codex also shows its signed-in account's quota.
 2. Point it at a project folder (type a path, pick a recent one, or Browse).
 3. Optionally name the session (needed later if another session will `/ask` it) and pick a model. Leave the model on Default to use the CLI's usual one. Codex's model list is read live from the CLI, so it reflects whatever that install actually offers; Claude and Grok use a built-in list.
 4. Click **Start**.
@@ -43,7 +43,7 @@ Claude's resume list, model discovery, history, and exports use the selected sub
 
 Add extra Claude login folders to `~/.prompt-cockpit/settings.json`, alongside
 any other Cockpit settings already there. With no `claudeSubscriptions` key,
-or an empty array, only the default account is used and there is no selector.
+or an empty array, only the default account is used.
 Additional folders are never guessed from their names.
 
 ```json
@@ -60,6 +60,18 @@ accepts an absolute path, `~/` (or `~\`) for your home folder, or a path
 relative to the settings file. Each directory must already have its own
 Claude login. Cockpit uses that saved login rather than inherited API keys
 or OAuth tokens.
+
+Subscription options include percentages already used, such as
+`Gmail - 42% 5h (resets 04:50PM), 71% 7d (resets 2026-10-05)`.
+Claude and Codex quota snapshots are shared across all sessions and launcher
+tabs on the server. Completed turns and the launcher both go through it: a
+value under 60 seconds old is reused, otherwise it is refreshed. Concurrent
+requests are combined, so another session's fresh value prevents an upstream
+request. The launcher polls every minute while visible. A refresh reuses a live
+session's CLI for that account when one exists and otherwise starts a short
+zero-turn CLI (no model request), so quota shows even before an account's
+first turn or right after a server restart. Grok's current
+adapter provides token/cost usage but no subscription quota endpoint.
 
 `COCKPIT_SETTINGS_FILE` can point to a different settings file. See
 [`cockpit-settings.example.json`](cockpit-settings.example.json) for a complete

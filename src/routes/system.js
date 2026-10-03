@@ -12,6 +12,7 @@ import { providerDetails, getProvider, resolveProviderSubscription } from '../pr
 import { getHandshakeSecret, regenerateHandshakeSecret, memorySnapshot } from '../session-registry.js';
 import { computeGlobalStats } from '../global-stats.js';
 import { fetchAccountLimits } from '../account-limits.js';
+import { accountUsageCache } from '../account-usage-cache.js';
 import { resolveClaudeSubscription } from '../claude-subscriptions.js';
 import { readGitGuardSettings, readGitGuardSettingsState, setGitGuardSettings, GIT_GUARD_MODES } from '../git-commit-guard.js';
 
@@ -110,6 +111,30 @@ export function registerSystemRoutes(router) {
         ? await descriptor.listModels({ subscription: account?.id })
         : descriptor.models || [];
       return respondJson(res, 200, models);
+    } catch (err) {
+      return respondJson(res, 502, { error: String(err.message || err) });
+    }
+  });
+
+  // Launcher quota lookup through the shared account cache: a snapshot
+  // under a minute old is served as-is; otherwise one lookup runs per
+  // account, reusing a live session's CLI when one exists and starting a
+  // throwaway one only when none does. A failed lookup serves the last
+  // good snapshot. Shares the server's operator-token and Origin/Host checks.
+  router.get('/api/providers/:provider/limits', async (req, res, url, { provider }) => {
+    let descriptor;
+    let account;
+    try {
+      descriptor = getProvider(provider);
+      account = resolveProviderSubscription(descriptor, url.searchParams.get('subscription'));
+    } catch (err) {
+      return respondJson(res, 400, { error: err.message });
+    }
+    try {
+      const limits = descriptor.accountLimits
+        ? await descriptor.accountLimits({ subscription: account?.id })
+        : null;
+      return respondJson(res, 200, limits || { rateLimits: null });
     } catch (err) {
       return respondJson(res, 502, { error: String(err.message || err) });
     }

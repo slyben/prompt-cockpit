@@ -13,6 +13,7 @@ import { initDirBrowser } from '/dir-browser.js';
 import { initDiffView } from '/diff-view.js';
 import { initTabChrome } from '/tab-chrome.js';
 import { initStatsPanel } from '/stats-panel.js';
+import { initSubscriptionLimits } from '/subscription-limits.js';
 import { initHistoryPane } from '/history-pane.js';
 import { initMcpPanel } from '/mcp-panel.js';
 import { initPluginPanel } from '/plugin-panel.js';
@@ -48,6 +49,11 @@ const startProviderSelect = document.getElementById('startProviderSelect');
 const startSubscriptionControl = document.getElementById('startSubscriptionControl');
 const startSubscriptionSelect = document.getElementById('startSubscriptionSelect');
 const startSubscriptionError = document.getElementById('startSubscriptionError');
+const subscriptionLimits = initSubscriptionLimits({
+  selectEl: startSubscriptionSelect,
+  getProvider: () => providerCatalog.get(selectedProvider()),
+  shouldRefresh: () => document.body.dataset.screen === 'launcher' && !document.hidden,
+});
 const startModelSelect = document.getElementById('startModelSelect');
 const startEffortSelect = document.getElementById('startEffortSelect');
 const startClaudeEffortSelect = document.getElementById('startClaudeEffortSelect');
@@ -1161,6 +1167,7 @@ function returnToLauncher() {
   const settingsModal = document.getElementById('settingsModal');
   if (settingsModal.open) settingsModal.close();
   loadResumable();
+  subscriptionLimits.refresh();
 }
 
 // Best guess at the terminal's own per-mode colors, matched to this app's
@@ -1800,7 +1807,9 @@ function selectedSubscription() {
 }
 
 function fillStartSubscriptions() {
-  const subscriptions = launchConfig(selectedProvider()).subscriptions || [];
+  const provider = selectedProvider();
+  const launch = launchConfig(provider);
+  const subscriptions = launch.subscriptions || (launch.accountLimits ? [{ id: '', label: providerCatalog.label(provider) }] : []);
   const previous = startSubscriptionSelect.value;
   let remembered;
   try { remembered = localStorage.getItem('cockpit:claudeSubscription'); } catch { /* storage unavailable */ }
@@ -1819,7 +1828,7 @@ function fillStartSubscriptions() {
   const error = launchConfig(selectedProvider()).subscriptionsError;
   startSubscriptionError.hidden = !error;
   startSubscriptionError.textContent = error ? `Account config error - only Default available: ${error}` : '';
-  startSubscriptionControl.hidden = subscriptions.length <= 1 && !error;
+  startSubscriptionControl.hidden = subscriptions.length <= 1 && !error && !launch.accountLimits;
 }
 
 let resumableGen = 0;
@@ -2042,6 +2051,7 @@ function fillStartEffort() {
 
 startProviderSelect.addEventListener('change', () => {
   fillStartSubscriptions();
+  subscriptionLimits.refresh();
   fillStartModels();
   fillStartEffort();
   loadResumable();
@@ -2084,6 +2094,7 @@ async function applyAvailableProviders() {
     startProviderSelect.value = selected;
     startProviderSelect.hidden = providers.length <= 1;
     fillStartSubscriptions();
+    if (document.body.dataset.screen === 'launcher') subscriptionLimits.refresh();
     fillStartModels();
     fillStartEffort();
     loadResumable();
