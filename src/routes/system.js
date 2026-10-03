@@ -8,10 +8,11 @@ import { defaultScreenshotDir } from '../os-defaults.js';
 import { listDirectory } from '../session-launcher.js';
 import { readJsonBody, respondJson } from '../http-utils.js';
 import { availableProviders } from '../provider-availability.js';
-import { providerDetails, getProvider } from '../provider-registry.js';
+import { providerDetails, getProvider, resolveProviderSubscription } from '../provider-registry.js';
 import { getHandshakeSecret, regenerateHandshakeSecret, memorySnapshot } from '../session-registry.js';
 import { computeGlobalStats } from '../global-stats.js';
 import { fetchAccountLimits } from '../account-limits.js';
+import { resolveClaudeSubscription } from '../claude-subscriptions.js';
 import { readGitGuardSettings, readGitGuardSettingsState, setGitGuardSettings, GIT_GUARD_MODES } from '../git-commit-guard.js';
 
 export function registerSystemRoutes(router) {
@@ -97,12 +98,16 @@ export function registerSystemRoutes(router) {
   // public resource.
   router.get('/api/providers/:provider/models', async (req, res, url, { provider }) => {
     let descriptor;
-    try { descriptor = getProvider(provider); } catch (err) {
+    let account;
+    try {
+      descriptor = getProvider(provider);
+      account = resolveProviderSubscription(descriptor, url.searchParams.get('subscription'));
+    } catch (err) {
       return respondJson(res, 400, { error: err.message });
     }
     try {
       const models = descriptor.listModels
-        ? await descriptor.listModels()
+        ? await descriptor.listModels({ subscription: account?.id })
         : descriptor.models || [];
       return respondJson(res, 200, models);
     } catch (err) {
@@ -153,9 +158,10 @@ export function registerSystemRoutes(router) {
     return respondJson(res, 200, { enabled: settings.promptSuggestionEnabled !== false });
   });
 
-  router.get('/api/account-limits', async (req, res) => {
+  router.get('/api/account-limits', async (req, res, url) => {
     try {
-      return respondJson(res, 200, await fetchAccountLimits());
+      const account = resolveClaudeSubscription(url.searchParams.get('subscription'));
+      return respondJson(res, 200, await fetchAccountLimits('claude', undefined, account.id));
     } catch (err) {
       return respondJson(res, 502, { error: String(err.message || err) });
     }

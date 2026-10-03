@@ -6,7 +6,8 @@ import { setSessionTitle } from '../session-titles.js';
 import { isValidCwd } from '../session-launcher.js';
 import { respondJson, readJsonBody } from '../http-utils.js';
 import { findSubagentTranscript, readSubagentTranscript } from '../agent-transcript.js';
-import { parseProvider } from '../provider-registry.js';
+import { parseProvider, resolveProviderSubscription } from '../provider-registry.js';
+import { resolveClaudeSubscription } from '../claude-subscriptions.js';
 import { isSafeSessionId } from '../safe-id.js';
 
 export function registerHistoryRoutes(router) {
@@ -19,13 +20,15 @@ export function registerHistoryRoutes(router) {
     if (!isSafeSessionId(id)) return respondJson(res, 400, { error: 'invalid session id' });
     const cwd = url.searchParams.get('cwd') || process.cwd();
     let provider;
+    let account;
     try {
       provider = parseProvider(url.searchParams.get('provider'));
+      account = resolveProviderSubscription(provider, url.searchParams.get('subscription'));
     } catch (err) {
       return respondJson(res, 400, { error: err.message });
     }
     try {
-      const messages = await provider.fetchHistory(id, cwd);
+      const messages = await provider.fetchHistory(id, cwd, { subscription: account?.id });
       return respondJson(res, 200, { messages });
     } catch (err) {
       return respondJson(res, 404, { error: String(err.message || err) });
@@ -39,13 +42,15 @@ export function registerHistoryRoutes(router) {
     if (!isSafeSessionId(id)) return respondJson(res, 400, { error: 'invalid session id' });
     const cwd = url.searchParams.get('cwd') || process.cwd();
     let provider;
+    let account;
     try {
       provider = parseProvider(url.searchParams.get('provider'));
+      account = resolveProviderSubscription(provider, url.searchParams.get('subscription'));
     } catch (err) {
       return respondJson(res, 400, { error: err.message });
     }
     try {
-      const messages = await provider.fetchHistory(id, cwd);
+      const messages = await provider.fetchHistory(id, cwd, { subscription: account?.id });
       const markdown = messagesToMarkdown(messages, {
         title: `Session transcript - ${id}`,
         cwd,
@@ -69,8 +74,12 @@ export function registerHistoryRoutes(router) {
     // `id` here is the *parent* session's claudeSessionId, not this
     // cockpit's own registry id. No session token: a subagent transcript
     // on disk outlives the tab (and often the live row) that spawned it.
+    let account;
+    try { account = resolveClaudeSubscription(url.searchParams.get('subscription')); } catch (err) {
+      return respondJson(res, 400, { error: err.message });
+    }
     try {
-      const found = await findSubagentTranscript(id, toolUseId);
+      const found = await findSubagentTranscript(id, toolUseId, account.configDir);
       if (!found) return respondJson(res, 404, { error: 'no subagent transcript found for this tool call' });
       const { messages, mtimeMs } = await readSubagentTranscript(found.transcriptPath);
       return respondJson(res, 200, { meta: found.meta, messages, mtimeMs });

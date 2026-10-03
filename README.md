@@ -29,12 +29,42 @@ Open the URL printed in the console - `http://localhost:4317/?op=<KEYSTRING>` - 
 ## First session
 
 1. Choose **Claude**, **Grok**, or **Codex** in the launcher.
+   Claude uses its default login folder automatically (`CLAUDE_CONFIG_DIR` when set, otherwise `~/.claude`). A **Subscription** selector appears only if you configure additional accounts; Cockpit remembers the last choice in this browser.
 2. Point it at a project folder (type a path, pick a recent one, or Browse).
 3. Optionally name the session (needed later if another session will `/ask` it) and pick a model. Leave the model on Default to use the CLI's usual one. Codex's model list is read live from the CLI, so it reflects whatever that install actually offers; Claude and Grok use a built-in list.
 4. Click **Start**.
 5. Type a prompt and send. Approvals (plan exit, gated tools) show up as a banner above the compose box.
 
 **Resume** lists past sessions for the selected provider. **Start** resumes live; **View** opens the transcript read-only.
+
+Claude's resume list, model discovery, history, and exports use the selected subscription. A running session keeps that account through reconnect, reset, and rewind; sessions on both accounts can run together. The account is shown in the session header and session list.
+
+## Claude account configuration
+
+Add extra Claude login folders to `~/.prompt-cockpit/settings.json`, alongside
+any other Cockpit settings already there. With no `claudeSubscriptions` key,
+or an empty array, only the default account is used and there is no selector.
+Additional folders are never guessed from their names.
+
+```json
+{
+  "claudeSubscriptions": [
+    { "id": "gmail", "label": "Gmail", "configDir": "~/.claudegmail" }
+  ]
+}
+```
+
+Each entry adds a choice beside **Default**. `id` must be unique (`default`
+is reserved); `label` is optional and falls back to the ID. `configDir`
+accepts an absolute path, `~/` (or `~\`) for your home folder, or a path
+relative to the settings file. Each directory must already have its own
+Claude login. Cockpit uses that saved login rather than inherited API keys
+or OAuth tokens.
+
+`COCKPIT_SETTINGS_FILE` can point to a different settings file. See
+[`cockpit-settings.example.json`](cockpit-settings.example.json) for a complete
+example. Refresh the launcher after editing the file; account IDs and folders
+used by running sessions should stay in the config until those sessions close.
 
 Tabs using different providers can run at the same time. A session keeps the provider it was started with, and transcripts can only be resumed by their original provider.
 

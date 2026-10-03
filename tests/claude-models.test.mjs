@@ -1,6 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { listClaudeModels, _resetCacheForTests } from '../src/claude-models.js';
+import { useTestSubscriptionSettings } from './helpers/subscription-settings.mjs';
+
+useTestSubscriptionSettings([{ id: 'gmail', configDir: '~/.claudegmail' }]);
 
 // Fakes the shape session.js relies on: the prompt iterable's first next()
 // must resolve before the fake CLI "sends" the num_turns:0 sentinel result,
@@ -31,6 +34,25 @@ function fakeQuery(models, { onInterrupt } = {}) {
     };
   };
 }
+
+test('model discovery uses a separate environment and cache for each subscription', async () => {
+  _resetCacheForTests();
+  const dirs = [];
+  let spawns = 0;
+  const queryImpl = (options) => {
+    dirs.push(options.options.env.CLAUDE_CONFIG_DIR);
+    return fakeQuery([{ value: `account-${++spawns}` }])(options);
+  };
+  const [defaults, gmail, gmailAgain] = await Promise.all([
+    listClaudeModels({ queryImpl, subscription: 'default' }),
+    listClaudeModels({ queryImpl, subscription: 'gmail' }),
+    listClaudeModels({ queryImpl, subscription: 'gmail' }),
+  ]);
+  assert.equal(spawns, 2);
+  assert.notEqual(dirs[0], dirs[1]);
+  assert.notEqual(defaults[0].value, gmail[0].value);
+  assert.equal(gmail, gmailAgain);
+});
 
 test('listClaudeModels returns the live catalog plus legacy pins not already covered', async () => {
   _resetCacheForTests();

@@ -5,6 +5,9 @@
     padding: 0 16px;
   }
   #launcher h2 { font-size: 15px; color: var(--muted); font-weight: 600; margin: 24px 0 8px; }
+  #startSubscriptionControl { margin-left: 12px; }
+  #startSubscriptionControl .subscription-error { color: var(--danger, #c0392b); font-size: 12px; margin-left: 8px; }
+  #startSubscriptionControl label { color: var(--muted); font-size: 13px; margin-right: 4px; }
   #launcher .cwd-row { display: flex; align-items: center; gap: 8px; }
   #launcher input[type=text] {
     flex: 1;

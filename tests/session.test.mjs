@@ -8,6 +8,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { startSession } from '../src/session.js';
+import { useTestSubscriptionSettings } from './helpers/subscription-settings.mjs';
+
+useTestSubscriptionSettings();
 
 // A controllable fake for what query() returns: an async-iterable of SDK
 // messages the test pushes in from outside, plus the handful of methods

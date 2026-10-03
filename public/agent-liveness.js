@@ -6,7 +6,7 @@
 const POLL_MS = 2000;
 const STALL_POLLS_BEFORE_DONE = 4; // matches detail-pane.js's AGENT_STALL_POLLS_BEFORE_STOP - same "no growth in ~8s" heuristic, so the two views can't disagree about the same subagent
 
-export function createAgentLivenessTracker({ onChange } = {}) {
+export function createAgentLivenessTracker({ onChange, getSubscription = () => null } = {}) {
   const tracked = new Map(); // toolUseId -> { claudeSessionId, timer, lastMtimeMs, stallCount }
 
   function notify() {
@@ -17,7 +17,7 @@ export function createAgentLivenessTracker({ onChange } = {}) {
   // callers don't need to guard against that themselves.
   function track(claudeSessionId, toolUseId) {
     if (!claudeSessionId || !toolUseId || tracked.has(toolUseId)) return;
-    tracked.set(toolUseId, { claudeSessionId, timer: null, lastMtimeMs: null, stallCount: 0 });
+    tracked.set(toolUseId, { claudeSessionId, subscription: getSubscription(), timer: null, lastMtimeMs: null, stallCount: 0 });
     notify();
     poll(toolUseId);
   }
@@ -26,7 +26,9 @@ export function createAgentLivenessTracker({ onChange } = {}) {
     const entry = tracked.get(toolUseId);
     if (!entry) return; // dropped by reset() while nothing was in flight
     try {
-      const res = await fetch(`/api/history/${encodeURIComponent(entry.claudeSessionId)}/agent/${encodeURIComponent(toolUseId)}`);
+      const params = new URLSearchParams();
+      if (entry.subscription) params.set('subscription', entry.subscription);
+      const res = await fetch(`/api/history/${encodeURIComponent(entry.claudeSessionId)}/agent/${encodeURIComponent(toolUseId)}?${params}`);
       const data = res.ok ? await res.json() : null;
       const grew = data?.mtimeMs != null && data.mtimeMs !== entry.lastMtimeMs;
       entry.lastMtimeMs = data?.mtimeMs ?? entry.lastMtimeMs;

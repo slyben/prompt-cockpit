@@ -9,6 +9,20 @@ injects a stubbed `queryImpl` (same pattern, one level deeper -
 `startSession` now takes it the same way `createSession` takes
 `startSessionImpl`) instead of the real SDK-backed ones.
 
+## Claude subscriptions
+
+`claude-subscriptions.test.mjs` verifies config parsing, automatic default
+folder resolution, opt-in accounts, account ID validation, per-session
+environments, and actual SDK history/fork operations against temporary
+transcripts in two config directories, including duplicate session IDs
+and concurrent reads. It also covers subagent lookup and earlier-history
+account propagation. Registry tests check that reset preserves Gmail;
+model tests check per-account discovery caching. `launcher-subscriptions.test.mjs`
+exercises the hidden selector for a sole default account, remembered selection,
+provider switching, and stale model responses
+with a DOM stub. Server route tests reject unknown or unsupported selections.
+These tests do not launch Claude or use either account's credentials.
+
 `codex-live.manual.mjs` is deliberately outside that glob. Run it by hand
 after changing Codex wiring: `node tests/codex-live.manual.mjs`. It uses the
 signed-in Codex account, so its approval and rewind probes are opt-in via

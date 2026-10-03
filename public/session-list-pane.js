@@ -128,6 +128,7 @@ export function initSessionListPane({ panel, body, closeBtn, countBtn, headerEl,
       const meta = document.createElement('span');
       meta.className = 'session-list-meta';
       meta.textContent = [s.model, s.effort].filter(Boolean).join(' / ') || '(default model)';
+      if (s.subscriptionLabel) meta.textContent += ` / ${s.subscriptionLabel}`;
       row.append(name, meta);
       // Read-only here - this pane spans every tab/session server-wide, but
       // only the OWNING tab holds that session's own bearer token, so

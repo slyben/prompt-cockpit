@@ -16,6 +16,8 @@ import { listCodexSessions, fetchCodexSessionHistory } from './codex-history.js'
 import { isCodexAvailable } from './codex-app-server.js';
 import { forkConversation, rewindFiles as rewindFilesSdk, resolveTurnUuid } from './rewind.js';
 import { resolveGrokPromptIndex } from './grok-rewind.js';
+import path from 'node:path';
+import { safeListClaudeSubscriptions, resolveClaudeSubscription } from './claude-subscriptions.js';
 
 export const CLAUDE_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 export const GROK_EFFORTS = ['low', 'medium', 'high', 'xhigh'];
@@ -61,7 +63,9 @@ const PROVIDERS = Object.freeze({
     label: 'Claude',
     isAvailable: async () => true,
     startSession: startSession,
-    listResumableSessions,
+    listSubscriptions: safeListClaudeSubscriptions,
+    resolveSubscription: resolveClaudeSubscription,
+    listResumableSessions: ({ subscription } = {}) => listResumableSessions(path.join(resolveClaudeSubscription(subscription).configDir, 'projects')),
     fetchHistory: fetchSessionHistory,
     efforts: CLAUDE_EFFORTS,
     listModels: listClaudeModels,
@@ -69,14 +73,14 @@ const PROVIDERS = Object.freeze({
     // Rewind lives on the descriptor so a new provider cannot silently fall
     // through to Claude's fork implementation.
     rewind: async (row, turnIndex, { dryRun } = {}) => {
-      const userMessageId = await resolveTurnUuid(row.providerSessionId, row.cwd, turnIndex);
+      const userMessageId = await resolveTurnUuid(row.providerSessionId, row.cwd, turnIndex, row.subscription);
       let filesResult = null;
       if (row.hasFileCheckpointing) {
         filesResult = await rewindFilesSdk(row.handle.query, userMessageId, { dryRun });
       }
       let fork = null;
       if (!dryRun) {
-        fork = await forkConversation(row.providerSessionId, userMessageId);
+        fork = await forkConversation(row.providerSessionId, userMessageId, row.cwd, row.subscription);
       }
       return { filesResult, forkedSessionId: fork ? fork.sessionId : null };
     },
@@ -99,7 +103,7 @@ const PROVIDERS = Object.freeze({
     isAvailable: isGrokAvailable,
     startSession: startGrokSession,
     listResumableSessions: listGrokSessions,
-    fetchHistory: fetchGrokSessionHistory,
+    fetchHistory: (id, cwd) => fetchGrokSessionHistory(id, cwd),
     efforts: GROK_EFFORTS,
     models: GROK_START_MODELS,
     effortOptions: GROK_EFFORT_OPTIONS,
@@ -141,9 +145,9 @@ const PROVIDERS = Object.freeze({
     isAvailable: isCodexAvailable,
     startSession: startCodexSession,
     listResumableSessions: listCodexSessions,
-    fetchHistory: fetchCodexSessionHistory,
+    fetchHistory: (id, cwd) => fetchCodexSessionHistory(id, cwd),
     efforts: CODEX_EFFORTS,
-    listModels: listCodexModels,
+    listModels: () => listCodexModels(),
     rewind: (row, turnIndex, options) => row.handle.rewindConversation(turnIndex, options),
     // CODEX_EFFORTS is the advertised superset - not every model supports
     // every value. session-actions.js's effort route calls this to
@@ -204,6 +208,12 @@ export function getProvider(id) {
   return parseProvider(id);
 }
 
+export function resolveProviderSubscription(provider, subscription) {
+  if (provider.resolveSubscription) return provider.resolveSubscription(subscription);
+  if (subscription != null) throw new Error(`${provider.label} does not support subscription selection`);
+  return null;
+}
+
 export function listProviders() {
   return Object.values(PROVIDERS);
 }
@@ -216,6 +226,7 @@ export function providerDetails(provider) {
     capabilities: { ...descriptor.capabilities },
     launch: {
       efforts: [...descriptor.efforts],
+      ...(descriptor.listSubscriptions ? (({ subscriptions, error }) => ({ subscriptions, ...(error ? { subscriptionsError: error } : {}) }))(descriptor.listSubscriptions()) : {}),
       ...(descriptor.listModels ? { dynamicModels: true } : {}),
       // Static launch-time catalogs are omitted entirely for a provider
       // that doesn't define one (e.g. Codex today) rather than serialized

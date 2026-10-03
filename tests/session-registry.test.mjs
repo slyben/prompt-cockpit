@@ -9,6 +9,9 @@ import assert from 'node:assert/strict';
 import * as registry from '../src/session-registry.js';
 import { codexNotificationToMessages } from '../src/codex-messages.js';
 import { fakeWs, fakeStartSession, pendingTurnCount, frontDelegationTag } from './test-helpers.mjs';
+import { useTestSubscriptionSettings } from './helpers/subscription-settings.mjs';
+
+useTestSubscriptionSettings([{ id: 'gmail', label: 'Gmail', configDir: '~/.claudegmail' }]);
 
 test('createSession issues a token that checkToken accepts, and only that token', () => {
   registry._reset();
@@ -24,6 +27,7 @@ test('resetSession creates a fresh row with the old live model, effort, thinking
   const old = registry.createSession({
     cwd: '/tmp',
     provider: 'claude',
+    subscription: 'gmail',
     model: 'claude-sonnet-5',
     effort: 'xhigh',
     permissionMode: 'plan',
@@ -42,6 +46,9 @@ test('resetSession creates a fresh row with the old live model, effort, thinking
   assert.equal(replacement.thinkingDisplay, 'summarized');
   assert.equal(replacement.autoContinue, true);
   assert.equal(replacement.mode, 'plan');
+  assert.equal(replacement.subscription, 'gmail');
+  assert.equal(replacementImpl.lastOpts.subscription, 'gmail');
+  assert.equal(registry.toSummary(replacement).subscriptionLabel, 'Gmail');
   assert.equal(replacementImpl.lastOpts.model, 'claude-sonnet-5');
   assert.equal(replacementImpl.lastOpts.effort, 'xhigh');
   assert.equal(replacementImpl.lastOpts.maxThinkingTokens, 10000);

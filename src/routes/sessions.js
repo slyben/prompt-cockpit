@@ -7,7 +7,7 @@ import { getSessionTitle, attachTitles, readSessionTitles } from '../session-tit
 import { isSafeGrokArg } from '../grok-acp.js';
 import { readSessionDefaults } from '../session-defaults.js';
 import { respondJson, readJsonBody, extractToken } from '../http-utils.js';
-import { parseProvider } from '../provider-registry.js';
+import { parseProvider, resolveProviderSubscription } from '../provider-registry.js';
 
 // Applies this cwd's persisted thinking-budget/auto-continue defaults to
 // a freshly created row - both the "new session" and fork paths go
@@ -28,14 +28,17 @@ export async function seedSessionDefaults(row, defaults) {
 export function registerSessionRoutes(router) {
   router.get('/api/resumable', async (req, res, url) => {
     let provider;
+    let account;
     try {
       provider = parseProvider(url.searchParams.get('provider'));
+      account = resolveProviderSubscription(provider, url.searchParams.get('subscription'));
     } catch (err) {
       return respondJson(res, 400, { error: err.message });
     }
     let sessions;
     try {
-      sessions = await provider.listResumableSessions();
+      sessions = await provider.listResumableSessions(account ? { subscription: account.id } : undefined);
+      if (account) sessions = sessions.map((session) => ({ ...session, subscription: account.id }));
     } catch (err) {
       return respondJson(res, 500, { error: String(err.message || err) });
     }
@@ -66,13 +69,15 @@ export function registerSessionRoutes(router) {
     // authority on whether resume actually works, this is just the
     // transcript backfill for the client's initial view.
     let provider;
+    let account;
     try {
       provider = parseProvider(body.provider);
+      account = resolveProviderSubscription(provider, body.subscription);
     } catch (err) {
       return respondJson(res, 400, { error: err.message });
     }
     const history = body.resume
-      ? await provider.fetchHistory(body.resume, cwd).catch(() => null)
+      ? await provider.fetchHistory(body.resume, cwd, { subscription: account?.id }).catch(() => null)
       : null;
     const model = typeof body.model === 'string' && body.model ? body.model : undefined;
     // isSafeGrokArg guards against shell/CLI-arg injection when a model
@@ -117,9 +122,10 @@ export function registerSessionRoutes(router) {
     }
     let row;
     try {
-      row = registry.createSession({ cwd, resume: body.resume, name, model, provider: provider.id, effort, history });
+      row = registry.createSession({ cwd, resume: body.resume, name, model, provider: provider.id, subscription: account?.id, effort, history });
     } catch (err) {
       if (err.code === 'ERR_NAME_TAKEN') return respondJson(res, 409, { error: err.message });
+      if (err.code === 'ERR_INVALID_SUBSCRIPTION') return respondJson(res, 400, { error: err.message });
       throw err;
     }
     await seedSessionDefaults(row); // thinking budget/auto-continue carried forward from this cwd's last-used values (session-defaults.js)

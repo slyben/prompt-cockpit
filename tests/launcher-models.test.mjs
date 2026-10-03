@@ -22,9 +22,10 @@ function setup(fetch) {
   const select = selectStub();
   const effort = selectStub();
   const context = vm.createContext({
-    fetch, encodeURIComponent, startModelSelect: select, startEffortSelect: effort,
+    fetch, encodeURIComponent, URLSearchParams, startModelSelect: select, startEffortSelect: effort,
     startClaudeEffortSelect: selectStub(),
     selectedProvider: () => provider,
+    selectedSubscription: () => undefined,
     launchConfig: (id) => ({ dynamicModels: id === 'codex', efforts: ['none', 'low', 'high'] }),
     launchModels: () => [{ value: '', label: 'Default model' }],
     providerCatalog: { get: () => null, label: (id) => id },

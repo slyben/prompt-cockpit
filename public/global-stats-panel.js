@@ -13,7 +13,7 @@ const LEVEL_THRESHOLDS = [1, 5, 15, 40]; // message-count breakpoints for the 5 
 // wrong slides every label off its column.
 const COL_STEP_PX = 13;
 
-export function initGlobalStatsPanel({ bodyEl, rangeSelect, refreshButton }) {
+export function initGlobalStatsPanel({ bodyEl, rangeSelect, refreshButton, getSubscriptions = () => [] }) {
   let loaded = false;
 
   async function refresh() {
@@ -47,7 +47,7 @@ export function initGlobalStatsPanel({ bodyEl, rangeSelect, refreshButton }) {
       renderOverview(stats),
       renderModelTable(stats),
       renderWeekCostSection(),
-      renderAccountLimitsSection(),
+      renderAccountLimitsSection(getSubscriptions()),
     );
     // Three months still overflows a narrow settings panel. Park the
     // scroll on the recent end. Has to happen here rather than in
@@ -466,7 +466,7 @@ function renderWeekCostSection() {
 // this panel only ever sees local transcripts. Fetched by shelling out to
 // `claude -p "/usage"` - a real subprocess spawn, a few seconds - so it
 // loads independently, with its own Refresh button, rather than blocking.
-function renderAccountLimitsSection() {
+function renderAccountLimitsSection(subscriptions = []) {
   const wrap = document.createElement('div');
   wrap.className = 'stats-section';
 
@@ -479,7 +479,18 @@ function renderAccountLimitsSection() {
   refreshBtn.className = 'btn';
   refreshBtn.textContent = 'Refresh';
   refreshBtn.title = 'Runs claude -p "/usage" (a few seconds) - reflects your plan quota across every device signed into this account, not just local transcripts';
-  header.append(title, refreshBtn);
+  // One quota per account: only shown when more than one is configured.
+  const accountSelect = document.createElement('select');
+  accountSelect.title = 'Claude account';
+  for (const account of subscriptions) {
+    const option = document.createElement('option');
+    option.value = account.id;
+    option.textContent = account.label;
+    accountSelect.append(option);
+  }
+  header.append(title);
+  if (subscriptions.length > 1) header.append(accountSelect);
+  header.append(refreshBtn);
   wrap.append(header);
 
   const body = document.createElement('div');
@@ -493,7 +504,7 @@ function renderAccountLimitsSection() {
     loading.textContent = 'Asking claude -p "/usage"…';
     body.append(loading);
     try {
-      const res = await fetch('/api/account-limits');
+      const res = await fetch(`/api/account-limits${subscriptions.length > 1 && accountSelect.value ? `?subscription=${encodeURIComponent(accountSelect.value)}` : ''}`);
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
       body.innerHTML = '';
@@ -513,6 +524,7 @@ function renderAccountLimitsSection() {
   }
 
   refreshBtn.addEventListener('click', load);
+  accountSelect.addEventListener('change', load);
   load();
 
   return wrap;

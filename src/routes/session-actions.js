@@ -373,7 +373,7 @@ const ACTIONS = {
       // left the forked session's own future rewinds targeting the
       // wrong turn.
       const forkedHistory = await getProvider(row.provider)
-        .fetchHistory(result.forkedSessionId, row.cwd)
+        .fetchHistory(result.forkedSessionId, row.cwd, { subscription: row.subscription })
         .catch(() => null);
       const forked = registry.createSession({
         cwd: row.cwd,
@@ -382,6 +382,7 @@ const ACTIONS = {
         effort: row.effort,
         permissionMode: row.mode,
         provider: row.provider,
+        subscription: row.subscription,
         history: forkedHistory,
       });
       // Model carries forward via createSession above. Thinking budget and
@@ -458,6 +459,8 @@ export function registerSessionActionRoutes(router) {
       return respondJson(res, 200, body);
     } catch (err) {
       if (err instanceof RouteError) return respondJson(res, err.status, err.body);
+      // The row's account was removed/renamed in settings after it started.
+      if (err.code === 'ERR_INVALID_SUBSCRIPTION') return respondJson(res, 400, { error: err.message });
       return respondJson(res, 500, { error: String(err.message || err) });
     }
   });

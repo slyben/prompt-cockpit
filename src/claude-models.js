@@ -8,6 +8,7 @@
 // (default/opus/sonnet/haiku/fable), not older pinned snapshots - hence
 // LEGACY_MODELS below to cover the ones a user might explicitly want.
 import { query } from '@anthropic-ai/claude-agent-sdk';
+import { claudeSubscriptionEnv, resolveClaudeSubscription } from './claude-subscriptions.js';
 
 // Pinned older models the live alias catalog never surfaces (aliases always
 // resolve to the current generation). IDs and descriptions from Anthropic's
@@ -24,7 +25,7 @@ const LEGACY_MODELS = [
 // Cached for the life of the process - a fresh CLI spawn per launcher open
 // would add real latency for no benefit; a server restart (or picking up a
 // new CLI version) is the natural point to re-discover.
-let cachedModels = null;
+const cachedModels = new Map();
 
 function primingSentinelIterable() {
   let sent = false;
@@ -50,8 +51,8 @@ function primingSentinelIterable() {
   };
 }
 
-async function discoverLiveModels(queryImpl) {
-  const handle = queryImpl({ prompt: primingSentinelIterable(), options: {} });
+async function discoverLiveModels(queryImpl, subscription) {
+  const handle = queryImpl({ prompt: primingSentinelIterable(), options: { env: claudeSubscriptionEnv(subscription) } });
   try {
     for await (const message of handle) {
       if (message.type === 'result' && message.num_turns === 0) {
@@ -64,20 +65,29 @@ async function discoverLiveModels(queryImpl) {
   }
 }
 
-export async function listClaudeModels({ queryImpl = query } = {}) {
-  if (cachedModels) return cachedModels;
-  const live = await discoverLiveModels(queryImpl);
+export async function listClaudeModels({ queryImpl = query, subscription } = {}) {
+  const key = resolveClaudeSubscription(subscription).configDir;
+  if (cachedModels.has(key)) return cachedModels.get(key);
+  const pending = discoverModels(queryImpl, subscription);
+  cachedModels.set(key, pending);
+  try { return await pending; } catch (error) {
+    cachedModels.delete(key);
+    throw error;
+  }
+}
+
+async function discoverModels(queryImpl, subscription) {
+  const live = await discoverLiveModels(queryImpl, subscription);
   const known = new Set(live.map((m) => m.resolvedModel || m.value));
   const legacy = LEGACY_MODELS
     .filter((m) => !known.has(m.value))
     .map((m) => ({ ...m, resolvedModel: m.value }));
-  cachedModels = [...live, ...legacy];
-  return cachedModels;
+  return [...live, ...legacy];
 }
 
 // Test-only: the in-memory cache is intentional for real usage (a CLI spawn
 // per launcher open would be wasteful), but tests need to exercise more than
 // one queryImpl per process.
 export function _resetCacheForTests() {
-  cachedModels = null;
+  cachedModels.clear();
 }

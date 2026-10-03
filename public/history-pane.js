@@ -29,12 +29,13 @@ export function initHistoryPane({ modal, body, closeButton, titleEl, exportButto
     if (modal.open) modal.close();
   }
 
-  async function open({ sessionId, cwd, label, provider, assistantLabel }) {
+  async function open({ sessionId, cwd, label, provider, assistantLabel, subscription }) {
     titleEl.textContent = label || sessionId;
     body.innerHTML = '<span class="tool-pending">Loading...</span>';
     detailPane.reset(body); // clear whatever the previously-viewed session (or a failed fetch) left showing before this one's data arrives
     if (!modal.open) modal.showModal();
     const qs = new URLSearchParams({ cwd: cwd || '', provider: provider || 'claude' });
+    if (subscription) qs.set('subscription', subscription);
     appendOperatorQuery(qs);
     if (exportButton) exportButton.href = `/api/history/${sessionId}/markdown?${qs}`;
     try {

@@ -5,10 +5,8 @@
 // undocumented internal with no evidence it resolves nested paths.
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import { homedir } from 'node:os';
 import { isSafeSessionId } from './safe-id.js';
-
-const PROJECTS_DIR = path.join(homedir(), '.claude', 'projects');
+import { resolveClaudeSubscription } from './claude-subscriptions.js';
 
 async function exists(p) {
   try {
@@ -24,17 +22,17 @@ async function exists(p) {
 // encoding, find whichever project dir actually contains
 // `<claudeSessionId>.jsonl`. claudeSessionId is a UUID, so a false match
 // across two different projects isn't a real concern.
-async function findProjectDir(claudeSessionId) {
+async function findProjectDir(claudeSessionId, projectsDir) {
   let entries;
   try {
-    entries = await fs.readdir(PROJECTS_DIR, { withFileTypes: true });
+    entries = await fs.readdir(projectsDir, { withFileTypes: true });
   } catch {
     return null;
   }
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
-    const candidate = path.join(PROJECTS_DIR, entry.name, `${claudeSessionId}.jsonl`);
-    if (await exists(candidate)) return path.join(PROJECTS_DIR, entry.name);
+    const candidate = path.join(projectsDir, entry.name, `${claudeSessionId}.jsonl`);
+    if (await exists(candidate)) return path.join(projectsDir, entry.name);
   }
   return null;
 }
@@ -43,12 +41,12 @@ async function findProjectDir(claudeSessionId) {
 // toolUseId against every agent-*.meta.json under the parent session's
 // subagents/ dir. Returns null if nothing matches (not an Agent call, or
 // predates this harness version writing meta files).
-export async function findSubagentTranscript(claudeSessionId, toolUseId) {
+export async function findSubagentTranscript(claudeSessionId, toolUseId, configDir = resolveClaudeSubscription().configDir) {
   // Guard against a crafted id (e.g. `../../../etc/passwd`, or a
   // URL-decoded `..%2F..%2F..`) reaching the path.join below - see
   // safe-id.js's comment for the incident this closed.
   if (!isSafeSessionId(claudeSessionId)) return null;
-  const projectDir = await findProjectDir(claudeSessionId);
+  const projectDir = await findProjectDir(claudeSessionId, path.join(configDir, 'projects'));
   if (!projectDir) return null;
   const subDir = path.join(projectDir, claudeSessionId, 'subagents');
   let files;

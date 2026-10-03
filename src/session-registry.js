@@ -25,7 +25,7 @@ export const setSessionHandshake = delegation.setSessionHandshake;
 export const isSessionTrusted = delegation.isSessionTrusted;
 export const delegateTask = delegation.delegateTask;
 
-export function createSession({ cwd, resume, name, model, permissionMode, history, provider, effort, maxThinkingTokens, thinkingDisplay, autoContinue, startSessionImpl }) {
+export function createSession({ cwd, resume, name, model, permissionMode, history, provider, subscription, effort, maxThinkingTokens, thinkingDisplay, autoContinue, startSessionImpl }) {
   // Authoritative uniqueness check for delegation names - this function has
   // no `await` before it and none until sessions.set() below, closing the
   // TOCTOU window server.js's own pre-check has (that check runs after
@@ -37,6 +37,7 @@ export function createSession({ cwd, resume, name, model, permissionMode, histor
     throw err;
   }
   const providerDescriptor = parseProvider(provider);
+  const account = providerDescriptor.resolveSubscription?.(subscription);
   const resolvedProvider = providerDescriptor.id;
   // `startSessionImpl` can still be swapped for a stub in tests so unit
   // tests don't spawn a real CLI process.
@@ -52,6 +53,9 @@ export function createSession({ cwd, resume, name, model, permissionMode, histor
     name: name || null,
     cwd,
     provider: resolvedProvider,
+    subscription: account?.id || null,
+    // Only worth showing when there is something to tell apart.
+    subscriptionLabel: account && (account.id !== 'default' || providerDescriptor.listSubscriptions().subscriptions.length > 1) ? account.label : null,
     model: model || null,
     effort: effort || null,
     maxThinkingTokens: maxThinkingTokens ?? null, // set via setMaxThinkingTokens - null means "no forced budget" (SDK default), which resolves to adaptive thinking ON for Opus5/Sonnet5/Fable5, not off; 0 is the real "Off"
@@ -159,6 +163,7 @@ export function createSession({ cwd, resume, name, model, permissionMode, histor
 
   row.handle = startSessionImpl({
     cwd,
+    subscription: row.subscription,
     resume,
     model,
     effort: row.effort,
@@ -202,6 +207,7 @@ export function resetSession(id, { startSessionImpl } = {}) {
     cwd: row.cwd,
     model: row.model,
     provider: row.provider,
+    subscription: row.subscription,
     effort: row.effort,
     maxThinkingTokens: row.maxThinkingTokens,
     thinkingDisplay: row.thinkingDisplay,
@@ -353,6 +359,8 @@ export function toSummary(row) {
     state: row.state,
     mode: row.mode,
     provider: row.provider,
+    subscription: row.subscription,
+    subscriptionLabel: row.subscriptionLabel,
     providerSessionId: row.providerSessionId,
     // Backward-compatible field for detail-pane.js/agent-liveness.js, which
     // fetch a subagent transcript from ~/.claude/projects - Claude-only.
@@ -569,7 +577,7 @@ export async function loadEarlierHistory(id, fetchHistoryImpl) {
   if (!row.providerSessionId) throw new Error('session has no provider session id yet');
 
   const fetchHistory = fetchHistoryImpl || getProvider(row.provider).fetchHistory;
-  const full = await fetchHistory(row.providerSessionId, row.cwd);
+  const full = await fetchHistory(row.providerSessionId, row.cwd, { subscription: row.subscription });
   const earlier = full.slice(0, Math.max(0, full.length - row.historyShownCount));
   row.historyTotal = full.length;
   row.historyShownCount = full.length;
@@ -593,6 +601,9 @@ export async function rewind(id, turnIndex, { dryRun = false } = {}) {
   if (row.turnIndexUnreliable) {
     throw new Error('could not read this session\'s prior transcript when it started, so turn numbering cannot be trusted - rewind is disabled for it. Resuming it again may resolve this.');
   }
+  // Fail before forking if the row's account no longer exists - otherwise the
+  // fork lands on disk and the follow-up createSession throws, orphaning it.
+  provider.resolveSubscription?.(row.subscription);
   // How to fork a conversation is provider-specific and lives on the
   // descriptor (provider-registry.js) rather than branching here - a
   // provider claiming conversationFork without a rewind implementation is

@@ -45,6 +45,9 @@ const cwdInput = document.getElementById('cwdInput');
 const startNameInput = document.getElementById('startNameInput');
 
 const startProviderSelect = document.getElementById('startProviderSelect');
+const startSubscriptionControl = document.getElementById('startSubscriptionControl');
+const startSubscriptionSelect = document.getElementById('startSubscriptionSelect');
+const startSubscriptionError = document.getElementById('startSubscriptionError');
 const startModelSelect = document.getElementById('startModelSelect');
 const startEffortSelect = document.getElementById('startEffortSelect');
 const startClaudeEffortSelect = document.getElementById('startClaudeEffortSelect');
@@ -128,6 +131,7 @@ const detailPane = initDetailPane({
   initialWidth: persistedTurnChartPrefs.detailPaneWidth,
   onWidthChange: (width) => patchSettings({ detailPaneWidth: width }),
   tasksToggleBtn: taskPanelToggleBtn,
+  getSubscription: () => currentSubscription,
 });
 document.getElementById('detailPaneCollapseBtn').addEventListener('click', () => settings.setDetailPaneEnabled(false));
 
@@ -299,6 +303,7 @@ let currentCwd = null; // set from cockpit:hello/state - see applySession; used 
 // `providerSessionId`. The export route currently uses it as a transcript
 // key, so keep the button disabled until it is known.
 let currentProviderSessionId = null;
+let currentSubscription = null;
 let currentSessionName = null; // session.name - the durable title (session-titles.js), if this session has one
 
 function sessionProviderLabel() {
@@ -746,6 +751,7 @@ const globalStatsPanel = initGlobalStatsPanel({
   bodyEl: document.getElementById('statsBody'),
   rangeSelect: document.getElementById('statsRangeBtn'),
   refreshButton: document.getElementById('statsRefreshBtn'),
+  getSubscriptions: () => launchConfig('claude').subscriptions || [],
 });
 document.querySelector('[data-settings-tab="stats"]')?.addEventListener('click', () => globalStatsPanel.ensureLoaded());
 
@@ -1491,6 +1497,7 @@ copyLastBtn.addEventListener('click', () => {
 exportBtn.addEventListener('click', () => {
   if (!sessionId || !currentProviderSessionId) return;
   const params = new URLSearchParams({ cwd: currentCwd || '', provider: currentProvider });
+  if (currentSubscription) params.set('subscription', currentSubscription);
   appendOperatorQuery(params);
   window.location.href = `/api/history/${currentProviderSessionId}/markdown?${params}`;
 });
@@ -1787,7 +1794,36 @@ function selectedProvider() {
   return providerCatalog.validate(startProviderSelect.value);
 }
 
+function selectedSubscription() {
+  return launchConfig(selectedProvider()).subscriptions?.length
+    ? startSubscriptionSelect.value || undefined : undefined;
+}
+
+function fillStartSubscriptions() {
+  const subscriptions = launchConfig(selectedProvider()).subscriptions || [];
+  const previous = startSubscriptionSelect.value;
+  let remembered;
+  try { remembered = localStorage.getItem('cockpit:claudeSubscription'); } catch { /* storage unavailable */ }
+  startSubscriptionSelect.innerHTML = '';
+  for (const account of subscriptions) {
+    const option = document.createElement('option');
+    option.value = account.id;
+    option.textContent = account.label;
+    option.title = account.configDir;
+    startSubscriptionSelect.append(option);
+  }
+  const selected = subscriptions.find((account) => account.id === (previous || remembered)) || subscriptions[0];
+  if (selected) startSubscriptionSelect.value = selected.id;
+  // A broken accounts file leaves only Default; say so rather than letting
+  // a remembered account silently turn into Default.
+  const error = launchConfig(selectedProvider()).subscriptionsError;
+  startSubscriptionError.hidden = !error;
+  startSubscriptionError.textContent = error ? `Account config error - only Default available: ${error}` : '';
+  startSubscriptionControl.hidden = subscriptions.length <= 1 && !error;
+}
+
 let resumableGen = 0;
+let resumableKey = null; // provider+subscription the list currently shows
 
 async function loadResumable() {
   const provider = selectedProvider();
@@ -1796,7 +1832,15 @@ async function loadResumable() {
     return;
   }
   const gen = ++resumableGen;
-  const res = await fetch(`/api/resumable?provider=${encodeURIComponent(provider)}`);
+  const subscription = selectedSubscription();
+  const params = new URLSearchParams({ provider });
+  if (subscription) params.set('subscription', subscription);
+  // Only blank the list when it belongs to a different account/provider;
+  // a plain refresh keeps the old rows visible instead of flickering.
+  const key = `${provider}:${subscription || ''}`;
+  if (key !== resumableKey) resumeListEl.innerHTML = '';
+  resumableKey = key;
+  const res = await fetch(`/api/resumable?${params}`);
   if (gen !== resumableGen) return;
   if (!res.ok) {
     console.error('loadResumable failed:', (await res.json().catch(() => ({}))).error || res.statusText);
@@ -1833,7 +1877,7 @@ async function loadResumable() {
       time.title = new Date(s.mtimeMs).toLocaleString();
       info.append(time);
     }
-    info.addEventListener('click', () => startSession({ cwd: s.cwd, resume: s.sessionId, provider }));
+    info.addEventListener('click', () => startSession({ cwd: s.cwd, resume: s.sessionId, provider, subscription: s.subscription || subscription }));
     const renameBtn = document.createElement('button');
     renameBtn.type = 'button';
     renameBtn.className = 'btn renameResumeBtn';
@@ -1866,6 +1910,7 @@ async function loadResumable() {
         cwd: s.cwd,
         label: s.title || s.label,
         provider,
+        subscription: s.subscription || subscription,
         assistantLabel: providerCatalog.label(provider),
       });
     });
@@ -1909,7 +1954,10 @@ async function fillStartModels() {
     startModelSelect.innerHTML = '<option value="">Loading models…</option>';
     startModelSelect.disabled = true;
     try {
-      const res = await fetch(`/api/providers/${encodeURIComponent(provider)}/models`);
+      const params = new URLSearchParams();
+      const subscription = selectedSubscription();
+      if (subscription) params.set('subscription', subscription);
+      const res = await fetch(`/api/providers/${encodeURIComponent(provider)}/models${params.toString() ? `?${params}` : ''}`);
       const models = await res.json();
       if (!res.ok) throw new Error(models.error || 'Could not load models');
       if (!Array.isArray(models)) throw new Error('Model list was not an array');
@@ -1993,8 +2041,14 @@ function fillStartEffort() {
 }
 
 startProviderSelect.addEventListener('change', () => {
+  fillStartSubscriptions();
   fillStartModels();
   fillStartEffort();
+  loadResumable();
+});
+startSubscriptionSelect.addEventListener('change', () => {
+  try { localStorage.setItem('cockpit:claudeSubscription', startSubscriptionSelect.value); } catch { /* storage unavailable */ }
+  fillStartModels();
   loadResumable();
 });
 startModelSelect.addEventListener('change', fillStartEffort);
@@ -2029,6 +2083,7 @@ async function applyAvailableProviders() {
     }
     startProviderSelect.value = selected;
     startProviderSelect.hidden = providers.length <= 1;
+    fillStartSubscriptions();
     fillStartModels();
     fillStartEffort();
     loadResumable();
@@ -2153,7 +2208,7 @@ document.getElementById('launcherForm').addEventListener('submit', (event) => {
   });
 });
 
-async function startSession({ cwd, resume, model, provider, name, effort, thinkingBudget }) {
+async function startSession({ cwd, resume, model, provider, name, effort, thinkingBudget, subscription = selectedSubscription() }) {
   if (provider === 'codex' && !(await ensureCodexGitGuardConfigured(cwd))) return;
   const res = await fetch('/api/sessions', {
     method: 'POST',
@@ -2162,7 +2217,7 @@ async function startSession({ cwd, resume, model, provider, name, effort, thinki
     // creation itself - see routes/sessions.js. Claude's thinking budget has
     // no such creation-time param (it's always a live Query call), so it
     // rides in separately below once we have a token to call with.
-    body: JSON.stringify({ cwd, resume, model, provider, name, effort }),
+    body: JSON.stringify({ cwd, resume, model, provider, name, effort, subscription }),
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
@@ -2425,6 +2480,7 @@ function applySession(session) {
   currentProvider = providerCatalog.validate(session.provider) || session.provider || currentProvider;
   currentCwd = session.cwd;
   currentProviderSessionId = session.providerSessionId || session.claudeSessionId || null;
+  currentSubscription = session.subscription || null;
   exportBtn.disabled = !currentProviderSessionId;
   currentSessionName = session.name || null;
   compose.setDefaultPlaceholder(composePlaceholder());
@@ -2438,6 +2494,10 @@ function applySession(session) {
     ? `${currentSessionName}  ·  ${shortenCwd(session.cwd)}`
     : `${shortenCwd(session.cwd)}  ·  ${providerLabel}${session.tabCount > 1 ? `  ·  ${session.tabCount} tabs` : ''}`;
   sessionLabelEl.title = `${session.cwd} - click to rename this session`; // full path survives on hover once the label itself is truncated
+  if (session.subscriptionLabel) {
+    sessionLabelEl.textContent += `  ·  ${session.subscriptionLabel}`;
+    sessionLabelEl.title += ` (${session.subscriptionLabel} subscription)`;
+  }
   // /[\\/]/ , same fix as shortenCwd above - a Windows cwd has no '/', so
   // this used to always fall through to the full path instead of just its
   // last segment.
@@ -2555,6 +2615,7 @@ let agentLiveCount = 0; // count from agentLiveness's onChange - >0 means some s
 // result isn't a reliable "the subagent is done" signal. Only changes
 // anything visible while the main turn is idle - see renderStateIcon().
 const agentLiveness = createAgentLivenessTracker({
+  getSubscription: () => currentSubscription,
   onChange: (count) => {
     agentLiveCount = count;
     renderStateIcon();

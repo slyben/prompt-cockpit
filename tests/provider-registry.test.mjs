@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { useTestSubscriptionSettings } from './helpers/subscription-settings.mjs';
 import {
   InvalidProviderError,
   getProvider,
@@ -7,6 +8,8 @@ import {
   parseProvider,
   providerDetails,
 } from '../src/provider-registry.js';
+
+useTestSubscriptionSettings();
 
 test('provider parsing defaults only when omitted and rejects an explicit unknown value', () => {
   assert.equal(parseProvider().id, 'claude');
@@ -76,6 +79,7 @@ test('descriptors own launch, history, and capability metadata', () => {
     efforts: claude.efforts,
     dynamicModels: true,
     effortOptions: claude.effortOptions,
+    subscriptions: claude.listSubscriptions().subscriptions,
   });
 });
 

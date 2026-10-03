@@ -2,6 +2,15 @@
 
 All notable changes to this project are documented here.
 
+## [Unreleased]
+- Claude subscription selector in the launcher: the default login folder
+  is detected from `CLAUDE_CONFIG_DIR` or `~/.claude`. Extra accounts come
+  from `claudeSubscriptions` in Cockpit's server config; the selector is
+  hidden until another account is configured. Choices are remembered per
+  browser and isolated per session.
+  Resume, history, exports, subagents, model discovery, reset, and rewind
+  keep the selected account.
+
 ## [0.2.0]
 - Global Stats heatmap now colors cells by provider (Claude/Grok/Codex) and
   adds an on-demand last-7-day cost split by provider

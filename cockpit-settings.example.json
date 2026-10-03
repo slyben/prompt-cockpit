@@ -1,0 +1,9 @@
+{
+  "claudeSubscriptions": [
+    {
+      "id": "gmail",
+      "label": "Gmail",
+      "configDir": "~/.claudegmail"
+    }
+  ]
+}

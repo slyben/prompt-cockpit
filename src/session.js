@@ -10,6 +10,7 @@ import {
   validateCommitCommand,
 } from './git-commit-guard.js';
 import { createResultEpochTracker } from './result-epoch.js';
+import { claudeSubscriptionEnv } from './claude-subscriptions.js';
 
 // System-prompt anchor for the /ask cross-session delegation feature -
 // out-of-band confirmation (not part of any one turn, so it can't be
@@ -161,7 +162,7 @@ function createInputQueue() {
  * setMode/resolveApproval and queue-pane ops (listQueue/removeQueued/
  * reorderQueue/sendNow). `onApprovalRequest` fires for any gated tool.
  */
-export function startSession({ cwd, resume, model, effort, maxThinkingTokens, permissionMode, turnIndexOffset = 0, onMessage, onStateChange, onError, onApprovalRequest, onQueueChange, onMcpAuthRequest, onMcpAuthResolved, queryImpl = query, readGitGuardSettingsImpl = readGitGuardSettings, validateCommitCommandImpl = validateCommitCommand }) {
+export function startSession({ cwd, resume, model, effort, subscription, maxThinkingTokens, permissionMode, turnIndexOffset = 0, onMessage, onStateChange, onError, onApprovalRequest, onQueueChange, onMcpAuthRequest, onMcpAuthResolved, queryImpl = query, readGitGuardSettingsImpl = readGitGuardSettings, validateCommitCommandImpl = validateCommitCommand }) {
   const inputQueue = createInputQueue();
   let currentMode = permissionMode || 'default';
   const resultEpoch = createResultEpochTracker();
@@ -200,6 +201,7 @@ export function startSession({ cwd, resume, model, effort, maxThinkingTokens, pe
     prompt: inputQueue,
     options: {
       cwd,
+      env: claudeSubscriptionEnv(subscription),
       resume,
       model,
       // Reasoning-effort level ('low'|'medium'|'high'|'xhigh'|'max') - a

@@ -7,16 +7,20 @@
 // fallback for records that are no longer on disk.
 import { createReadStream } from 'node:fs';
 import { createInterface } from 'node:readline';
-import { homedir } from 'node:os';
 import path from 'node:path';
 import { listAllSessionFiles } from './session-launcher.js';
 import { grokSessionsRoot, listAllGrokSessionFiles } from './grok-launcher.js';
 import { scanGrokUsageFile } from './grok-history.js';
 import { scanCodexUsageSessions } from './codex-history.js';
 import { costForUsage } from './usage.js';
+import { safeListClaudeSubscriptions } from './claude-subscriptions.js';
 import { cachedScan, mapWithConcurrency, DEFAULT_SCAN_CONCURRENCY } from './scan-cache.js';
 
-const PROJECTS_DIR = path.join(homedir(), '.claude', 'projects');
+// Every configured Claude account's projects dir (deduped), so named
+// accounts count toward the totals too.
+function defaultProjectsDirs() {
+  return [...new Set(safeListClaudeSubscriptions().subscriptions.map((a) => path.join(a.configDir, 'projects')))];
+}
 
 const RANGE_DAYS = { '7d': 7, '30d': 30, all: null };
 
@@ -309,7 +313,8 @@ function trackRefresh(cache, inFlight, key, scanFn) {
 }
 
 async function scanAllProviders(projectsDir, grokSessionsDir, scanCodex) {
-  const claudeFiles = await listAllSessionFiles(projectsDir);
+  const dirs = Array.isArray(projectsDir) ? projectsDir : [projectsDir];
+  const claudeFiles = (await Promise.all(dirs.map((dir) => listAllSessionFiles(dir)))).flat();
   const scans = await mapWithConcurrency(claudeFiles, DEFAULT_SCAN_CONCURRENCY, async (f) => ({
     ...await cachedScan(f.filePath, f.mtimeMs, scanSessionFile),
     provider: 'claude',
@@ -336,16 +341,18 @@ async function scanAllProviders(projectsDir, grokSessionsDir, scanCodex) {
   return scans;
 }
 
-export async function computeGlobalStats(projectsDir = PROJECTS_DIR, {
+export async function computeGlobalStats(projectsDirArg, {
   range = 'all', now = Date.now(), grokSessionsDir, scanCodexSessions,
 } = {}) {
+  const isDefault = projectsDirArg === undefined;
+  const projectsDir = isDefault ? defaultProjectsDirs() : projectsDirArg;
   const grokDir = grokSessionsDir === undefined
-    ? (projectsDir === PROJECTS_DIR ? grokSessionsRoot() : null)
+    ? (isDefault ? grokSessionsRoot() : null)
     : grokSessionsDir;
   const codexScan = scanCodexSessions === undefined
-    ? (projectsDir === PROJECTS_DIR ? () => scanCodexUsageSessions() : null)
+    ? (isDefault ? () => scanCodexUsageSessions() : null)
     : scanCodexSessions;
-  const cacheable = projectsDir === PROJECTS_DIR
+  const cacheable = isDefault
     && grokSessionsDir === undefined
     && scanCodexSessions === undefined;
   if (!cacheable) {

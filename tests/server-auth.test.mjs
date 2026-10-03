@@ -12,6 +12,9 @@ import * as registry from '../src/session-registry.js';
 import { setSessionDefaults } from '../src/session-defaults.js';
 import { settingsPath } from '../src/settings-file.js';
 import { readAllowRules, addAllowRule } from '../src/permission-rules.js';
+import { useTestSubscriptionSettings } from './helpers/subscription-settings.mjs';
+
+useTestSubscriptionSettings();
 
 process.env.COCKPIT_OPERATOR_TOKEN = process.env.COCKPIT_OPERATOR_TOKEN || 'test-operator-token-16plus';
 process.env.PORT = process.env.PORT || '4319';
@@ -38,6 +41,28 @@ function wsUrl(pathAndQuery) {
 
 before(() => new Promise((resolve) => server.listen(PORT, HOST, resolve)));
 after(() => new Promise((resolve) => server.close(resolve)));
+
+test('subscription routes reject unknown IDs and selections for unsupported providers before starting a CLI', async () => {
+  for (const endpoint of [
+    '/api/resumable?subscription=unknown',
+    '/api/providers/claude/models?subscription=unknown',
+    '/api/history/test-session?subscription=unknown',
+    '/api/history/test-session/markdown?subscription=unknown',
+    '/api/history/test-session/agent/tool-1?subscription=unknown',
+    '/api/resumable?provider=codex&subscription=gmail',
+  ]) {
+    const res = await fetch(`${ORIGIN}${endpoint}`);
+    assert.equal(res.status, 400, endpoint);
+  }
+  for (const subscription of ['unknown', '../.claudegmail', {}]) {
+    const res = await fetch(`${ORIGIN}/api/sessions`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ cwd: process.cwd(), subscription }),
+    });
+    assert.equal(res.status, 400);
+    assert.match((await res.json()).error, /subscription/);
+  }
+});
 
 // The thinking/auto-continue/reload-plugins/plugin-enabled routes each
 // persist to <cwd>/.claude/settings.local.json (session-defaults.js/

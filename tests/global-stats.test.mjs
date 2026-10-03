@@ -406,3 +406,20 @@ test('computeGlobalStats keeps Claude totals when the Codex scan fails', async (
     await rm(claudeRoot, { recursive: true, force: true });
   }
 });
+
+test('computeGlobalStats sums Claude transcripts across several account dirs', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'cockpit-stats-multi-'));
+  try {
+    const dirs = [path.join(root, 'a', '-p'), path.join(root, 'b', '-p')];
+    for (const [i, dir] of dirs.entries()) {
+      await mkdir(dir, { recursive: true });
+      await writeFile(path.join(dir, `${i}${i}${i}${i}${i}${i}${i}${i}-1111-1111-1111-111111111111.jsonl`),
+        assistantLine('2026-08-20T08:00:00.000Z', 'claude-sonnet-5', { input_tokens: 10, output_tokens: 5 }) + '\n');
+    }
+    const stats = await computeGlobalStats([path.join(root, 'a'), path.join(root, 'b')], { range: 'all', now: Date.parse('2026-08-20T12:00:00Z'), grokSessionsDir: null, scanCodexSessions: null });
+    assert.equal(stats.sessions, 2);
+    assert.equal(stats.inputTokens, 20);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

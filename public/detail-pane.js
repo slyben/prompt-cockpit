@@ -40,7 +40,7 @@ const AGENT_POLL_MS = 2000;
 // session's own tool_result. Clicking the status line resumes it.
 const AGENT_STALL_POLLS_BEFORE_STOP = 4;
 
-export function initDetailPane({ panel, headerLabel, followLiveBtn, tabButtons, body, resizeHandle, initialWidth, onWidthChange, tasksToggleBtn }) {
+export function initDetailPane({ panel, headerLabel, followLiveBtn, tabButtons, body, resizeHandle, initialWidth, onWidthChange, tasksToggleBtn, getSubscription = () => null }) {
   let enabled = true;
   let currentContainer = null;
   let pinnedId = null; // set by an explicit row click; cleared by followLive() or reset()
@@ -466,7 +466,7 @@ export function initDetailPane({ panel, headerLabel, followLiveBtn, tabButtons, 
     container.append(statusEl, streamEl);
 
     agent = {
-      claudeSessionId, toolUseId, label: label || '',
+      claudeSessionId, toolUseId, label: label || '', subscription: getSubscription(),
       renderedCount: 0, lastMtimeMs: null, stallCount: 0, stopped: false,
       timer: null, pollId, statusEl, streamEl, container,
     };
@@ -483,7 +483,9 @@ export function initDetailPane({ panel, headerLabel, followLiveBtn, tabButtons, 
     }
     let data;
     try {
-      const res = await fetch(`/api/history/${encodeURIComponent(agent.claudeSessionId)}/agent/${encodeURIComponent(agent.toolUseId)}`);
+      const params = new URLSearchParams();
+      if (agent.subscription) params.set('subscription', agent.subscription);
+      const res = await fetch(`/api/history/${encodeURIComponent(agent.claudeSessionId)}/agent/${encodeURIComponent(agent.toolUseId)}?${params}`);
       if (!res.ok) {
         const errBody = await res.json().catch(() => ({}));
         throw new Error(errBody.error || res.statusText);

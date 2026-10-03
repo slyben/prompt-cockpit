@@ -10,6 +10,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as registry from '../src/session-registry.js';
 import { fakeWs, fakeStartSession, pendingTurnIds, pendingTurnCount, frontDelegationTag } from './test-helpers.mjs';
+import { useTestSubscriptionSettings } from './helpers/subscription-settings.mjs';
+
+useTestSubscriptionSettings();
 
 // Cross-session delegation - findByName is the addressing
 // primitive `/ask <Name>: ...` resolves against: case-insensitive within a
