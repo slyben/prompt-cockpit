@@ -588,6 +588,37 @@ function highlightSource(code, lang) {
   }
 }
 
+// Per-file line counts for a file-editing tool call, for the detail pane's
+// Changes table. [] for any other tool. Multi-file `changes` payloads (Grok/
+// Codex) carry no line counts the cockpit can trust, so those rows are
+// path-only (added/removed null) rather than guessed.
+export function summarizeFileChange(name, input) {
+  if (!input || typeof input !== 'object') return [];
+  if (name === 'Edit' && Array.isArray(input.changes)) {
+    return input.changes
+      .map((change) => change?.path || change?.file_path || change?.filename)
+      .filter(Boolean)
+      .map((path) => ({ path, added: null, removed: null }));
+  }
+  if (name === 'Edit' && typeof input.file_path === 'string') {
+    return [{ path: input.file_path, ...countDiff(diffLines(input.old_string, input.new_string)) }];
+  }
+  if (name === 'MultiEdit' && typeof input.file_path === 'string' && Array.isArray(input.edits)) {
+    const totals = input.edits.reduce((acc, edit) => {
+      const c = countDiff(diffLines(edit.old_string, edit.new_string));
+      return { added: acc.added + c.added, removed: acc.removed + c.removed };
+    }, { added: 0, removed: 0 });
+    return [{ path: input.file_path, ...totals }];
+  }
+  if (name === 'Write') {
+    const path = input.file_path || input.target_file || input.path;
+    if (!path) return [];
+    const content = typeof input.content === 'string' ? input.content : '';
+    return [{ path, added: content ? content.split('\n').length : 0, removed: 0 }];
+  }
+  return [];
+}
+
 // The row's "brief args" cell, e.g. file_path: "package.json" - just the key:
 // value fragment, not wrapped in `name(...)`, since .tool-row-name already
 // prints the tool name right before this in the same row (used to be

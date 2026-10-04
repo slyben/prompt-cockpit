@@ -71,6 +71,12 @@ export function getToolCallRecord(container, id) {
   return recordsByContainer.get(container)?.get(id) || null;
 }
 
+// Oldest-first, so a caller folding records into per-file totals keeps the
+// last edit of each file as the one a row click should jump to.
+export function getToolCallRecords(container) {
+  return (orderByContainer.get(container) || []).map((id) => getToolCallRecord(container, id)).filter(Boolean);
+}
+
 export function getMostRecentToolCallRecord(container) {
   const order = orderByContainer.get(container) || [];
   const id = order[order.length - 1];

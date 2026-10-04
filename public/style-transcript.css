@@ -77,6 +77,18 @@
   .detail-pane-placeholder { color: var(--muted); padding: 12px 0; }
   .detail-pane-note { color: var(--muted); opacity: 0.75; font-size: 11px; margin-top: 4px; white-space: normal; }
   .detail-pane-section-label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 2px; }
+  .changes-table { width: 100%; border-collapse: collapse; white-space: nowrap; }
+  .changes-table th { color: var(--warn); font-weight: 700; text-align: right; padding: 4px 8px 6px; border-bottom: 3px solid var(--border); }
+  .changes-table td { text-align: right; padding: 5px 8px; border-bottom: 1px solid var(--border); }
+  .changes-table th:first-child, .changes-table td:first-child { text-align: left; }
+  .changes-table td.changes-file { color: var(--ok); max-width: 0; width: 100%; overflow: hidden; text-overflow: ellipsis; direction: rtl; }
+  .changes-table tbody tr { cursor: pointer; }
+  .changes-table tbody tr:hover td { background: var(--panel); }
+  .changes-table .changes-add { color: var(--ok); }
+  .changes-table .changes-del { color: var(--error); }
+  .changes-table tfoot td { font-weight: 700; border-top: 2px solid var(--border); border-bottom: 0; color: var(--text); }
+  .changes-table tfoot td.changes-add { color: var(--ok); }
+  .changes-table tfoot td.changes-del { color: var(--error); }
   .tool-row {
     display: flex;
     align-items: center;

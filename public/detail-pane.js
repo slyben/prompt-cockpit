@@ -3,9 +3,9 @@
 // "follow the most recent call live" until a historical row is pinned.
 // Also hosts two independent tabs unrelated to tool-call selection (Tasks,
 // Agent), folded in here so there's one right-hand pane, not three.
-import { renderBody, formatUsageInline, renderMessage, resetStreamView } from '/stream-view.js';
+import { renderBody, formatUsageInline, renderMessage, resetStreamView, summarizeFileChange } from '/stream-view.js';
 import { langForToolResult } from '/lang-from.js';
-import { getToolCallRecord, getMostRecentToolCallRecord } from '/tool-call-store.js';
+import { getToolCallRecord, getMostRecentToolCallRecord, getToolCallRecords } from '/tool-call-store.js';
 import { initResizablePanel } from '/resizable-panel.js';
 
 // No Schema tab: there's no client-side tool schema registry to source
@@ -45,9 +45,10 @@ export function initDetailPane({ panel, headerLabel, followLiveBtn, tabButtons, 
   let currentContainer = null;
   let pinnedId = null; // set by an explicit row click; cleared by followLive() or reset()
   let currentRecord = null;
-  let activeTab = 'summary'; // 'summary' | 'payload' | 'result' | 'timing' | 'tasks' | 'agent'
+  let activeTab = 'summary'; // 'summary' | 'payload' | 'result' | 'timing' | 'changes' | 'tasks' | 'agent'
   let tasks = [];
   const tasksTabButton = tabButtons.find((b) => b.dataset.tab === 'tasks') || null;
+  const changesTabButton = tabButtons.find((b) => b.dataset.tab === 'changes') || null;
   const agentTabButton = tabButtons.find((b) => b.dataset.tab === 'agent') || null;
 
   // Agent tab state - set by showAgent(), polled independently of the
@@ -115,7 +116,7 @@ export function initDetailPane({ panel, headerLabel, followLiveBtn, tabButtons, 
     // An explicit click on a tool-call row is a direct request to see it -
     // bring the pane back from Tasks/Agent if that's what it was showing,
     // same reasoning as clearing textView above.
-    if (activeTab === 'tasks' || activeTab === 'agent') { setActiveTab('summary'); return; }
+    if (activeTab === 'tasks' || activeTab === 'agent' || activeTab === 'changes') { setActiveTab('summary'); return; }
     render();
   }
 
@@ -130,7 +131,7 @@ export function initDetailPane({ panel, headerLabel, followLiveBtn, tabButtons, 
     currentRecord = null;
     textView = { id, label, text };
     updateLiveIndicator();
-    if (activeTab === 'tasks' || activeTab === 'agent') { setActiveTab('summary'); return; }
+    if (activeTab === 'tasks' || activeTab === 'agent' || activeTab === 'changes') { setActiveTab('summary'); return; }
     render();
   }
 
@@ -140,6 +141,12 @@ export function initDetailPane({ panel, headerLabel, followLiveBtn, tabButtons, 
   // the point of pinning.
   function onToolCallStarted(container, record) {
     currentContainer = container;
+    // Revealed on the first file edit and never re-hidden, like Tasks; it
+    // does not take focus, only re-renders if it is already showing.
+    if (changesTabButton && summarizeFileChange(record.name, record.input).length) {
+      changesTabButton.hidden = false;
+      if (activeTab === 'changes') render();
+    }
     if (pinnedId != null) {
       updateLiveIndicator();
       return;
@@ -153,7 +160,7 @@ export function initDetailPane({ panel, headerLabel, followLiveBtn, tabButtons, 
   // only if it's currently showing that exact record (so duration/result
   // text update live without stealing focus from a pinned different row).
   function onToolResultArrived(container, id) {
-    if (currentRecord && currentRecord.id === id) render();
+    if (activeTab === 'changes' || (currentRecord && currentRecord.id === id)) render();
   }
 
   function followLive() {
@@ -217,6 +224,7 @@ export function initDetailPane({ panel, headerLabel, followLiveBtn, tabButtons, 
     // Tasks/Agent are independent of the tool-call-record machinery below -
     // they stay on whatever they last showed regardless of which tool call
     // is currently live, same as textView above.
+    if (activeTab === 'changes') { renderChangesTab(); return; }
     if (activeTab === 'tasks') { renderTasksTab(); return; }
     if (activeTab === 'agent') { renderAgentTab(); return; }
     if (!currentRecord) { renderEmpty(); return; }
@@ -357,6 +365,63 @@ export function initDetailPane({ panel, headerLabel, followLiveBtn, tabButtons, 
     }
     line('');
     line('Measured in the browser (render time to result-received time), including network and render lag - not the tool\'s actual server-side execution time. Historical/replayed rows may show no duration at all if no per-call timestamp was available to measure from.', 'detail-pane-note');
+  }
+
+  // --- Changes tab: one row per file edited this session, folded from the
+  // tool-call records (Edit/MultiEdit/Write). Failed calls are left out;
+  // pending ones count so the table moves as the edit lands. ---
+
+  function collectChanges() {
+    const byPath = new Map();
+    for (const record of currentContainer ? getToolCallRecords(currentContainer) : []) {
+      if (record.status === 'error') continue;
+      for (const change of summarizeFileChange(record.name, record.input)) {
+        const row = byPath.get(change.path) || { path: change.path, edits: 0, added: 0, removed: 0, counted: false, lastId: null };
+        row.edits += 1;
+        row.lastId = record.id;
+        if (change.added != null) { row.added += change.added; row.removed += change.removed; row.counted = true; }
+        byPath.set(change.path, row);
+      }
+    }
+    return [...byPath.values()];
+  }
+
+  function renderChangesTab() {
+    headerLabel.textContent = 'Changes';
+    body.textContent = '';
+    const rows = collectChanges();
+    if (!rows.length) { line('No file changes yet.', 'detail-pane-note'); return; }
+
+    const table = document.createElement('table');
+    table.className = 'changes-table';
+    const head = table.createTHead().insertRow();
+    for (const label of ['File', 'Edits', '+', '-']) {
+      const th = document.createElement('th');
+      th.textContent = label;
+      head.append(th);
+    }
+    const tbody = table.createTBody();
+    const cell = (tr, text, cls) => {
+      const td = tr.insertCell();
+      td.textContent = text;
+      if (cls) td.className = cls;
+      return td;
+    };
+    for (const row of rows) {
+      const tr = tbody.insertRow();
+      const file = cell(tr, row.path, 'changes-file');
+      file.title = row.path;
+      cell(tr, String(row.edits));
+      cell(tr, row.counted ? `+${row.added}` : '-', 'changes-add');
+      cell(tr, row.counted ? `-${row.removed}` : '-', 'changes-del');
+      tr.addEventListener('click', () => selectToolCall(currentContainer, row.lastId));
+    }
+    const total = table.createTFoot().insertRow();
+    cell(total, `${rows.length} file${rows.length === 1 ? '' : 's'}`);
+    cell(total, String(rows.reduce((n, r) => n + r.edits, 0)));
+    cell(total, `+${rows.reduce((n, r) => n + r.added, 0)}`, 'changes-add');
+    cell(total, `-${rows.reduce((n, r) => n + r.removed, 0)}`, 'changes-del');
+    body.append(table);
   }
 
   // --- Tasks tab (folded in from the old standalone task-panel.js) ---
@@ -587,6 +652,7 @@ export function initDetailPane({ panel, headerLabel, followLiveBtn, tabButtons, 
     stopAgentPoll();
     agent = null;
     if (tasksTabButton) tasksTabButton.hidden = true;
+    if (changesTabButton) changesTabButton.hidden = true;
     if (tasksToggleBtn) tasksToggleBtn.hidden = true;
     if (agentTabButton) agentTabButton.hidden = true;
     for (const b of tabButtons) {
