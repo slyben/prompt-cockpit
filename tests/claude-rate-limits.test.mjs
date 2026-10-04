@@ -48,6 +48,30 @@ test('landing-page usage waits for the zero-turn handshake, skips local scans an
   assert.equal(closed, true);
 });
 
+test('usage is awaited before the message loop exits, since loop cleanup closes the query mid-request', async () => {
+  const limits = { five_hour: { utilization: 7 } };
+  const queryImpl = () => {
+    let loopExited = false;
+    return {
+      async *[Symbol.asyncIterator]() {
+        try {
+          yield { type: 'system', subtype: 'init' };
+          yield { type: 'result', num_turns: 0 };
+        } finally { loopExited = true; }
+      },
+      // Real SDK: cleanup on loop exit rejects any still-pending control request.
+      usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET: () => new Promise((resolve, reject) => {
+        setImmediate(() => (loopExited
+          ? reject(new Error('Query closed before response received'))
+          : resolve({ rate_limits_available: true, rate_limits: limits })));
+      }),
+      close() {},
+    };
+  };
+  const result = await fetchClaudeRateLimits({ queryImpl });
+  assert.deepEqual(result.rateLimits, limits);
+});
+
 test('each subscription gets its own credentials and quota cache; concurrent calls share one CLI', async () => {
   const dirs = [];
   let calls = 0;

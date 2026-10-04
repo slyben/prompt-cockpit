@@ -50,13 +50,19 @@ async function readRateLimits(queryImpl, subscription, timeoutMs) {
       if (!handle.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET) return null;
       for await (const message of handle) {
         if (message.type === 'result' && message.num_turns === 0) {
-          return readClaudeAccountLimits(handle);
+          // await: a bare return exits the loop, whose cleanup closes the query mid-request.
+          return await readClaudeAccountLimits(handle);
         }
       }
       throw new Error('Claude CLI closed before completing its usage lookup');
     };
+    // If the timeout wins, close() below rejects read()'s in-flight SDK call
+    // ("Query closed before response received"). Nobody awaits it by then, so
+    // without this it is an unhandled rejection and kills the server.
+    const reading = read();
+    reading.catch(() => {});
     const rateLimits = await Promise.race([
-      read(),
+      reading,
       new Promise((_, reject) => {
         timer = setTimeout(() => reject(new Error('Claude usage lookup timed out')), timeoutMs);
       }),
