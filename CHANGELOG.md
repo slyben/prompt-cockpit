@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here.
 
+## [0.2.2]
+- Detail pane: new Changes tab with a per-file table of edits (+/- lines,
+  totals); click a row to open that file's last edit
+- Fixed a server crash on startup when the Claude quota lookup closed its
+  query mid-request (unhandled "Query closed before response received")
+- Claude Agent SDK 0.3.289
+
 ## [0.2.1]
 - Multiple Claude accounts: pick a subscription in the launcher (extra
   accounts via `claudeSubscriptions`); sessions keep it through resume,

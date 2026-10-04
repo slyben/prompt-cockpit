@@ -1,6 +1,6 @@
 {
   "name": "prompt-cockpit",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "private": true,
   "license": "MIT",
   "description": "Browser cockpit for driving Claude Code, Grok, and Codex CLI sessions.",
@@ -13,7 +13,7 @@
     "test": "node --test tests/*.test.mjs"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.3.288",
+    "@anthropic-ai/claude-agent-sdk": "^0.3.289",
     "ws": "^8.22.0"
   }
 }
