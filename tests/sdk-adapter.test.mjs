@@ -228,3 +228,81 @@ test('workspaceDiff on a non-git directory reports the error instead of throwing
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test('workspaceDiff modes split unstaged, staged and HEAD views and reject unknown modes', async () => {
+  const root = await makeFixtureProject();
+  try {
+    const git = (...args) => execFileAsync('git', args, { cwd: root });
+    await git('init', '-q');
+    await git('config', 'user.email', 'test@example.com');
+    await git('config', 'user.name', 'Test');
+    await git('add', '-A');
+    await git('commit', '-q', '-m', 'init');
+
+    await writeFile(path.join(root, 'README.md'), '# x\nstaged-line\n');
+    await git('add', 'README.md');
+    await writeFile(path.join(root, 'README.md'), '# x\nstaged-line\nunstaged-line\n');
+
+    const unstaged = await workspaceDiff(root, 'unstaged');
+    assert.match(unstaged.diff, /\+unstaged-line/);
+    assert.doesNotMatch(unstaged.diff, /\+staged-line/);
+    const staged = await workspaceDiff(root, 'staged');
+    assert.match(staged.diff, /\+staged-line/);
+    assert.doesNotMatch(staged.diff, /\+unstaged-line/);
+    const head = await workspaceDiff(root, 'head');
+    assert.match(head.diff, /\+staged-line/);
+    assert.match(head.diff, /\+unstaged-line/);
+    assert.equal((await workspaceDiff(root)).diff, unstaged.diff);
+
+    const bad = await workspaceDiff(root, '--output=evil');
+    assert.equal(bad.diff, '');
+    assert.match(bad.error, /unknown diff mode/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('workspaceDiff includes untracked files in unstaged and head views, not staged', async () => {
+  const root = await makeFixtureProject();
+  try {
+    const git = (...args) => execFileAsync('git', args, { cwd: root });
+    await git('init', '-q');
+    await git('config', 'user.email', 'test@example.com');
+    await git('config', 'user.name', 'Test');
+    await git('add', '-A');
+    await git('commit', '-q', '-m', 'init');
+    await writeFile(path.join(root, 'brand new.txt'), 'fresh-line\n');
+
+    for (const mode of ['unstaged', 'head']) {
+      const { diff, error } = await workspaceDiff(root, mode);
+      assert.equal(error, undefined);
+      assert.match(diff, /brand new\.txt/, mode);
+      assert.match(diff, /\+fresh-line/, mode);
+    }
+    assert.doesNotMatch((await workspaceDiff(root, 'staged')).diff, /brand new/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('workspaceDiff stubs an untracked file that overflows the buffer without corrupting the next file', async () => {
+  const root = await makeFixtureProject();
+  try {
+    const git = (...args) => execFileAsync('git', args, { cwd: root });
+    await git('init', '-q');
+    await git('config', 'user.email', 'test@example.com');
+    await git('config', 'user.name', 'Test');
+    await git('add', '-A');
+    await git('commit', '-q', '-m', 'init');
+    await writeFile(path.join(root, 'big.txt'), `${'x'.repeat(99)}\n`.repeat(50));
+    await writeFile(path.join(root, 'small.txt'), 'tiny\n');
+
+    const { diff, error } = await workspaceDiff(root, 'unstaged', { maxBuffer: 2000 });
+    assert.equal(error, undefined);
+    assert.match(diff, /^diff --git a\/big\.txt b\/big\.txt\nnew file mode 100644\nFile too large to diff\.$/m);
+    assert.match(diff, /^diff --git a\/small\.txt b\/small\.txt$/m);
+    assert.match(diff, /^\+tiny$/m);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

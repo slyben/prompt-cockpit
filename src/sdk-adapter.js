@@ -115,18 +115,57 @@ export async function fileSuggestions(cwd, queryText, extraFolders) {
   return results.slice(0, MAX_RESULTS + folders.length * EXTRA_FOLDER_MAX_RESULTS);
 }
 
+// `git diff` argument sets per source: unstaged (default), staged, or
+// everything against HEAD. quotepath=false keeps non-ASCII paths readable.
+const GIT = ['-c', 'core.quotepath=false'];
+const DIFF_MODE_ARGS = {
+  unstaged: [...GIT, 'diff', '--no-color'],
+  staged: [...GIT, 'diff', '--no-color', '--cached'],
+  head: [...GIT, 'diff', '--no-color', 'HEAD'],
+};
+// A staged-only view can't contain untracked files; the other two should.
+const MODES_WITH_UNTRACKED = new Set(['unstaged', 'head']);
+const DEFAULT_MAX_BUFFER = 10 * 1024 * 1024;
+
+export function isDiffMode(mode) {
+  return Object.hasOwn(DIFF_MODE_ARGS, mode);
+}
+
+// `git diff` never lists untracked files, so a file just created would be
+// invisible. Diff each one against /dev/null (--no-index exits 1 when the
+// files differ, which execFile surfaces as an error carrying stdout). A file
+// whose diff overflows maxBuffer becomes a header-only stub: the truncated
+// text would end mid-line and swallow the next file's header.
+async function untrackedDiff(cwd, maxBuffer) {
+  const { stdout: list } = await execFileAsync('git', [...GIT, 'ls-files', '--others', '--exclude-standard', '-z'], { cwd, maxBuffer });
+  let out = '';
+  for (const file of list.split('\0').filter(Boolean)) {
+    try {
+      const { stdout } = await execFileAsync('git', [...GIT, 'diff', '--no-color', '--no-index', '--', '/dev/null', file], { cwd, maxBuffer });
+      out += stdout;
+    } catch (err) {
+      if (err?.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') {
+        out += `diff --git a/${file} b/${file}\nnew file mode 100644\nFile too large to diff.\n`;
+      } else if (typeof err?.stdout === 'string') {
+        out += err.stdout;
+      }
+    }
+  }
+  return out;
+}
+
 /**
  * @param cwd - project root
+ * @param mode - 'unstaged' | 'staged' | 'head'
  * @returns unified diff text, `git diff` fallback
  */
-export async function workspaceDiff(cwd) {
+export async function workspaceDiff(cwd, mode = 'unstaged', { maxBuffer = DEFAULT_MAX_BUFFER } = {}) {
+  if (!isDiffMode(mode)) return { diff: '', source: 'git', error: `unknown diff mode: ${mode}` };
   try {
-    const { stdout } = await execFileAsync('git', ['diff', '--no-color'], {
-      cwd,
-      maxBuffer: 10 * 1024 * 1024,
-    });
-    return { diff: stdout, source: 'git' };
+    const { stdout } = await execFileAsync('git', DIFF_MODE_ARGS[mode], { cwd, maxBuffer });
+    const untracked = MODES_WITH_UNTRACKED.has(mode) ? await untrackedDiff(cwd, maxBuffer) : '';
+    return { diff: stdout + untracked, source: 'git', mode };
   } catch (err) {
-    return { diff: '', source: 'git', error: String((err && err.message) || err) };
+    return { diff: '', source: 'git', mode, error: String((err && err.message) || err) };
   }
 }

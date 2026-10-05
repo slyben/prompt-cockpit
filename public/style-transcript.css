@@ -77,6 +77,8 @@
   .detail-pane-placeholder { color: var(--muted); padding: 12px 0; }
   .detail-pane-note { color: var(--muted); opacity: 0.75; font-size: 11px; margin-top: 4px; white-space: normal; }
   .detail-pane-section-label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 2px; }
+  .changes-toolbar { display: flex; gap: 6px; align-items: center; margin-bottom: 8px; }
+  .changes-source { background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 3px 6px; font: inherit; }
   .changes-table { width: 100%; border-collapse: collapse; white-space: nowrap; }
   .changes-table th { color: var(--warn); font-weight: 700; text-align: right; padding: 4px 8px 6px; border-bottom: 3px solid var(--border); }
   .changes-table td { text-align: right; padding: 5px 8px; border-bottom: 1px solid var(--border); }

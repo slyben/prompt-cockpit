@@ -374,3 +374,21 @@ win32 native binary):
   at high, silently ignored at xhigh, never a 400.
 - `thinking-updates-display-probe.manual.mjs` - the SDK rejects the `updates`
   display at runtime, so the display dropdown stays summarized/omitted.
+
+## Changes tab: net diff + git sources
+
+Unit-tested:
+- `changes-model.test.mjs` - folding Edit/MultiEdit/Write calls into one net
+  diff per file (chained edits merge, undone edits vanish, Write resets),
+  region headers, and `git diff` text split into per-file sections with counts.
+- `sdk-adapter.test.mjs` - `workspaceDiff` modes (unstaged / staged / HEAD)
+  against a real temp git repo, rejection of unknown modes, and the
+  header-only stub for an untracked file whose diff overflows the buffer.
+- `changes-model.test.mjs` also covers `diffFromResponse` (non-OK / non-JSON
+  `/diff` replies become errors, never "No changes.") and the no-phantom-line
+  rule for Write content ending in a newline.
+
+Hand-verified only (no jsdom): the source dropdown, file drilldown, Refresh
+button and the "Loading diff..." state in `detail-pane.js`. The session net
+diff is rebuilt from the edit calls, not read from disk, so edits made by
+Bash or outside the session only show under the Git sources.

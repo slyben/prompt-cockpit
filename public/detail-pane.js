@@ -7,6 +7,7 @@ import { renderBody, formatUsageInline, renderMessage, resetStreamView, summariz
 import { langForToolResult } from '/lang-from.js';
 import { getToolCallRecord, getMostRecentToolCallRecord, getToolCallRecords } from '/tool-call-store.js';
 import { initResizablePanel } from '/resizable-panel.js';
+import { foldFileEdits, segmentsToLines, countLines, parseUnifiedDiff } from '/changes-model.js';
 
 // No Schema tab: there's no client-side tool schema registry to source
 // it from, so there's nothing to render or wire.
@@ -40,13 +41,19 @@ const AGENT_POLL_MS = 2000;
 // session's own tool_result. Clicking the status line resumes it.
 const AGENT_STALL_POLLS_BEFORE_STOP = 4;
 
-export function initDetailPane({ panel, headerLabel, followLiveBtn, tabButtons, body, resizeHandle, initialWidth, onWidthChange, tasksToggleBtn, getSubscription = () => null }) {
+export function initDetailPane({ panel, headerLabel, followLiveBtn, tabButtons, body, resizeHandle, initialWidth, onWidthChange, tasksToggleBtn, getSubscription = () => null, loadDiff = null }) {
   let enabled = true;
   let currentContainer = null;
   let pinnedId = null; // set by an explicit row click; cleared by followLive() or reset()
   let currentRecord = null;
   let activeTab = 'summary'; // 'summary' | 'payload' | 'result' | 'timing' | 'changes' | 'tasks' | 'agent'
   let tasks = [];
+  // Changes tab: 'session' folds this session's own tool calls; the rest read
+  // `git diff` (unstaged / staged / against HEAD) through loadDiff(mode).
+  let changesSource = 'session';
+  let changesFile = null; // path of the file drilled into, or null for the table
+  let gitDiff = null; // { mode, files, error } once loaded, null while loading
+  let gitDiffGen = 0; // bumped per fetch so a slow stale response can't paint over a newer one
   const tasksTabButton = tabButtons.find((b) => b.dataset.tab === 'tasks') || null;
   const changesTabButton = tabButtons.find((b) => b.dataset.tab === 'changes') || null;
   const agentTabButton = tabButtons.find((b) => b.dataset.tab === 'agent') || null;
@@ -386,16 +393,64 @@ export function initDetailPane({ panel, headerLabel, followLiveBtn, tabButtons, 
     return [...byPath.values()];
   }
 
-  function renderChangesTab() {
-    headerLabel.textContent = 'Changes';
-    body.textContent = '';
-    const rows = collectChanges();
-    if (!rows.length) { line('No file changes yet.', 'detail-pane-note'); return; }
+  const CHANGE_SOURCES = [
+    ['session', 'Session edits'],
+    ['unstaged', 'Git: unstaged'],
+    ['staged', 'Git: staged'],
+    ['head', 'Git: vs HEAD'],
+  ];
 
+  function fetchGitDiff() {
+    const mode = changesSource;
+    const gen = ++gitDiffGen;
+    gitDiff = null;
+    loadDiff(mode).then((data) => {
+      if (gen !== gitDiffGen) return;
+      gitDiff = { mode, files: parseUnifiedDiff(data.diff), error: data.error || null };
+    }).catch((err) => {
+      if (gen !== gitDiffGen) return;
+      gitDiff = { mode, files: [], error: String(err?.message || err) };
+    }).finally(() => {
+      if (gen === gitDiffGen && activeTab === 'changes') render();
+    });
+  }
+
+  function setChangesSource(source) {
+    changesSource = source;
+    changesFile = null;
+    if (source !== 'session') fetchGitDiff();
+    render();
+  }
+
+  function changesToolbar() {
+    const bar = document.createElement('div');
+    bar.className = 'changes-toolbar';
+    const select = document.createElement('select');
+    select.className = 'changes-source';
+    select.setAttribute('aria-label', 'Changes source');
+    for (const [value, label] of CHANGE_SOURCES) {
+      if (value !== 'session' && !loadDiff) continue;
+      select.add(new Option(label, value, false, value === changesSource));
+    }
+    select.addEventListener('change', () => setChangesSource(select.value));
+    bar.append(select);
+    if (changesSource !== 'session') {
+      const refresh = document.createElement('button');
+      refresh.type = 'button';
+      refresh.className = 'btn';
+      refresh.textContent = 'Refresh';
+      refresh.addEventListener('click', () => { changesFile = null; fetchGitDiff(); render(); });
+      bar.append(refresh);
+    }
+    return bar;
+  }
+
+  // rows: [{ path, edits?, added, removed, counted, onClick }]
+  function renderChangesTable(rows, { showEdits }) {
     const table = document.createElement('table');
     table.className = 'changes-table';
     const head = table.createTHead().insertRow();
-    for (const label of ['File', 'Edits', '+', '-']) {
+    for (const label of showEdits ? ['File', 'Edits', '+', '-'] : ['File', '+', '-']) {
       const th = document.createElement('th');
       th.textContent = label;
       head.append(th);
@@ -411,17 +466,103 @@ export function initDetailPane({ panel, headerLabel, followLiveBtn, tabButtons, 
       const tr = tbody.insertRow();
       const file = cell(tr, row.path, 'changes-file');
       file.title = row.path;
-      cell(tr, String(row.edits));
+      if (showEdits) cell(tr, String(row.edits));
       cell(tr, row.counted ? `+${row.added}` : '-', 'changes-add');
       cell(tr, row.counted ? `-${row.removed}` : '-', 'changes-del');
-      tr.addEventListener('click', () => selectToolCall(currentContainer, row.lastId));
+      tr.addEventListener('click', row.onClick);
     }
     const total = table.createTFoot().insertRow();
     cell(total, `${rows.length} file${rows.length === 1 ? '' : 's'}`);
-    cell(total, String(rows.reduce((n, r) => n + r.edits, 0)));
+    if (showEdits) cell(total, String(rows.reduce((n, r) => n + r.edits, 0)));
     cell(total, `+${rows.reduce((n, r) => n + r.added, 0)}`, 'changes-add');
     cell(total, `-${rows.reduce((n, r) => n + r.removed, 0)}`, 'changes-del');
-    body.append(table);
+    return table;
+  }
+
+  function renderFileDiff(path, lines, { lastEditId = null, note = null } = {}) {
+    const bar = document.createElement('div');
+    bar.className = 'changes-toolbar';
+    const back = document.createElement('button');
+    back.type = 'button';
+    back.className = 'btn';
+    back.textContent = '\u2190 All files';
+    back.addEventListener('click', () => { changesFile = null; render(); });
+    bar.append(back);
+    if (lastEditId != null) {
+      const last = document.createElement('button');
+      last.type = 'button';
+      last.className = 'btn';
+      last.textContent = 'Last edit';
+      last.title = 'Open the most recent edit to this file as a tool call';
+      last.addEventListener('click', () => selectToolCall(currentContainer, lastEditId));
+      bar.append(last);
+    }
+    body.append(bar);
+    const title = document.createElement('div');
+    title.className = 'diff-meta';
+    title.textContent = path;
+    body.append(title);
+    if (note) line(note, 'detail-pane-note');
+    const wrap = document.createElement('div');
+    renderBody(wrap, { lines });
+    body.append(wrap);
+  }
+
+  function renderSessionChanges() {
+    const rows = collectChanges();
+    if (!rows.length) { line('No file changes yet.', 'detail-pane-note'); return; }
+    const calls = currentContainer
+      ? getToolCallRecords(currentContainer).filter((r) => r.status !== 'error').map((r) => ({ name: r.name, input: r.input }))
+      : [];
+    const folded = foldFileEdits(calls);
+    // Table counts are the net result (matching the drilled-in diff), not a
+    // sum over every edit call.
+    for (const row of rows) {
+      const segments = folded.get(row.path);
+      if (segments) ({ added: row.added, removed: row.removed } = countLines(segmentsToLines(segments)));
+    }
+    const current = changesFile && rows.find((r) => r.path === changesFile);
+    if (current) {
+      const segments = folded.get(current.path);
+      if (segments) {
+        const lines = segmentsToLines(segments);
+        const { added, removed } = countLines(lines);
+        renderFileDiff(current.path, lines, {
+          lastEditId: current.lastId,
+          note: `Net result of ${current.edits} edit${current.edits === 1 ? '' : 's'}: +${added} -${removed}. Rebuilt from the edit calls, not read from disk.`,
+        });
+        return;
+      }
+      changesFile = null;
+    }
+    for (const row of rows) {
+      row.onClick = () => {
+        if (folded.has(row.path)) { changesFile = row.path; render(); }
+        else selectToolCall(currentContainer, row.lastId);
+      };
+    }
+    body.append(renderChangesTable(rows, { showEdits: true }));
+  }
+
+  function renderGitChanges() {
+    if (!gitDiff || gitDiff.mode !== changesSource) {
+      line('Loading diff...', 'detail-pane-note');
+      return;
+    }
+    if (gitDiff.error) { line(`git diff failed: ${gitDiff.error}`, 'detail-pane-note'); return; }
+    if (!gitDiff.files.length) { line('No changes.', 'detail-pane-note'); return; }
+    const current = changesFile && gitDiff.files.find((f) => f.path === changesFile);
+    if (current) { renderFileDiff(current.path, current.lines); return; }
+    const rows = gitDiff.files.map((f) => ({ ...f, counted: true, onClick: () => { changesFile = f.path; render(); } }));
+    body.append(renderChangesTable(rows, { showEdits: false }));
+  }
+
+  function renderChangesTab() {
+    headerLabel.textContent = 'Changes';
+    body.textContent = '';
+    body.append(changesToolbar());
+    if (changesSource === 'session') renderSessionChanges();
+    else renderGitChanges();
   }
 
   // --- Tasks tab (folded in from the old standalone task-panel.js) ---
@@ -626,6 +767,9 @@ export function initDetailPane({ panel, headerLabel, followLiveBtn, tabButtons, 
       tasksToggleBtn.classList.toggle('on', name === 'tasks');
       tasksToggleBtn.setAttribute('aria-pressed', name === 'tasks' ? 'true' : 'false');
     }
+    // The workspace moves on while another tab is showing; a cached git diff
+    // would be stale on return.
+    if (name === 'changes' && changesSource !== 'session') fetchGitDiff();
     render();
   }
 
@@ -649,6 +793,10 @@ export function initDetailPane({ panel, headerLabel, followLiveBtn, tabButtons, 
     textView = null;
     activeTab = 'summary';
     tasks = [];
+    changesSource = 'session';
+    changesFile = null;
+    gitDiff = null;
+    gitDiffGen += 1;
     stopAgentPoll();
     agent = null;
     if (tasksTabButton) tasksTabButton.hidden = true;

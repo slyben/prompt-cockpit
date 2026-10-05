@@ -23,6 +23,7 @@ import { initGlobalStatsPanel } from '/global-stats-panel.js';
 import { initSettings, loadSettings, patchSettings } from '/settings.js';
 import { initTurnChart } from '/turn-chart.js';
 import { initDetailPane } from '/detail-pane.js';
+import { diffFromResponse } from '/changes-model.js';
 import { initSessionListPane } from '/session-list-pane.js';
 import { initQueuePanel } from '/queue-panel.js';
 import { createPromptHistoryStore, fuzzyScore } from '/prompt-history.js';
@@ -138,6 +139,11 @@ const detailPane = initDetailPane({
   onWidthChange: (width) => patchSettings({ detailPaneWidth: width }),
   tasksToggleBtn: taskPanelToggleBtn,
   getSubscription: () => currentSubscription,
+  loadDiff: async (mode) => {
+    if (!sessionId) return { diff: '', error: 'no live session' };
+    const res = await fetch(`/api/sessions/${sessionId}/diff?mode=${encodeURIComponent(mode)}`, { headers: { authorization: `Bearer ${sessionToken}` } });
+    return diffFromResponse(res);
+  },
 });
 document.getElementById('detailPaneCollapseBtn').addEventListener('click', () => settings.setDetailPaneEnabled(false));
 

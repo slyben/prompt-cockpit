@@ -424,7 +424,7 @@ const ACTIONS = {
   // internally, so this never returns stale data after one.
   'GET commands': async ({ row }) => row.handle.query.supportedCommands(),
 
-  'GET diff': async ({ row }) => workspaceDiff(row.cwd),
+  'GET diff': async ({ row, url }) => workspaceDiff(row.cwd, url.searchParams.get('mode') || undefined),
 
   // Backs the activityBar's debug-capture button (app.js) - a live
   // snapshot of exactly the internal counters a stuck spinner report
