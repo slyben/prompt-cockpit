@@ -63,19 +63,23 @@ test('costForUsage prefers a stamped Grok cost over the rate table', () => {
 
 test('costForUsage prices grok models from pricing_grok.json, not pricing.json', () => {
   const info = costForUsage('grok-4.6', {
-    input_tokens: 1_000_000,
-    output_tokens: 1_000_000,
-    cache_read_input_tokens: 1_000_000,
-    cache_creation: { ephemeral_5m_input_tokens: 1_000_000 },
+    input_tokens: 50_000,
+    output_tokens: 50_000,
+    cache_read_input_tokens: 50_000,
+    cache_creation: { ephemeral_5m_input_tokens: 50_000 },
   });
-  // grok-4.6 short-context (src/pricing_grok.json): input 2, output 6, cache_read 0.5, write = input
-  assert.equal(info.cost, 2 + 6 + 0.5 + 2);
-  assert.equal(info.inputTokens, 1_000_000);
-  assert.equal(info.outputTokens, 1_000_000);
-  assert.equal(info.readTokens, 1_000_000);
-  assert.equal(info.writeTokens, 1_000_000);
+  // grok-4.6 short-context (src/pricing_grok.json): input 2, output 6, cache_read 0.5, write = input; 150k prompt stays under the 200k long_context threshold
+  assert.ok(Math.abs(info.cost - 0.05 * (2 + 6 + 0.5 + 2)) < 1e-9);
+  assert.equal(info.inputTokens, 50_000);
+  assert.equal(info.outputTokens, 50_000);
+  assert.equal(info.readTokens, 50_000);
+  assert.equal(info.writeTokens, 50_000);
   // grok-4.7 launched at the same short-context rates as grok-4.6.
-  assert.equal(costForUsage('grok-4.7', { input_tokens: 1_000_000, output_tokens: 0 }).cost, 2);
+  assert.equal(costForUsage('grok-4.7', { input_tokens: 190_000, output_tokens: 0 }).cost, 0.38);
+});
+
+test('costForUsage doubles grok rates once the prompt reaches the 200k long_context tier', () => {
+  assert.equal(costForUsage('grok-4.7', { input_tokens: 1_000_000, output_tokens: 0 }).cost, 4);
 });
 
 test('costForUsage prices codex models from pricing_codex.json', () => {
@@ -259,4 +263,16 @@ test('createUsageAccumulator buckets cost per tool, split evenly across a turn\'
   for (let i = 1; i < snap.perTool.length; i++) {
     assert.ok(snap.perTool[i - 1].costUsd >= snap.perTool[i].costUsd);
   }
+});
+
+test('costForUsage bills a whole call at long_context rates once the prompt exceeds the threshold', () => {
+  // haiku-5-5: base in 0.1 / out 0.5 / read 0.01; over 100k prompt tokens: in 0.5 / out 2.5 / read 0.05
+  const short = costForUsage('claude-haiku-5-5', { input_tokens: 50_000, output_tokens: 1_000_000, cache_read_input_tokens: 50_000 });
+  assert.ok(Math.abs(short.cost - (0.005 + 0.5 + 0.0005)) < 1e-9); // exactly 100k: still base tier
+  const long = costForUsage('claude-haiku-5-5', { input_tokens: 50_001, output_tokens: 1_000_000, cache_read_input_tokens: 50_000 });
+  assert.ok(Math.abs(long.cost - (50_001 * 0.5 / 1e6 + 2.5 + 50_000 * 0.05 / 1e6)) < 1e-9);
+});
+
+test('costForUsage prices claude-sonnet-5-5 cache reads at 0.05x input', () => {
+  assert.equal(costForUsage('claude-sonnet-5-5', { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 1_000_000 }).cost, 0.1);
 });

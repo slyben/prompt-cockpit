@@ -54,8 +54,14 @@ export function costForUsage(model, usage) {
   // of treating "no rates" as "nothing to report").
   if (!rates) return { cost: null, inputTokens: input, outputTokens: output, writeTokens, readTokens: read };
 
-  const cost = (input * rates.input + output * rates.output +
-    write5m * rates.cache_write_5m + write1h * rates.cache_write_1h + read * rates.cache_read) / 1e6;
+  // Some models bill a whole call at higher rates once its prompt crosses a
+  // size threshold (pricing.json's optional `long_context` block).
+  const lc = rates.long_context;
+  const promptTokens = input + writeTokens + read;
+  const r = lc && promptTokens > lc.threshold ? lc : rates;
+
+  const cost = (input * r.input + output * r.output +
+    write5m * r.cache_write_5m + write1h * r.cache_write_1h + read * r.cache_read) / 1e6;
 
   return { cost, inputTokens: input, outputTokens: output, writeTokens, readTokens: read };
 }
