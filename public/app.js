@@ -1095,9 +1095,10 @@ function applyModelBadge(session) {
     // Three distinct thinking states, not two - 0 is a real explicit "Off"
     // (falsy, can't share a branch with "unset"); null/undefined is
     // "Default", resolving model-dependently (adaptive on for Opus5/
-    // Sonnet5/Fable5, off on older models). Unset effort isn't "no effort"
-    // either - the SDK still picks a real tier ('high'), shown instead.
-    parts.push(`${effortLabel('claude', session.effort || 'high')} effort`);
+    // Sonnet5/Fable5, off on older models). Unset effort means Claude Code
+    // picks a per-model tier the cockpit can't see, so say "default" rather
+    // than guess one.
+    parts.push(`${session.effort ? effortLabel('claude', session.effort) : 'default'} effort`);
     // Off can be stored yet not honored (e.g. Sonnet 5.5 at xhigh, or a model
     // that always thinks) - say so instead of claiming it's off.
     const offIgnored = session.maxThinkingTokens === 0 && offBlockedReason(currentModel, session.effort) != null;
@@ -1298,6 +1299,9 @@ function hasDynamicModelCatalog(provider) {
     || (startModelCatalogProvider === provider && Array.isArray(startModelCatalog) && startModelCatalog.length > 0);
 }
 
+// Shared by the launcher's and the Settings modal's Claude effort selects.
+const CLAUDE_EFFORT_TITLE = "Claude's reasoning effort for this session - low is cheaper and faster, high/xhigh/max spend more on thinking depth and thoroughness. Default sends no effort, so Claude Code picks: medium on Opus 5.5, Sonnet 5.5 and Haiku 5.5, xhigh on Opus 4.7, high on other models (your Claude Code effort setting can override this).";
+
 function fillSettingsEffortSelect(provider) {
   // thinkingBudget is Claude-only today (provider-registry.js's
   // capabilities) - it's what distinguishes "this provider's effort select
@@ -1327,7 +1331,7 @@ function fillSettingsEffortSelect(provider) {
       ? [{ value: '', label: 'Default' }, ...modelEfforts.map((value) => ({ value, label: String(value) }))]
       : [];
   const defaultTitle = thinkingBudget
-    ? "Claude's reasoning effort for this session - low is cheaper and faster, high/xhigh/max spend more on thinking depth and thoroughness. Default leaves it up to the model."
+    ? CLAUDE_EFFORT_TITLE
     : Array.isArray(options)
       ? 'Grok reasoning effort. Low is cheaper and faster. High / Extra high spend more on reasoning.'
       : `${providerCatalog.label(provider)} reasoning effort for this session.`;
@@ -2045,6 +2049,7 @@ function fillStartEffort() {
   startEffortSelect.hidden = generic && !genericEfforts.length;
   startClaudeEffortSelect.hidden = !thinkingBudget;
   if (thinkingBudget) {
+    startClaudeEffortSelect.title = CLAUDE_EFFORT_TITLE;
     startClaudeEffortSelect.innerHTML = '';
     for (const opt of (options || [])) {
       const option = document.createElement('option');

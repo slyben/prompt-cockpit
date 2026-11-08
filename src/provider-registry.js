@@ -47,14 +47,15 @@ const GROK_EFFORT_OPTIONS = [
 ];
 // Claude's effort ladder (Agent SDK's EffortLevel) is one level wider
 // than Grok's ('max') and needs a blank "Default" option since effort
-// is optional for Claude (unset = model/SDK default), unlike Grok's
-// always-concrete spawn-time flag. 'high' is the SDK's documented
-// default EffortLevel.
+// is optional for Claude (unset = Claude Code picks), unlike Grok's
+// always-concrete spawn-time flag. No tier is starred: Claude Code's
+// default varies per model (medium on Opus 5.5 / Sonnet 5.5 / Haiku 5.5,
+// xhigh on Opus 4.7, high elsewhere) and user settings can override it.
 const CLAUDE_EFFORT_OPTIONS = [
-  { value: '', label: 'Default' },
+  { value: '', label: 'Default (model decides)' },
   { value: 'low', label: 'Low' },
   { value: 'medium', label: 'Medium' },
-  { value: 'high', label: 'High *' },
+  { value: 'high', label: 'High' },
   { value: 'xhigh', label: 'Extra high' },
   { value: 'max', label: 'Max' },
 ];

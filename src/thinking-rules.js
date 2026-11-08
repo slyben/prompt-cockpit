@@ -18,7 +18,6 @@ const AT_MOST_HIGH = Object.freeze({ off: 'atMostHigh', sizedBudgets: false });
 const NEVER = Object.freeze({ off: 'never', sizedBudgets: false });
 
 const OFF_OK_EFFORTS = new Set(['low', 'medium', 'high']);
-const DEFAULT_EFFORT = 'high';
 
 // 'anthropic.claude-sonnet-5-5', 'claude-sonnet-5-5[1m]', 'claude-haiku-4-5-20251001',
 // 'claude-opus-4-5@20251101' all reduce to their bare family id.
@@ -42,13 +41,14 @@ export function thinkingRulesFor(model) {
 }
 
 // Why Off can't be chosen right now, or null when it can. `effort` unset means
-// the SDK default ('high').
+// Claude Code's model default, which is medium/high on every atMostHigh model,
+// so it never blocks Off.
 export function offBlockedReason(model, effort) {
   const rules = thinkingRulesFor(model);
   if (rules.off === 'never') {
     return 'This model always thinks - lower the effort to spend less on thinking.';
   }
-  if (rules.off === 'atMostHigh' && !OFF_OK_EFFORTS.has(effort || DEFAULT_EFFORT)) {
+  if (rules.off === 'atMostHigh' && effort && !OFF_OK_EFFORTS.has(effort)) {
     return 'Off is ignored at Extra high / Max effort on this model - pick High or lower first.';
   }
   return null;

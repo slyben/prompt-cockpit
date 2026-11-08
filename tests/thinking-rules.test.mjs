@@ -44,7 +44,7 @@ test('unknown or unresolved models stay permissive', () => {
   }
 });
 
-test('offBlockedReason: Sonnet 5.5 blocks Off only at xhigh/max (unset effort = high)', () => {
+test('offBlockedReason: Sonnet 5.5 blocks Off only at xhigh/max (unset effort = model default, never blocks)', () => {
   assert.equal(offBlockedReason('claude-sonnet-5-5', null), null);
   assert.equal(offBlockedReason('claude-sonnet-5-5', 'low'), null);
   assert.equal(offBlockedReason('claude-sonnet-5-5', 'high'), null);
