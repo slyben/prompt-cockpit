@@ -12,28 +12,62 @@ if ($LASTEXITCODE -ne 0) {
     exit 1
 }
 
-$port = if ($env:PORT) { [int]$env:PORT } else { 4317 }
-$listener = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
-if ($listener) {
-    $owner = Get-CimInstance Win32_Process -Filter "ProcessId=$($listener.OwningProcess)"
-    if ($owner -and $owner.Name -eq 'node.exe' -and $owner.CommandLine -match 'src[\\/]server\.js') {
-        Write-Host "[INFO] Replacing existing prompt-cockpit server on port $port (PID $($owner.ProcessId))."
-        taskkill /PID $owner.ProcessId /T /F 2>$null | Out-Null
-        $deadline = (Get-Date).AddSeconds(5)
-        while ((Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue) -and ((Get-Date) -lt $deadline)) {
-            Start-Sleep -Milliseconds 250
-        }
-    }
-    elseif ($owner) {
-        Write-Host "[ERROR] Port $port is held by $($owner.Name) (PID $($owner.ProcessId)) - stop it and retry."
-        exit 1
-    }
-}
-
 Add-Type -TypeDefinition @"
 using System;
 using System.ComponentModel;
 using System.Runtime.InteropServices;
+
+public static class RLProcessInfo {
+    [StructLayout(LayoutKind.Sequential)]
+    struct BasicInformation {
+        public IntPtr ExitStatus, PebBaseAddress, AffinityMask, BasePriority, UniqueProcessId, InheritedFromUniqueProcessId;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern IntPtr OpenProcess(uint access, bool inherit, int pid);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool CloseHandle(IntPtr handle);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool IsWow64Process(IntPtr process, out bool wow64);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool ReadProcessMemory(IntPtr process, IntPtr address, byte[] buffer, IntPtr size, out IntPtr read);
+    [DllImport("ntdll.dll")]
+    static extern int NtQueryInformationProcess(IntPtr process, int infoClass, ref BasicInformation info, int size, out int returned);
+
+    const uint QUERY_INFORMATION = 0x0400, VM_READ = 0x0010;
+    const int PEB_PROCESS_PARAMETERS = 0x20, PARAMETERS_CURRENT_DIRECTORY = 0x38;
+
+    static byte[] Read(IntPtr process, IntPtr address, int size) {
+        byte[] buffer = new byte[size];
+        IntPtr read;
+        if (!ReadProcessMemory(process, address, buffer, new IntPtr(size), out read) || read.ToInt64() != size) throw new Win32Exception();
+        return buffer;
+    }
+
+    // x64 only: the offsets above are for 64-bit PEB layouts.
+    public static string GetCurrentDirectory(int pid) {
+        if (IntPtr.Size != 8) throw new NotSupportedException("launcher is not running as 64-bit PowerShell");
+        IntPtr process = OpenProcess(QUERY_INFORMATION | VM_READ, false, pid);
+        if (process == IntPtr.Zero) throw new Win32Exception();
+        try {
+            bool wow64;
+            if (!IsWow64Process(process, out wow64)) throw new Win32Exception();
+            if (wow64) throw new NotSupportedException("process is 32-bit");
+            BasicInformation info = new BasicInformation();
+            int returned;
+            int status = NtQueryInformationProcess(process, 0, ref info, Marshal.SizeOf(typeof(BasicInformation)), out returned);
+            if (status != 0) throw new Win32Exception(string.Format("NtQueryInformationProcess failed (0x{0:X8})", status));
+            IntPtr parameters = new IntPtr(BitConverter.ToInt64(Read(process, info.PebBaseAddress + PEB_PROCESS_PARAMETERS, 8), 0));
+            byte[] dosPath = Read(process, parameters + PARAMETERS_CURRENT_DIRECTORY, 16);
+            int length = BitConverter.ToUInt16(dosPath, 0);
+            IntPtr buffer = new IntPtr(BitConverter.ToInt64(dosPath, 8));
+            return System.Text.Encoding.Unicode.GetString(Read(process, buffer, length));
+        }
+        finally {
+            CloseHandle(process);
+        }
+    }
+}
 
 public static class RLKillOnCloseJob {
     [StructLayout(LayoutKind.Sequential)]
@@ -79,6 +113,56 @@ public static class RLKillOnCloseJob {
 }
 "@
 
+$port = 4317
+if ($env:PORT -and (-not [int]::TryParse($env:PORT, [ref]$port) -or $port -lt 1 -or $port -gt 65535)) {
+    Write-Host "[ERROR] PORT must be a number from 1 to 65535 (got '$env:PORT')."
+    exit 1
+}
+
+function Get-PortOwnerPids {
+    @(Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue |
+        Select-Object -ExpandProperty OwningProcess -Unique)
+}
+
+$repoRoot = (Resolve-Path $RepoPath).Path.TrimEnd('\')
+$staleServers = @()
+foreach ($ownerPid in Get-PortOwnerPids) {
+    $owner = Get-CimInstance Win32_Process -Filter "ProcessId=$ownerPid"
+    if (-not $owner) {
+        continue
+    }
+    if (-not ($owner.Name -eq 'node.exe' -and $owner.CommandLine -match 'src[\\/]server\.js')) {
+        Write-Host "[ERROR] Port $port is held by $($owner.Name) (PID $ownerPid) - stop it and retry."
+        exit 1
+    }
+    try {
+        $ownerDir = [RLProcessInfo]::GetCurrentDirectory($ownerPid).TrimEnd('\')
+    }
+    catch {
+        Write-Host "[ERROR] Port $port is held by node src/server.js (PID $ownerPid), but its working directory could not be read ($($_.Exception.Message)) - stop it and retry."
+        exit 1
+    }
+    if ($ownerDir -ne $repoRoot) {
+        Write-Host "[ERROR] Port $port is held by node src/server.js from $ownerDir (PID $ownerPid), not $repoRoot - stop it and retry."
+        exit 1
+    }
+    $staleServers += $ownerPid
+}
+
+foreach ($stalePid in $staleServers) {
+    Write-Host "[INFO] Replacing existing prompt-cockpit server on port $port (PID $stalePid)."
+    taskkill /PID $stalePid /T /F 2>$null | Out-Null
+}
+$deadline = (Get-Date).AddSeconds(5)
+while ((Get-PortOwnerPids).Count -gt 0 -and ((Get-Date) -lt $deadline)) {
+    Start-Sleep -Milliseconds 250
+}
+$remaining = Get-PortOwnerPids
+if ($remaining.Count -gt 0) {
+    Write-Host "[ERROR] Port $port is still in use (PID $($remaining -join ', ')) - stop it and retry."
+    exit 1
+}
+
 $psi = New-Object System.Diagnostics.ProcessStartInfo
 $psi.FileName = "cmd.exe"
 # Holds at set /p until the launcher writes a line, so npm cannot spawn
@@ -117,7 +201,8 @@ try {
         [RLKillOnCloseJob]::Assign($proc.Handle)
     }
     catch {
-        Write-Host "[WARN] Could not tie the server to this window ($($_.Exception.Message)); closing the window may leave it running."
+        Write-Host "[ERROR] Could not create the kill-on-close job ($($_.Exception.Message)) - not starting the server."
+        exit 1
     }
     $proc.StandardInput.WriteLine()
     $proc.StandardInput.Close()
