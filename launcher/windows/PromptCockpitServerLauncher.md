@@ -16,10 +16,14 @@ Ctrl+C.
    something else, its working directory can't be read, or the port is
    still in use 5s after the kill.
 4. Runs `npm start` inside a kill-on-close Windows Job Object (aborts if the
-   job can't be created), waits for a URL in its output (up to 60s, then
-   keeps waiting).
-5. Opens the URL with the OS default handler (outside the job, so the
+   job can't be created), waits for the server's
+   `prompt-cockpit listening on <url>` line (up to 60s, then keeps waiting).
+   Other URLs in the output are ignored.
+5. Opens that URL with the OS default handler (outside the job, so the
    browser is unaffected).
 6. On Ctrl+C, kills the tracked process tree and frees the port. If the
    launcher exits any other way (window closed, crash, killed), Windows
    closes the job and kills the server tree anyway.
+
+The `.bat` exits with the launcher's exit code, so callers see `1` when it
+aborts with an `[ERROR]`.

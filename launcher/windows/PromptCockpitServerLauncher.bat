@@ -11,6 +11,6 @@ if not exist "%REPO_PATH%" (
 )
 
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0PromptCockpitServerLauncher.ps1" -RepoPath "%REPO_PATH%"
+set "RC=%ERRORLEVEL%"
 
-endlocal
-exit /b 0
+endlocal & exit /b %RC%

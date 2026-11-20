@@ -223,13 +223,15 @@ $proc = New-Object System.Diagnostics.Process
 $proc.StartInfo = $psi
 
 $global:RLServerUrl = $null
-$global:RLPattern = 'https?://\S+'
+# Matches only the startup line printed by src/server.js, so a URL in an npm
+# notice or warning can't be opened instead of the tokenised cockpit URL.
+$global:RLPattern = 'prompt-cockpit listening on (https?://\S+)'
 
 $stdHandler = {
     if ($null -ne $EventArgs.Data) {
         Write-Host $EventArgs.Data
         if ((-not $global:RLServerUrl) -and ($EventArgs.Data -match $global:RLPattern)) {
-            $global:RLServerUrl = $Matches[0]
+            $global:RLServerUrl = $Matches[1]
         }
     }
 }
