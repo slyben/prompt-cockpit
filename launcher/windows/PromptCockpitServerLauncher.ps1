@@ -121,7 +121,8 @@ public static class RLKillOnCloseJob {
 }
 "@
 
-# Mirrors src/server.js (Number(PORT) || 4317): blank or 0 means the default.
+# Like src/server.js (Number(PORT) || 4317), blank or 0 means the default;
+# unlike it, other non-integer values abort instead of silently using 4317.
 $port = 4317
 $portText = "$env:PORT".Trim()
 if ($portText) {

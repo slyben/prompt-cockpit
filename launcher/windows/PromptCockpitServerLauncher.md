@@ -5,8 +5,8 @@ Ctrl+C.
 
 ## Behavior
 
-1. Kills any leftover process tracked from a previous run (in case the
-   window was force-closed instead of Ctrl+C'd).
+1. Kills any other running instance of this launcher (any `powershell.exe`
+   whose command line contains the script name) and its process tree.
 2. `git pull`. Aborts if it fails (conflicts/uncommitted changes).
 3. Checks every listener on the server port (`PORT`; blank or 0 means 4317,
    as in the server; aborts if it is not a whole number up to 65535). Kills a
