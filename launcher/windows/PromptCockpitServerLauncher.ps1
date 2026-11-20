@@ -206,15 +206,17 @@ if ($remaining.Count -gt 0) {
 
 $psi = New-Object System.Diagnostics.ProcessStartInfo
 $psi.FileName = "cmd.exe"
-# Holds at set /p until the launcher writes a line, so npm cannot spawn
-# before cmd is in the kill-on-close job (children inherit the job).
-$psi.Arguments = "/c set /p RL_GATE=& npm start"
+# Holds at set /p until the launcher writes "go", so npm cannot spawn before
+# cmd is in the kill-on-close job (children inherit the job). If the launcher
+# dies first, set /p hits EOF, RL_GATE stays undefined and npm never starts.
+$psi.Arguments = "/c set /p RL_GATE=& if defined RL_GATE npm start"
 $psi.RedirectStandardInput = $true
 $psi.RedirectStandardOutput = $true
 $psi.RedirectStandardError = $true
 $psi.UseShellExecute = $false
 $psi.CreateNoWindow = $true
-$psi.WorkingDirectory = $RepoPath
+$psi.WorkingDirectory = $repoRoot
+$psi.EnvironmentVariables.Remove('RL_GATE')
 
 $proc = New-Object System.Diagnostics.Process
 $proc.StartInfo = $psi
@@ -245,7 +247,7 @@ try {
         Write-Host "[ERROR] Could not create the kill-on-close job ($($_.Exception.Message)) - not starting the server."
         exit 1
     }
-    $proc.StandardInput.WriteLine()
+    $proc.StandardInput.WriteLine('go')
     $proc.StandardInput.Close()
 
     $deadline = (Get-Date).AddSeconds(60)
