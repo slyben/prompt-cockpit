@@ -5,7 +5,15 @@ Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" |
     Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -like "*$scriptName*" } |
     ForEach-Object { taskkill /PID $_.ProcessId /T /F 2>$null | Out-Null }
 
-Set-Location $RepoPath
+try {
+    $repoRoot = (Resolve-Path -LiteralPath $RepoPath -ErrorAction Stop).Path.TrimEnd('\')
+}
+catch {
+    Write-Host "[ERROR] RepoPath '$RepoPath' could not be resolved ($($_.Exception.Message))."
+    exit 1
+}
+
+Set-Location -LiteralPath $repoRoot
 git pull
 if ($LASTEXITCODE -ne 0) {
     Write-Host "[ERROR] git pull failed - resolve manually in $RepoPath."
@@ -113,18 +121,48 @@ public static class RLKillOnCloseJob {
 }
 "@
 
+# Mirrors src/server.js (Number(PORT) || 4317): blank or 0 means the default.
 $port = 4317
-if ($env:PORT -and (-not [int]::TryParse($env:PORT, [ref]$port) -or $port -lt 1 -or $port -gt 65535)) {
-    Write-Host "[ERROR] PORT must be a number from 1 to 65535 (got '$env:PORT')."
-    exit 1
+$portText = "$env:PORT".Trim()
+if ($portText) {
+    $parsedPort = 0
+    if (-not [int]::TryParse($portText, [ref]$parsedPort) -or $parsedPort -lt 0 -or $parsedPort -gt 65535) {
+        Write-Host "[ERROR] PORT must be a number from 1 to 65535 (got '$env:PORT')."
+        exit 1
+    }
+    if ($parsedPort -ne 0) {
+        $port = $parsedPort
+    }
 }
 
 function Get-PortOwnerPids {
-    @(Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue |
-        Select-Object -ExpandProperty OwningProcess -Unique)
+    try {
+        $listeners = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction Stop
+    }
+    catch {
+        if ($_.CategoryInfo.Category -eq 'ObjectNotFound') {
+            return @()
+        }
+        Write-Host "[ERROR] Could not check whether port $port is in use ($($_.Exception.Message))."
+        exit 1
+    }
+    @($listeners | Select-Object -ExpandProperty OwningProcess -Unique)
 }
 
-$repoRoot = (Resolve-Path $RepoPath).Path.TrimEnd('\')
+function Get-ProcessDirectory([int]$ProcessId) {
+    try {
+        return [RLProcessInfo]::GetCurrentDirectory($ProcessId).TrimEnd('\')
+    }
+    catch {
+        # A server killed by an older launcher's job may still be tearing down.
+        Start-Sleep -Seconds 1
+        if (-not (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)) {
+            return $null
+        }
+        return [RLProcessInfo]::GetCurrentDirectory($ProcessId).TrimEnd('\')
+    }
+}
+
 $staleServers = @()
 foreach ($ownerPid in Get-PortOwnerPids) {
     $owner = Get-CimInstance Win32_Process -Filter "ProcessId=$ownerPid"
@@ -136,11 +174,14 @@ foreach ($ownerPid in Get-PortOwnerPids) {
         exit 1
     }
     try {
-        $ownerDir = [RLProcessInfo]::GetCurrentDirectory($ownerPid).TrimEnd('\')
+        $ownerDir = Get-ProcessDirectory $ownerPid
     }
     catch {
         Write-Host "[ERROR] Port $port is held by node src/server.js (PID $ownerPid), but its working directory could not be read ($($_.Exception.Message)) - stop it and retry."
         exit 1
+    }
+    if ($null -eq $ownerDir) {
+        continue
     }
     if ($ownerDir -ne $repoRoot) {
         Write-Host "[ERROR] Port $port is held by node src/server.js from $ownerDir (PID $ownerPid), not $repoRoot - stop it and retry."
